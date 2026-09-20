@@ -1,0 +1,61 @@
+/* アプリ全体の三段レイアウトと、執筆中に視線を妨げない共通スタイルを定義する。 */
+:root {
+  font-family: "Yu Gothic UI", "Meiryo", sans-serif;
+  color: #26323a;
+  background: #faf9f6;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { width: 100%; height: 100%; margin: 0; }
+button { font: inherit; }
+
+.app-shell { display: flex; flex-direction: column; width: 100%; height: 100%; }
+.toolbar {
+  height: 54px;
+  min-height: 54px;
+  padding: 0 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  background: #f3f3f0;
+  border-bottom: 1px solid #e4e3df;
+}
+.document-title { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
+.dirty-indicator { flex: none; color: #8b6340; font-size: 12px; }
+.actions { flex: none; display: flex; align-items: center; gap: 4px; }
+.actions button {
+  min-width: 54px;
+  padding: 6px 10px;
+  color: #34444d;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.actions button:hover:not(:disabled) { background: #e6e8e6; }
+.actions button:focus-visible { outline: 2px solid #6e929e; outline-offset: 1px; }
+.actions button:disabled { opacity: .45; cursor: default; }
+.writing-area { flex: 1; min-height: 0; overflow: hidden; }
+.editor-host { height: 100%; }
+.status-bar {
+  height: 30px;
+  min-height: 30px;
+  padding: 5px 20px;
+  color: #68737a;
+  background: #f5f5f2;
+  border-top: 1px solid #e8e8e4;
+  text-align: right;
+  font-size: 12px;
+}
+
+@media (max-width: 650px) {
+  .toolbar { padding: 0 10px; gap: 6px; }
+  .actions button { min-width: 45px; padding: 6px; }
+  .editor-host .cm-content { padding: 28px 22px 50px; }
+}

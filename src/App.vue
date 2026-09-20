@@ -31,9 +31,12 @@ const dirty = ref(false)
 const charCount = ref(0)
 const busy = ref(false)
 const currentFile = ref<TextFile | null>(null)
+const maximized = ref(false)
+const appWindow = getCurrentWindow()
 // 保存先が未定なら、上部には新規文書の名前を表示する。
 const displayName = computed(() => path.value ? fileName(path.value) : '無題')
 let unlistenClose: (() => void) | undefined
+let unlistenResize: (() => void) | undefined
 
 /** CodeMirror から受けた本文と文字数で表示を更新し、保存済み本文との差から未保存状態を判定する。 */
 function onChange(text: string, count: number): void {
@@ -113,6 +116,39 @@ async function saveDocument(): Promise<void> {
   }
 }
 
+/** ウィンドウの最大化状態を取得し、タイトルバーのボタン表示を更新する。 */
+async function updateMaximized(): Promise<void> {
+  maximized.value = await appWindow.isMaximized()
+}
+
+/** ウィンドウを最小化する。 */
+async function minimizeWindow(): Promise<void> {
+  try {
+    await appWindow.minimize()
+  } catch (error) {
+    await showError('ウィンドウの最小化', error)
+  }
+}
+
+/** 最大化と元のサイズを切り替え、ボタン表示を現在の状態に合わせる。 */
+async function toggleMaximizeWindow(): Promise<void> {
+  try {
+    await appWindow.toggleMaximize()
+    await updateMaximized()
+  } catch (error) {
+    await showError('ウィンドウのサイズ変更', error)
+  }
+}
+
+/** 通常の終了要求を送り、既存の未保存確認を通して閉じる。 */
+async function closeWindow(): Promise<void> {
+  try {
+    await appWindow.close()
+  } catch (error) {
+    await showError('ウィンドウを閉じる操作', error)
+  }
+}
+
 /** ファイル操作の Ctrl ショートカットを処理し、ブラウザ既定の動作を抑止する。Undo/Redo は CodeMirror に任せる。 */
 function onKeydown(event: KeyboardEvent): void {
   if (event.ctrlKey && !event.altKey && !event.shiftKey) {
@@ -133,7 +169,7 @@ function onKeydown(event: KeyboardEvent): void {
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
   // 保存処理中や未保存のまま終了しないよう、終了要求を必要に応じて取り消す。
-  unlistenClose = await getCurrentWindow().onCloseRequested(async (event) => {
+  unlistenClose = await appWindow.onCloseRequested(async (event) => {
     if (busy.value) {
       event.preventDefault()
       return
@@ -141,29 +177,46 @@ onMounted(async () => {
     if (!dirty.value) return
     // Tauri の終了要求は先に取り消し、確認後に明示的にウィンドウを破棄する。
     event.preventDefault()
-    if (await confirmDiscard()) await getCurrentWindow().destroy()
+    if (await confirmDiscard()) await appWindow.destroy()
   })
+  unlistenResize = await appWindow.onResized(() => { void updateMaximized() })
+  await updateMaximized()
 })
 
 // 画面の破棄時に購読を解除し、同じ操作が重複して処理されることを防ぐ。
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
   unlistenClose?.()
+  unlistenResize?.()
 })
 </script>
 
 <template>
   <main class="app-shell">
-    <header class="toolbar">
-      <div class="document-title" :title="path ?? '新規文書'">
-        <span class="file-name">{{ displayName }}</span>
-        <span v-if="dirty" class="dirty-indicator" aria-label="未保存">未保存</span>
-      </div>
+    <header class="titlebar">
       <nav class="actions" aria-label="ファイル操作">
         <button type="button" :disabled="busy" title="新規作成 (Ctrl+N)" @click="newDocument">新規</button>
         <button type="button" :disabled="busy" title="ファイルを開く (Ctrl+O)" @click="openDocument">開く</button>
         <button type="button" :disabled="busy" title="保存 (Ctrl+S)" @click="saveDocument">保存</button>
       </nav>
+      <div class="titlebar-drag-region" data-tauri-drag-region :title="path ?? '新規文書'">
+        <div class="document-title">
+          <span class="file-name">{{ displayName }}</span>
+          <span v-if="dirty" class="dirty-indicator" aria-label="未保存">未保存</span>
+        </div>
+      </div>
+      <div class="window-controls" aria-label="ウィンドウ操作">
+        <button type="button" aria-label="最小化" title="最小化" @click="minimizeWindow">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 12.5h10" /></svg>
+        </button>
+        <button type="button" :aria-label="maximized ? '元に戻す' : '最大化'" :title="maximized ? '元に戻す' : '最大化'" @click="toggleMaximizeWindow">
+          <svg v-if="maximized" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 5V3h8v8h-2M3 5h8v8H3z" /></svg>
+          <svg v-else viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3h10v10H3z" /></svg>
+        </button>
+        <button type="button" class="window-close" aria-label="閉じる" title="閉じる" @click="closeWindow">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3l10 10M13 3L3 13" /></svg>
+        </button>
+      </div>
     </header>
     <section class="writing-area" aria-label="本文編集領域">
       <EditorPane ref="editor" @change="onChange" />

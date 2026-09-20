@@ -13,6 +13,7 @@
     "windows": [
       {
         "title": "小説エディタ",
+        "decorations": false,
         "width": 980,
         "height": 720,
         "minWidth": 560,

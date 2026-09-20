@@ -13,24 +13,25 @@ html, body, #app { width: 100%; height: 100%; margin: 0; }
 button { font: inherit; }
 
 .app-shell { display: flex; flex-direction: column; width: 100%; height: 100%; }
-.toolbar {
-  height: 54px;
-  min-height: 54px;
-  padding: 0 20px;
-  display: flex;
+.titlebar {
+  height: 40px;
+  min-height: 40px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 18px;
   background: #f3f3f0;
   border-bottom: 1px solid #e4e3df;
+  user-select: none;
 }
-.document-title { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.titlebar-drag-region { min-width: 0; height: 100%; display: flex; align-items: center; justify-content: center; }
+.document-title { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 12px; pointer-events: none; }
 .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
 .dirty-indicator { flex: none; color: #8b6340; font-size: 12px; }
-.actions { flex: none; display: flex; align-items: center; gap: 4px; }
+.actions { display: flex; align-items: center; gap: 2px; padding-left: 12px; }
 .actions button {
-  min-width: 54px;
-  padding: 6px 10px;
+  min-width: 48px;
+  height: 30px;
+  padding: 0 8px;
   color: #34444d;
   background: transparent;
   border: 1px solid transparent;
@@ -41,6 +42,22 @@ button { font: inherit; }
 .actions button:hover:not(:disabled) { background: #e6e8e6; }
 .actions button:focus-visible { outline: 2px solid #6e929e; outline-offset: 1px; }
 .actions button:disabled { opacity: .45; cursor: default; }
+.window-controls { height: 100%; display: flex; }
+.window-controls button {
+  width: 46px;
+  height: 100%;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  color: #34444d;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.window-controls button:hover { background: #e6e8e6; }
+.window-controls button:focus-visible { outline: 2px solid #6e929e; outline-offset: -3px; }
+.window-controls .window-close:hover { color: white; background: #c42b1c; }
+.window-controls svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.2; }
 .writing-area { flex: 1; min-height: 0; overflow: hidden; }
 .editor-host { height: 100%; }
 .status-bar {
@@ -55,7 +72,8 @@ button { font: inherit; }
 }
 
 @media (max-width: 650px) {
-  .toolbar { padding: 0 10px; gap: 6px; }
-  .actions button { min-width: 45px; padding: 6px; }
+  .actions { padding-left: 4px; }
+  .actions button { min-width: 42px; padding: 0 5px; }
+  .window-controls button { width: 40px; }
   .editor-host .cm-content { padding: 28px 22px 50px; }
 }

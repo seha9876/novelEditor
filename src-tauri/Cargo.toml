@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "A focused text editor for novel writing"
 authors = ["Novel Editor"]
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/seha9876/novelEditor"
 
 [lib]
 name = "novel_editor_lib"

@@ -10,6 +10,9 @@
     "lint": "eslint .",
     "check": "pnpm run typecheck && pnpm run lint",
     "build": "pnpm run typecheck && vite build",
+    "notices:js": "node scripts/generate-js-notices.mjs",
+    "notices:rust": "set CARGO_NET_OFFLINE=false&& cargo about generate --locked --fail --target x86_64-pc-windows-msvc --manifest-path src-tauri/Cargo.toml src-tauri/about.hbs --output-file src-tauri/THIRD_PARTY_NOTICES_RUST.html",
+    "notices": "pnpm run notices:js && pnpm run notices:rust",
     "tauri": "tauri"
   },
   "dependencies": {

@@ -1,27 +1,27 @@
 <script setup lang="ts">
 // CodeMirror の生成・破棄と本文編集を担当し、親には本文と文字数だけを通知する。
-import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { EditorState } from '@codemirror/state'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { Compartment, EditorState } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
+import type { EditorSettings } from './editorSettings'
 import type { LineEnding } from './textFile'
 
+const props = defineProps<{ settings: EditorSettings }>()
 const emit = defineEmits<{
   change: [text: string, count: number]
 }>()
 
 const host = ref<HTMLElement | null>(null)
 let view: EditorView | undefined
+const wrapping = new Compartment()
 
 const editorTheme = EditorView.theme({
   '&': { height: '100%', backgroundColor: 'transparent' },
   '.cm-scroller': { overflow: 'auto', fontFamily: 'inherit' },
   '.cm-content': {
     boxSizing: 'border-box',
-    maxWidth: '760px',
     minHeight: '100%',
-    margin: '0 auto',
-    padding: '42px 44px 64px',
     fontFamily: '"Yu Mincho", "Hiragino Mincho ProN", "MS PMincho", serif',
     fontSize: '18px',
     lineHeight: '1.9',
@@ -43,7 +43,7 @@ function createState(text: string, lineEnding: LineEnding): EditorState {
       EditorState.lineSeparator.of(lineEnding),
       history(),
       keymap.of([...defaultKeymap, ...historyKeymap]),
-      EditorView.lineWrapping,
+      wrapping.of(props.settings.wrapMode === 'none' ? [] : EditorView.lineWrapping),
       // 文書変更時だけ親へ通知し、選択範囲の移動などでは未保存判定を更新しない。
       EditorView.updateListener.of((update) => {
         if (update.docChanged) reportChange()
@@ -52,6 +52,17 @@ function createState(text: string, lineEnding: LineEnding): EditorState {
     ],
   })
 }
+
+/** 折り返し方法と表示幅を本文へ反映する。文書と編集履歴は変更しない。 */
+function applyWrapSettings(settings: EditorSettings): void {
+  if (!host.value) return
+  host.value.dataset.wrapMode = settings.wrapMode
+  host.value.dataset.narrowWrapBehavior = settings.narrowWrapBehavior
+  host.value.style.setProperty('--wrap-column-width', `${settings.wrapColumns}ch`)
+  view?.dispatch({ effects: wrapping.reconfigure(settings.wrapMode === 'none' ? [] : EditorView.lineWrapping) })
+}
+
+watch(() => props.settings, applyWrapSettings)
 
 /** 現在の本文と改行を除いた文字数を親へ通知する。親側の表示と未保存判定に影響する。 */
 function reportChange(): void {
@@ -83,6 +94,7 @@ defineExpose({ getText, setDocument, focus })
 // Vue の要素確定後に CodeMirror を配置し、初期文字数を親へ通知する。
 onMounted(() => {
   if (!host.value) return
+  applyWrapSettings(props.settings)
   view = new EditorView({ state: createState('', '\n'), parent: host.value })
   reportChange()
 })

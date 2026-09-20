@@ -27,9 +27,12 @@ button { font: inherit; }
 .document-title { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 12px; pointer-events: none; }
 .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
 .dirty-indicator { flex: none; color: #8b6340; font-size: 12px; }
-.actions { display: flex; align-items: center; gap: 2px; padding-left: 12px; }
-.actions button {
-  min-width: 48px;
+.menu-bar { height: 100%; display: flex; align-items: center; gap: 2px; padding-left: 12px; }
+.menu-group { position: relative; }
+.menu-heading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   height: 30px;
   padding: 0 8px;
   color: #34444d;
@@ -38,10 +41,52 @@ button { font: inherit; }
   border-radius: 5px;
   cursor: pointer;
   font-size: 13px;
+  white-space: nowrap;
 }
-.actions button:hover:not(:disabled) { background: #e6e8e6; }
-.actions button:focus-visible { outline: 2px solid #6e929e; outline-offset: 1px; }
-.actions button:disabled { opacity: .45; cursor: default; }
+.menu-heading:hover:not(.menu-placeholder),
+.menu-heading[aria-expanded="true"] { background: #e6e8e6; }
+.menu-heading:focus-visible,
+.menu-popup button:focus-visible { outline: 2px solid #6e929e; outline-offset: -2px; }
+.menu-placeholder { cursor: default; }
+.menu-popup {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 5;
+  min-width: 210px;
+  padding: 5px;
+  background: #fafaf8;
+  border: 1px solid #dcdedb;
+  border-radius: 6px;
+  box-shadow: 0 7px 20px #26323a25;
+}
+.menu-popup button {
+  width: 100%;
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 4px 10px;
+  color: #34444d;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+}
+.menu-popup button:hover:not(:disabled) { background: #e6e8e6; }
+.menu-popup button:disabled { opacity: .45; cursor: default; }
+.menu-shortcut { color: #68737a; font-size: 12px; }
+.window-menu button { justify-content: flex-start; gap: 8px; }
+.menu-check { width: 18px; height: 18px; flex: none; display: grid; place-items: center; font-size: 16px; font-weight: 700; }
+.submenu-group { position: relative; }
+.submenu-popup { top: -5px; left: calc(100% + 5px); }
+.submenu-popup button { justify-content: flex-start; gap: 8px; }
+.menu-separator { height: 1px; margin: 4px 6px; background: #e4e3df; }
+.titlebar { position: relative; z-index: 2; }
 .window-controls { height: 100%; display: flex; }
 .window-controls button {
   width: 46px;
@@ -59,7 +104,28 @@ button { font: inherit; }
 .window-controls .window-close:hover { color: white; background: #c42b1c; }
 .window-controls svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.2; }
 .writing-area { flex: 1; min-height: 0; overflow: hidden; }
-.editor-host { height: 100%; }
+.editor-host { height: 100%; --editor-side-padding: 44px; }
+.editor-host .cm-content {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 42px var(--editor-side-padding) 64px;
+}
+.editor-host[data-wrap-mode="columns"] .cm-content {
+  width: calc(var(--wrap-column-width) + var(--editor-side-padding) + var(--editor-side-padding));
+  flex-grow: 0;
+  margin: 0 auto;
+}
+.editor-host[data-wrap-mode="columns"][data-narrow-wrap-behavior="scroll"] .cm-content {
+  flex-shrink: 0;
+}
+.editor-host[data-wrap-mode="columns"][data-narrow-wrap-behavior="fit"] .cm-content {
+  max-width: 100%;
+}
+.editor-host[data-wrap-mode="none"] .cm-content {
+  width: max-content;
+  min-width: 100%;
+}
 .status-bar {
   height: 30px;
   min-height: 30px;
@@ -72,8 +138,9 @@ button { font: inherit; }
 }
 
 @media (max-width: 650px) {
-  .actions { padding-left: 4px; }
-  .actions button { min-width: 42px; padding: 0 5px; }
+  .menu-bar { padding-left: 4px; }
+  .menu-heading { padding: 0 5px; }
   .window-controls button { width: 40px; }
-  .editor-host .cm-content { padding: 28px 22px 50px; }
+  .editor-host { --editor-side-padding: 22px; }
+  .editor-host .cm-content { padding-top: 28px; padding-bottom: 50px; }
 }

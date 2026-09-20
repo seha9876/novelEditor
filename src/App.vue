@@ -2,8 +2,24 @@
 // 文書操作と画面表示をまとめ、本文そのものは EditorPane の CodeMirror に保持する。
 import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
 import { ask, message } from '@tauri-apps/plugin-dialog'
-import { getCurrentWindow } from '@tauri-apps/api/window'
+import { currentMonitor, getCurrentWindow, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/window'
+import { emitTo, listen } from '@tauri-apps/api/event'
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import EditorPane from './EditorPane.vue'
+import {
+  loadSavedSettings,
+  normalizeEditorSettings,
+  SETTINGS_COMMAND_EVENT,
+  SETTINGS_ERROR_EVENT,
+  SETTINGS_READY_EVENT,
+  SETTINGS_SAVED_EVENT,
+  SETTINGS_STATE_EVENT,
+  SETTINGS_STORAGE_KEY,
+  type EditorSettings,
+  type SettingsCommand,
+  type SettingsSnapshot,
+  type WrapMode,
+} from './editorSettings'
 import {
   chooseSavePath,
   chooseTextFile,
@@ -32,11 +48,21 @@ const charCount = ref(0)
 const busy = ref(false)
 const currentFile = ref<TextFile | null>(null)
 const maximized = ref(false)
+const alwaysOnTop = ref(false)
+const openMenu = ref<'file' | 'settings' | 'window' | null>(null)
+const settingsSubmenuOpen = ref(false)
+const menuBar = ref<HTMLElement | null>(null)
 const appWindow = getCurrentWindow()
+const savedSettings = ref(loadSavedSettings())
+const draftSettings = ref<EditorSettings>({ ...savedSettings.value })
+const settingsPending = computed(() => JSON.stringify(draftSettings.value) !== JSON.stringify(savedSettings.value))
 // 保存先が未定なら、上部には新規文書の名前を表示する。
 const displayName = computed(() => path.value ? fileName(path.value) : '無題')
 let unlistenClose: (() => void) | undefined
 let unlistenResize: (() => void) | undefined
+let unlistenSettingsCommand: (() => void) | undefined
+let unlistenSettingsReady: (() => void) | undefined
+let settingsWindowOpening = false
 
 /** CodeMirror から受けた本文と文字数で表示を更新し、保存済み本文との差から未保存状態を判定する。 */
 function onChange(text: string, count: number): void {
@@ -121,6 +147,94 @@ async function updateMaximized(): Promise<void> {
   maximized.value = await appWindow.isMaximized()
 }
 
+/** メニュー見出しの選択状態を切り替える。 */
+function toggleMenu(menu: 'file' | 'settings' | 'window'): void {
+  openMenu.value = openMenu.value === menu ? null : menu
+  settingsSubmenuOpen.value = false
+}
+
+/** 項目選択時にメニューを閉じてから操作を開始する。 */
+function runMenuAction(action: () => Promise<void>): void {
+  openMenu.value = null
+  settingsSubmenuOpen.value = false
+  void action()
+}
+
+/** メニューバー以外をクリックしたとき、開いているメニューを閉じる。 */
+function onOutsidePointerDown(event: PointerEvent): void {
+  if (event.target instanceof Element && menuBar.value?.contains(event.target) && event.target.closest('.menu-group')) return
+  openMenu.value = null
+  settingsSubmenuOpen.value = false
+}
+
+/** 試用中の設定を設定ウィンドウへ送り、両画面の表示を揃える。 */
+async function publishSettingsState(): Promise<void> {
+  if (!await WebviewWindow.getByLabel('settings')) return
+  const snapshot: SettingsSnapshot = { saved: savedSettings.value, draft: draftSettings.value }
+  await emitTo('settings', SETTINGS_STATE_EVENT, snapshot)
+}
+
+/** メニューから選んだ折り返し方法を試用状態へ反映する。保存は設定画面で行う。 */
+async function chooseWrapMode(mode: WrapMode): Promise<void> {
+  draftSettings.value = { ...draftSettings.value, wrapMode: mode }
+  try {
+    await publishSettingsState()
+  } catch (error) {
+    await showError('設定の同期', error)
+  }
+}
+
+/** 設定画面から受けた変更・保存・取消をメインウィンドウで処理する。 */
+async function handleSettingsCommand(command: SettingsCommand): Promise<void> {
+  try {
+    if (command.type === 'change') {
+      draftSettings.value = normalizeEditorSettings({ ...draftSettings.value, ...command.value })
+      await publishSettingsState()
+    } else if (command.type === 'cancel') {
+      draftSettings.value = { ...savedSettings.value }
+      await publishSettingsState()
+    } else if (command.type === 'save') {
+      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(draftSettings.value))
+      savedSettings.value = { ...draftSettings.value }
+      await emitTo('settings', SETTINGS_SAVED_EVENT)
+    }
+  } catch (error) {
+    await emitTo('settings', SETTINGS_ERROR_EVENT, String(error))
+  }
+}
+
+/** 設定ウィンドウを一つだけ開き、既存のウィンドウがあれば前面へ移す。 */
+async function openSettingsWindow(): Promise<void> {
+  if (settingsWindowOpening) return
+  try {
+    const existing = await WebviewWindow.getByLabel('settings')
+    if (existing) {
+      await existing.setFocus()
+      return
+    }
+    settingsWindowOpening = true
+    const settingsWindow = new WebviewWindow('settings', {
+      url: 'settings.html',
+      title: '設定',
+      parent: 'main',
+      center: true,
+      width: 560,
+      height: 520,
+      minWidth: 480,
+      minHeight: 420,
+      decorations: true,
+    })
+    await settingsWindow.once('tauri://created', () => { settingsWindowOpening = false })
+    await settingsWindow.once('tauri://error', (event) => {
+      settingsWindowOpening = false
+      void showError('設定画面を開く操作', event.payload)
+    })
+  } catch (error) {
+    settingsWindowOpening = false
+    await showError('設定画面を開く操作', error)
+  }
+}
+
 /** ウィンドウを最小化する。 */
 async function minimizeWindow(): Promise<void> {
   try {
@@ -140,6 +254,56 @@ async function toggleMaximizeWindow(): Promise<void> {
   }
 }
 
+/** メニューから通常の最大化を行う。既に最大化されている場合はそのままにする。 */
+async function maximizeWindow(): Promise<void> {
+  try {
+    await appWindow.maximize()
+    await updateMaximized()
+  } catch (error) {
+    await showError('ウィンドウの最大化', error)
+  }
+}
+
+/** 現在のモニターの作業領域に合わせ、指定方向だけ窓を広げる。 */
+async function maximizeWindowAxis(axis: 'vertical' | 'horizontal'): Promise<void> {
+  try {
+    if (await appWindow.isMaximized()) await appWindow.unmaximize()
+    const monitor = await currentMonitor()
+    if (!monitor) throw new Error('現在のモニターを取得できませんでした。')
+
+    const [position, outerSize, innerSize] = await Promise.all([
+      appWindow.outerPosition(),
+      appWindow.outerSize(),
+      appWindow.innerSize(),
+    ])
+    const workArea = monitor.workArea
+    // setSize は内側の寸法を指定するため、外側との差を差し引いて作業領域へ合わせる。
+    const targetPosition = new PhysicalPosition(
+      axis === 'horizontal' ? workArea.position.x : position.x,
+      axis === 'vertical' ? workArea.position.y : position.y,
+    )
+    const targetSize = new PhysicalSize(
+      axis === 'horizontal' ? workArea.size.width - (outerSize.width - innerSize.width) : innerSize.width,
+      axis === 'vertical' ? workArea.size.height - (outerSize.height - innerSize.height) : innerSize.height,
+    )
+    await appWindow.setPosition(targetPosition)
+    await appWindow.setSize(targetSize)
+    await updateMaximized()
+  } catch (error) {
+    await showError('ウィンドウのサイズ変更', error)
+  }
+}
+
+/** 現在のウィンドウの最前面表示を切り替え、成功後にチェック表示を更新する。 */
+async function toggleAlwaysOnTop(): Promise<void> {
+  try {
+    await appWindow.setAlwaysOnTop(!alwaysOnTop.value)
+    alwaysOnTop.value = await appWindow.isAlwaysOnTop()
+  } catch (error) {
+    await showError('常に手前に表示', error)
+  }
+}
+
 /** 通常の終了要求を送り、既存の未保存確認を通して閉じる。 */
 async function closeWindow(): Promise<void> {
   try {
@@ -149,8 +313,18 @@ async function closeWindow(): Promise<void> {
   }
 }
 
-/** ファイル操作の Ctrl ショートカットを処理し、ブラウザ既定の動作を抑止する。Undo/Redo は CodeMirror に任せる。 */
+/** Esc でメニューを閉じ、ファイル操作の Ctrl ショートカットを処理する。Undo/Redo は CodeMirror に任せる。 */
 function onKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape' && settingsSubmenuOpen.value) {
+    event.preventDefault()
+    settingsSubmenuOpen.value = false
+    return
+  }
+  if (event.key === 'Escape' && openMenu.value) {
+    event.preventDefault()
+    openMenu.value = null
+    return
+  }
   if (event.ctrlKey && !event.altKey && !event.shiftKey) {
     if (event.key.toLowerCase() === 's') {
       event.preventDefault()
@@ -168,6 +342,7 @@ function onKeydown(event: KeyboardEvent): void {
 // 画面のマウント時にショートカットと Tauri のウィンドウ終了要求を購読する。
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
+  document.addEventListener('pointerdown', onOutsidePointerDown)
   // 保存処理中や未保存のまま終了しないよう、終了要求を必要に応じて取り消す。
   unlistenClose = await appWindow.onCloseRequested(async (event) => {
     if (busy.value) {
@@ -180,24 +355,65 @@ onMounted(async () => {
     if (await confirmDiscard()) await appWindow.destroy()
   })
   unlistenResize = await appWindow.onResized(() => { void updateMaximized() })
+  unlistenSettingsCommand = await listen<SettingsCommand>(SETTINGS_COMMAND_EVENT, (event) => {
+    void handleSettingsCommand(event.payload)
+  })
+  unlistenSettingsReady = await listen(SETTINGS_READY_EVENT, () => { void publishSettingsState() })
   await updateMaximized()
+  alwaysOnTop.value = await appWindow.isAlwaysOnTop()
 })
 
 // 画面の破棄時に購読を解除し、同じ操作が重複して処理されることを防ぐ。
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  document.removeEventListener('pointerdown', onOutsidePointerDown)
   unlistenClose?.()
   unlistenResize?.()
+  unlistenSettingsCommand?.()
+  unlistenSettingsReady?.()
 })
 </script>
 
 <template>
   <main class="app-shell">
     <header class="titlebar">
-      <nav class="actions" aria-label="ファイル操作">
-        <button type="button" :disabled="busy" title="新規作成 (Ctrl+N)" @click="newDocument">新規</button>
-        <button type="button" :disabled="busy" title="ファイルを開く (Ctrl+O)" @click="openDocument">開く</button>
-        <button type="button" :disabled="busy" title="保存 (Ctrl+S)" @click="saveDocument">保存</button>
+      <nav ref="menuBar" class="menu-bar" aria-label="メニューバー">
+        <div class="menu-group">
+          <button type="button" class="menu-heading" :aria-expanded="openMenu === 'file'" aria-controls="file-menu" @click="toggleMenu('file')">ファイル</button>
+          <div v-if="openMenu === 'file'" id="file-menu" class="menu-popup" aria-label="ファイル">
+            <button type="button" :disabled="busy" @click="runMenuAction(newDocument)"><span>新規</span><span class="menu-shortcut">Ctrl+N</span></button>
+            <button type="button" :disabled="busy" @click="runMenuAction(openDocument)"><span>開く</span><span class="menu-shortcut">Ctrl+O</span></button>
+            <button type="button" :disabled="busy" @click="runMenuAction(saveDocument)"><span>保存</span><span class="menu-shortcut">Ctrl+S</span></button>
+          </div>
+        </div>
+        <div class="menu-group">
+          <button type="button" class="menu-heading" :aria-expanded="openMenu === 'settings'" aria-controls="settings-menu" @click="toggleMenu('settings')">設定</button>
+          <div v-if="openMenu === 'settings'" id="settings-menu" class="menu-popup settings-menu" aria-label="設定">
+            <button type="button" @click="runMenuAction(openSettingsWindow)"><span>設定画面を開く</span><span v-if="settingsPending" class="menu-shortcut">未保存</span></button>
+            <div class="menu-separator" role="separator" />
+            <div class="submenu-group" @mouseenter="settingsSubmenuOpen = true" @mouseleave="settingsSubmenuOpen = false">
+              <button type="button" :aria-expanded="settingsSubmenuOpen" aria-controls="wrap-submenu" @click="settingsSubmenuOpen = !settingsSubmenuOpen"><span>折り返し設定</span><span aria-hidden="true">›</span></button>
+              <div v-if="settingsSubmenuOpen" id="wrap-submenu" class="menu-popup submenu-popup" role="menu" aria-label="折り返し設定">
+                <button type="button" role="menuitemradio" :aria-checked="draftSettings.wrapMode === 'window'" @click="runMenuAction(() => chooseWrapMode('window'))"><span class="menu-check" aria-hidden="true">{{ draftSettings.wrapMode === 'window' ? '✓' : '' }}</span>右端で折り返し</button>
+                <button type="button" role="menuitemradio" :aria-checked="draftSettings.wrapMode === 'columns'" @click="runMenuAction(() => chooseWrapMode('columns'))"><span class="menu-check" aria-hidden="true">{{ draftSettings.wrapMode === 'columns' ? '✓' : '' }}</span>指定桁数で折り返し</button>
+                <button type="button" role="menuitemradio" :aria-checked="draftSettings.wrapMode === 'none'" @click="runMenuAction(() => chooseWrapMode('none'))"><span class="menu-check" aria-hidden="true">{{ draftSettings.wrapMode === 'none' ? '✓' : '' }}</span>折り返さない</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="menu-group">
+          <button type="button" class="menu-heading" :aria-expanded="openMenu === 'window'" aria-controls="window-menu" @click="toggleMenu('window')">ウィンドウ</button>
+          <div v-if="openMenu === 'window'" id="window-menu" class="menu-popup window-menu" aria-label="ウィンドウ">
+            <button type="button" @click="runMenuAction(minimizeWindow)"><span class="menu-check" aria-hidden="true" />最小化</button>
+            <button type="button" @click="runMenuAction(maximizeWindow)"><span class="menu-check" aria-hidden="true" />最大化</button>
+            <button type="button" @click="runMenuAction(() => maximizeWindowAxis('vertical'))"><span class="menu-check" aria-hidden="true" />縦方向に最大化</button>
+            <button type="button" @click="runMenuAction(() => maximizeWindowAxis('horizontal'))"><span class="menu-check" aria-hidden="true" />横方向に最大化</button>
+            <button type="button" :aria-checked="alwaysOnTop" role="checkbox" @click="runMenuAction(toggleAlwaysOnTop)"><span class="menu-check" aria-hidden="true">{{ alwaysOnTop ? '✓' : '' }}</span>常に手前に表示</button>
+            <div class="menu-separator" role="separator" />
+            <button type="button" @click="runMenuAction(closeWindow)"><span class="menu-check" aria-hidden="true" />閉じる</button>
+          </div>
+        </div>
+        <span class="menu-heading menu-placeholder">ヘルプ</span>
       </nav>
       <div class="titlebar-drag-region" data-tauri-drag-region :title="path ?? '新規文書'">
         <div class="document-title">
@@ -219,7 +435,7 @@ onBeforeUnmount(() => {
       </div>
     </header>
     <section class="writing-area" aria-label="本文編集領域">
-      <EditorPane ref="editor" @change="onChange" />
+      <EditorPane ref="editor" :settings="draftSettings" @change="onChange" />
     </section>
     <footer class="status-bar">{{ charCount.toLocaleString('ja-JP') }} 文字</footer>
   </main>

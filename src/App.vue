@@ -381,7 +381,7 @@ onBeforeUnmount(() => {
   <VApp class="app-shell">
     <VAppBar class="titlebar" :height="48" flat>
       <nav class="menu-bar" aria-label="メニューバー">
-        <VMenu v-model="fileMenuOpen" :close-on-content-click="false">
+        <VMenu v-model="fileMenuOpen" :close-on-content-click="false" :transition="false">
           <template #activator="{ props }">
             <VBtn v-bind="props" class="menu-heading" size="small" variant="text">ファイル</VBtn>
           </template>
@@ -397,7 +397,7 @@ onBeforeUnmount(() => {
             </VListItem>
           </VList>
         </VMenu>
-        <VMenu v-model="settingsMenuOpen" :close-on-content-click="false">
+        <VMenu v-model="settingsMenuOpen" :close-on-content-click="false" :transition="false">
           <template #activator="{ props }">
             <VBtn v-bind="props" class="menu-heading" size="small" variant="text">設定</VBtn>
           </template>
@@ -406,7 +406,7 @@ onBeforeUnmount(() => {
               <template #append><span v-if="settingsPending" class="menu-shortcut">未保存</span></template>
             </VListItem>
             <VDivider class="my-1" />
-            <VMenu v-model="settingsSubmenuOpen" location="end" open-on-hover :close-on-content-click="false">
+            <VMenu v-model="settingsSubmenuOpen" location="end" open-on-hover :close-on-content-click="false" :open-delay="100" :close-delay="200">
               <template #activator="{ props: submenuProps }">
                 <VListItem v-bind="submenuProps" role="menuitem" title="折り返し設定" append-icon="mdi-chevron-right" />
               </template>
@@ -424,7 +424,7 @@ onBeforeUnmount(() => {
             </VMenu>
           </VList>
         </VMenu>
-        <VMenu v-model="windowMenuOpen" :close-on-content-click="false">
+        <VMenu v-model="windowMenuOpen" :close-on-content-click="false" :transition="false">
           <template #activator="{ props }">
             <VBtn v-bind="props" class="menu-heading" size="small" variant="text">ウィンドウ</VBtn>
           </template>

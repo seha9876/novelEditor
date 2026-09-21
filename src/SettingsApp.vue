@@ -58,8 +58,8 @@ function setNarrowBehavior(behavior: NarrowWrapBehavior): void {
 }
 
 /** 有効な桁数だけを試用値へ反映し、入力途中の空欄は保持する。 */
-function onColumnsInput(event: Event): void {
-  columnsInput.value = (event.target as HTMLInputElement).value
+function onColumnsInput(value: string | number | null): void {
+  columnsInput.value = value === null ? '' : String(value)
   if (!snapshot.value || columnError.value) return
   void sendChange({ wrapColumns: Number(columnsInput.value) })
 }
@@ -143,49 +143,89 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="settings-shell">
-    <header class="settings-header">
-      <h1>設定</h1>
-      <p>変更は本文へすぐ反映されます。保存するまで再起動後には残りません。</p>
-      <span v-if="modified" class="settings-pending">未保存の変更があります</span>
-    </header>
-    <div v-if="snapshot" class="settings-content" :inert="saving">
-      <section class="setting-section" aria-labelledby="wrap-mode-title">
-        <h2 id="wrap-mode-title">折り返し方法</h2>
-        <label><input type="radio" name="wrap-mode" :checked="snapshot.draft.wrapMode === 'window'" @change="setWrapMode('window')">右端で折り返し</label>
-        <label><input type="radio" name="wrap-mode" :checked="snapshot.draft.wrapMode === 'columns'" @change="setWrapMode('columns')">指定桁数で折り返し</label>
-        <label><input type="radio" name="wrap-mode" :checked="snapshot.draft.wrapMode === 'none'" @change="setWrapMode('none')">折り返さない</label>
-        <div class="setting-actions">
-          <button type="button" @click="restoreField('wrapMode', 'saved')">保存値に戻す</button>
-          <button type="button" @click="restoreField('wrapMode', 'default')">初期値に戻す</button>
-        </div>
-      </section>
-      <section class="setting-section" aria-labelledby="wrap-columns-title">
-        <h2 id="wrap-columns-title">指定桁数</h2>
-        <label class="columns-label">桁数 <input type="number" min="1" max="500" step="1" :value="columnsInput" aria-describedby="columns-help" @input="onColumnsInput"></label>
-        <p id="columns-help" class="setting-help">現在の書体で、おおよその表示幅を指定します。</p>
-        <p v-if="columnError" class="settings-error">{{ columnError }}</p>
-        <div class="setting-actions">
-          <button type="button" @click="restoreField('wrapColumns', 'saved')">保存値に戻す</button>
-          <button type="button" @click="restoreField('wrapColumns', 'default')">初期値に戻す</button>
-        </div>
-      </section>
-      <section class="setting-section" aria-labelledby="narrow-behavior-title">
-        <h2 id="narrow-behavior-title">指定桁数が窓より広い場合</h2>
-        <label><input type="radio" name="narrow-behavior" :checked="snapshot.draft.narrowWrapBehavior === 'scroll'" @change="setNarrowBehavior('scroll')">指定桁数を優先して横スクロール</label>
-        <label><input type="radio" name="narrow-behavior" :checked="snapshot.draft.narrowWrapBehavior === 'fit'" @change="setNarrowBehavior('fit')">窓幅に合わせて早めに折り返す</label>
-        <div class="setting-actions">
-          <button type="button" @click="restoreField('narrowWrapBehavior', 'saved')">保存値に戻す</button>
-          <button type="button" @click="restoreField('narrowWrapBehavior', 'default')">初期値に戻す</button>
-        </div>
-      </section>
-    </div>
-    <footer class="settings-footer">
-      <p v-if="errorMessage" class="settings-error" role="alert">{{ errorMessage }}</p>
-      <button type="button" :disabled="!snapshot || saving" @click="restoreDefaults">すべて初期値に戻す</button>
-      <span class="footer-spacer" />
-      <button type="button" :disabled="saving" @click="cancelSettings">キャンセル</button>
-      <button type="button" class="save-button" :disabled="!snapshot || !!columnError || saving" @click="saveSettings">保存</button>
-    </footer>
-  </main>
+  <VApp class="settings-shell">
+    <VAppBar title="設定" flat>
+      <template #append>
+        <VChip v-if="modified" class="settings-pending" color="warning" size="small" variant="tonal">未保存の変更があります</VChip>
+      </template>
+    </VAppBar>
+    <VMain>
+      <VContainer v-if="snapshot" class="settings-content" fluid :inert="saving">
+        <VRow>
+          <VCol cols="12">
+            <VCard class="setting-card">
+              <VCardItem>
+                <VCardTitle>折り返し方法</VCardTitle>
+                <VCardSubtitle>変更は本文へすぐ反映されます。保存するまで再起動後には残りません。</VCardSubtitle>
+              </VCardItem>
+              <VCardText>
+                <VRadioGroup :model-value="snapshot.draft.wrapMode" aria-label="折り返し方法">
+                  <VRadio value="window" label="右端で折り返し" @change="setWrapMode('window')" />
+                  <VRadio value="columns" label="指定桁数で折り返し" @change="setWrapMode('columns')" />
+                  <VRadio value="none" label="折り返さない" @change="setWrapMode('none')" />
+                </VRadioGroup>
+                <div class="setting-actions">
+                  <VBtn size="small" variant="outlined" @click="restoreField('wrapMode', 'saved')">保存値に戻す</VBtn>
+                  <VBtn size="small" variant="outlined" @click="restoreField('wrapMode', 'default')">初期値に戻す</VBtn>
+                </div>
+              </VCardText>
+            </VCard>
+          </VCol>
+          <VCol cols="12">
+            <VCard class="setting-card">
+              <VCardItem>
+                <VCardTitle>指定桁数</VCardTitle>
+                <VCardSubtitle>現在の書体で、おおよその表示幅を指定します。</VCardSubtitle>
+              </VCardItem>
+              <VCardText>
+                <VTextField
+                  :model-value="columnsInput"
+                  label="桁数"
+                  type="number"
+                  min="1"
+                  max="500"
+                  step="1"
+                  aria-describedby="columns-help"
+                  :error-messages="columnError ? [columnError] : []"
+                  @update:model-value="onColumnsInput"
+                />
+                <p id="columns-help" class="setting-help">1～500の整数で指定します。</p>
+                <div class="setting-actions">
+                  <VBtn size="small" variant="outlined" @click="restoreField('wrapColumns', 'saved')">保存値に戻す</VBtn>
+                  <VBtn size="small" variant="outlined" @click="restoreField('wrapColumns', 'default')">初期値に戻す</VBtn>
+                </div>
+              </VCardText>
+            </VCard>
+          </VCol>
+          <VCol cols="12">
+            <VCard class="setting-card">
+              <VCardItem>
+                <VCardTitle>指定桁数が窓より広い場合</VCardTitle>
+              </VCardItem>
+              <VCardText>
+                <VRadioGroup :model-value="snapshot.draft.narrowWrapBehavior" aria-label="指定桁数が窓より広い場合">
+                  <VRadio value="scroll" label="指定桁数を優先して横スクロール" @change="setNarrowBehavior('scroll')" />
+                  <VRadio value="fit" label="窓幅に合わせて早めに折り返す" @change="setNarrowBehavior('fit')" />
+                </VRadioGroup>
+                <div class="setting-actions">
+                  <VBtn size="small" variant="outlined" @click="restoreField('narrowWrapBehavior', 'saved')">保存値に戻す</VBtn>
+                  <VBtn size="small" variant="outlined" @click="restoreField('narrowWrapBehavior', 'default')">初期値に戻す</VBtn>
+                </div>
+              </VCardText>
+            </VCard>
+          </VCol>
+        </VRow>
+      </VContainer>
+      <VContainer v-else>
+        <VAlert type="info" variant="tonal">設定を読み込んでいます。</VAlert>
+      </VContainer>
+    </VMain>
+    <VFooter app class="settings-footer">
+      <VAlert v-if="errorMessage" class="settings-error" type="error" variant="tonal" density="compact" role="alert">{{ errorMessage }}</VAlert>
+      <VSpacer />
+      <VBtn variant="text" :disabled="!snapshot || saving" @click="restoreDefaults">すべて初期値に戻す</VBtn>
+      <VBtn variant="text" :disabled="saving" @click="cancelSettings">キャンセル</VBtn>
+      <VBtn color="primary" :disabled="!snapshot || !!columnError || saving" :loading="saving" @click="saveSettings">保存</VBtn>
+    </VFooter>
+  </VApp>
 </template>

@@ -51,11 +51,29 @@ const maximized = ref(false)
 const alwaysOnTop = ref(false)
 const openMenu = ref<'file' | 'settings' | 'window' | null>(null)
 const settingsSubmenuOpen = ref(false)
-const menuBar = ref<HTMLElement | null>(null)
 const appWindow = getCurrentWindow()
 const savedSettings = ref(loadSavedSettings())
 const draftSettings = ref<EditorSettings>({ ...savedSettings.value })
 const settingsPending = computed(() => JSON.stringify(draftSettings.value) !== JSON.stringify(savedSettings.value))
+const fileMenuOpen = computed({
+  get: (): boolean => openMenu.value === 'file',
+  set: (value: boolean): void => {
+    openMenu.value = value ? 'file' : (openMenu.value === 'file' ? null : openMenu.value)
+  },
+})
+const settingsMenuOpen = computed({
+  get: (): boolean => openMenu.value === 'settings',
+  set: (value: boolean): void => {
+    if (!value) settingsSubmenuOpen.value = false
+    openMenu.value = value ? 'settings' : (openMenu.value === 'settings' ? null : openMenu.value)
+  },
+})
+const windowMenuOpen = computed({
+  get: (): boolean => openMenu.value === 'window',
+  set: (value: boolean): void => {
+    openMenu.value = value ? 'window' : (openMenu.value === 'window' ? null : openMenu.value)
+  },
+})
 // 保存先が未定なら、上部には新規文書の名前を表示する。
 const displayName = computed(() => path.value ? fileName(path.value) : '無題')
 let unlistenClose: (() => void) | undefined
@@ -147,24 +165,11 @@ async function updateMaximized(): Promise<void> {
   maximized.value = await appWindow.isMaximized()
 }
 
-/** メニュー見出しの選択状態を切り替える。 */
-function toggleMenu(menu: 'file' | 'settings' | 'window'): void {
-  openMenu.value = openMenu.value === menu ? null : menu
-  settingsSubmenuOpen.value = false
-}
-
 /** 項目選択時にメニューを閉じてから操作を開始する。 */
 function runMenuAction(action: () => Promise<void>): void {
   openMenu.value = null
   settingsSubmenuOpen.value = false
   void action()
-}
-
-/** メニューバー以外をクリックしたとき、開いているメニューを閉じる。 */
-function onOutsidePointerDown(event: PointerEvent): void {
-  if (event.target instanceof Element && menuBar.value?.contains(event.target) && event.target.closest('.menu-group')) return
-  openMenu.value = null
-  settingsSubmenuOpen.value = false
 }
 
 /** 試用中の設定を設定ウィンドウへ送り、両画面の表示を揃える。 */
@@ -342,7 +347,6 @@ function onKeydown(event: KeyboardEvent): void {
 // 画面のマウント時にショートカットと Tauri のウィンドウ終了要求を購読する。
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
-  document.addEventListener('pointerdown', onOutsidePointerDown)
   // 保存処理中や未保存のまま終了しないよう、終了要求を必要に応じて取り消す。
   unlistenClose = await appWindow.onCloseRequested(async (event) => {
     if (busy.value) {
@@ -366,7 +370,6 @@ onMounted(async () => {
 // 画面の破棄時に購読を解除し、同じ操作が重複して処理されることを防ぐ。
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
-  document.removeEventListener('pointerdown', onOutsidePointerDown)
   unlistenClose?.()
   unlistenResize?.()
   unlistenSettingsCommand?.()
@@ -375,45 +378,69 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="app-shell">
-    <header class="titlebar">
-      <nav ref="menuBar" class="menu-bar" aria-label="メニューバー">
-        <div class="menu-group">
-          <button type="button" class="menu-heading" :aria-expanded="openMenu === 'file'" aria-controls="file-menu" @click="toggleMenu('file')">ファイル</button>
-          <div v-if="openMenu === 'file'" id="file-menu" class="menu-popup" aria-label="ファイル">
-            <button type="button" :disabled="busy" @click="runMenuAction(newDocument)"><span>新規</span><span class="menu-shortcut">Ctrl+N</span></button>
-            <button type="button" :disabled="busy" @click="runMenuAction(openDocument)"><span>開く</span><span class="menu-shortcut">Ctrl+O</span></button>
-            <button type="button" :disabled="busy" @click="runMenuAction(saveDocument)"><span>保存</span><span class="menu-shortcut">Ctrl+S</span></button>
-          </div>
-        </div>
-        <div class="menu-group">
-          <button type="button" class="menu-heading" :aria-expanded="openMenu === 'settings'" aria-controls="settings-menu" @click="toggleMenu('settings')">設定</button>
-          <div v-if="openMenu === 'settings'" id="settings-menu" class="menu-popup settings-menu" aria-label="設定">
-            <button type="button" @click="runMenuAction(openSettingsWindow)"><span>設定画面を開く</span><span v-if="settingsPending" class="menu-shortcut">未保存</span></button>
-            <div class="menu-separator" role="separator" />
-            <div class="submenu-group" @mouseenter="settingsSubmenuOpen = true" @mouseleave="settingsSubmenuOpen = false">
-              <button type="button" :aria-expanded="settingsSubmenuOpen" aria-controls="wrap-submenu" @click="settingsSubmenuOpen = !settingsSubmenuOpen"><span>折り返し設定</span><span aria-hidden="true">›</span></button>
-              <div v-if="settingsSubmenuOpen" id="wrap-submenu" class="menu-popup submenu-popup" role="menu" aria-label="折り返し設定">
-                <button type="button" role="menuitemradio" :aria-checked="draftSettings.wrapMode === 'window'" @click="runMenuAction(() => chooseWrapMode('window'))"><span class="menu-check" aria-hidden="true">{{ draftSettings.wrapMode === 'window' ? '✓' : '' }}</span>右端で折り返し</button>
-                <button type="button" role="menuitemradio" :aria-checked="draftSettings.wrapMode === 'columns'" @click="runMenuAction(() => chooseWrapMode('columns'))"><span class="menu-check" aria-hidden="true">{{ draftSettings.wrapMode === 'columns' ? '✓' : '' }}</span>指定桁数で折り返し</button>
-                <button type="button" role="menuitemradio" :aria-checked="draftSettings.wrapMode === 'none'" @click="runMenuAction(() => chooseWrapMode('none'))"><span class="menu-check" aria-hidden="true">{{ draftSettings.wrapMode === 'none' ? '✓' : '' }}</span>折り返さない</button>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="menu-group">
-          <button type="button" class="menu-heading" :aria-expanded="openMenu === 'window'" aria-controls="window-menu" @click="toggleMenu('window')">ウィンドウ</button>
-          <div v-if="openMenu === 'window'" id="window-menu" class="menu-popup window-menu" aria-label="ウィンドウ">
-            <button type="button" @click="runMenuAction(minimizeWindow)"><span class="menu-check" aria-hidden="true" />最小化</button>
-            <button type="button" @click="runMenuAction(maximizeWindow)"><span class="menu-check" aria-hidden="true" />最大化</button>
-            <button type="button" @click="runMenuAction(() => maximizeWindowAxis('vertical'))"><span class="menu-check" aria-hidden="true" />縦方向に最大化</button>
-            <button type="button" @click="runMenuAction(() => maximizeWindowAxis('horizontal'))"><span class="menu-check" aria-hidden="true" />横方向に最大化</button>
-            <button type="button" :aria-checked="alwaysOnTop" role="checkbox" @click="runMenuAction(toggleAlwaysOnTop)"><span class="menu-check" aria-hidden="true">{{ alwaysOnTop ? '✓' : '' }}</span>常に手前に表示</button>
-            <div class="menu-separator" role="separator" />
-            <button type="button" @click="runMenuAction(closeWindow)"><span class="menu-check" aria-hidden="true" />閉じる</button>
-          </div>
-        </div>
-        <span class="menu-heading menu-placeholder">ヘルプ</span>
+  <VApp class="app-shell">
+    <VAppBar class="titlebar" :height="48" flat>
+      <nav class="menu-bar" aria-label="メニューバー">
+        <VMenu v-model="fileMenuOpen" :close-on-content-click="false">
+          <template #activator="{ props }">
+            <VBtn v-bind="props" class="menu-heading" size="small" variant="text">ファイル</VBtn>
+          </template>
+          <VList density="compact" min-width="220" role="menu" aria-label="ファイル">
+            <VListItem role="menuitem" :disabled="busy" title="新規" @click="runMenuAction(newDocument)">
+              <template #append><span class="menu-shortcut">Ctrl+N</span></template>
+            </VListItem>
+            <VListItem role="menuitem" :disabled="busy" title="開く" @click="runMenuAction(openDocument)">
+              <template #append><span class="menu-shortcut">Ctrl+O</span></template>
+            </VListItem>
+            <VListItem role="menuitem" :disabled="busy" title="保存" @click="runMenuAction(saveDocument)">
+              <template #append><span class="menu-shortcut">Ctrl+S</span></template>
+            </VListItem>
+          </VList>
+        </VMenu>
+        <VMenu v-model="settingsMenuOpen" :close-on-content-click="false">
+          <template #activator="{ props }">
+            <VBtn v-bind="props" class="menu-heading" size="small" variant="text">設定</VBtn>
+          </template>
+          <VList density="compact" min-width="240" role="menu" aria-label="設定">
+            <VListItem role="menuitem" title="設定画面を開く" @click="runMenuAction(openSettingsWindow)">
+              <template #append><span v-if="settingsPending" class="menu-shortcut">未保存</span></template>
+            </VListItem>
+            <VDivider class="my-1" />
+            <VMenu v-model="settingsSubmenuOpen" location="end" open-on-hover :close-on-content-click="false">
+              <template #activator="{ props: submenuProps }">
+                <VListItem v-bind="submenuProps" role="menuitem" title="折り返し設定" append-icon="mdi-chevron-right" />
+              </template>
+              <VList density="compact" min-width="240" role="menu" aria-label="折り返し設定">
+                <VListItem role="menuitemradio" :aria-checked="draftSettings.wrapMode === 'window'" :active="draftSettings.wrapMode === 'window'" title="右端で折り返し" @click="runMenuAction(() => chooseWrapMode('window'))">
+                  <template #prepend><VIcon icon="mdi-check" :style="{ visibility: draftSettings.wrapMode === 'window' ? 'visible' : 'hidden' }" aria-hidden="true" /></template>
+                </VListItem>
+                <VListItem role="menuitemradio" :aria-checked="draftSettings.wrapMode === 'columns'" :active="draftSettings.wrapMode === 'columns'" title="指定桁数で折り返し" @click="runMenuAction(() => chooseWrapMode('columns'))">
+                  <template #prepend><VIcon icon="mdi-check" :style="{ visibility: draftSettings.wrapMode === 'columns' ? 'visible' : 'hidden' }" aria-hidden="true" /></template>
+                </VListItem>
+                <VListItem role="menuitemradio" :aria-checked="draftSettings.wrapMode === 'none'" :active="draftSettings.wrapMode === 'none'" title="折り返さない" @click="runMenuAction(() => chooseWrapMode('none'))">
+                  <template #prepend><VIcon icon="mdi-check" :style="{ visibility: draftSettings.wrapMode === 'none' ? 'visible' : 'hidden' }" aria-hidden="true" /></template>
+                </VListItem>
+              </VList>
+            </VMenu>
+          </VList>
+        </VMenu>
+        <VMenu v-model="windowMenuOpen" :close-on-content-click="false">
+          <template #activator="{ props }">
+            <VBtn v-bind="props" class="menu-heading" size="small" variant="text">ウィンドウ</VBtn>
+          </template>
+          <VList density="compact" min-width="260" role="menu" aria-label="ウィンドウ">
+            <VListItem role="menuitem" title="最小化" @click="runMenuAction(minimizeWindow)" />
+            <VListItem role="menuitem" title="最大化" @click="runMenuAction(maximizeWindow)" />
+            <VListItem role="menuitem" title="縦方向に最大化" @click="runMenuAction(() => maximizeWindowAxis('vertical'))" />
+            <VListItem role="menuitem" title="横方向に最大化" @click="runMenuAction(() => maximizeWindowAxis('horizontal'))" />
+            <VListItem role="menuitemcheckbox" :aria-checked="alwaysOnTop" :active="alwaysOnTop" title="常に手前に表示" @click="runMenuAction(toggleAlwaysOnTop)">
+              <template #prepend><VIcon icon="mdi-check" :style="{ visibility: alwaysOnTop ? 'visible' : 'hidden' }" aria-hidden="true" /></template>
+            </VListItem>
+            <VDivider class="my-1" />
+            <VListItem role="menuitem" title="閉じる" @click="runMenuAction(closeWindow)" />
+          </VList>
+        </VMenu>
+        <VBtn class="menu-heading menu-placeholder" size="small" variant="text" disabled>ヘルプ</VBtn>
       </nav>
       <div class="titlebar-drag-region" data-tauri-drag-region :title="path ?? '新規文書'">
         <div class="document-title">
@@ -422,21 +449,14 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="window-controls" aria-label="ウィンドウ操作">
-        <button type="button" aria-label="最小化" title="最小化" @click="minimizeWindow">
-          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 12.5h10" /></svg>
-        </button>
-        <button type="button" :aria-label="maximized ? '元に戻す' : '最大化'" :title="maximized ? '元に戻す' : '最大化'" @click="toggleMaximizeWindow">
-          <svg v-if="maximized" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 5V3h8v8h-2M3 5h8v8H3z" /></svg>
-          <svg v-else viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3h10v10H3z" /></svg>
-        </button>
-        <button type="button" class="window-close" aria-label="閉じる" title="閉じる" @click="closeWindow">
-          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3l10 10M13 3L3 13" /></svg>
-        </button>
+        <VBtn icon variant="text" size="small" aria-label="最小化" title="最小化" @click="minimizeWindow"><VIcon icon="mdi-minus" aria-hidden="true" /></VBtn>
+        <VBtn icon variant="text" size="small" :aria-label="maximized ? '元に戻す' : '最大化'" :title="maximized ? '元に戻す' : '最大化'" @click="toggleMaximizeWindow"><VIcon :icon="maximized ? 'mdi-window-restore' : 'mdi-square-outline'" aria-hidden="true" /></VBtn>
+        <VBtn class="window-close" icon variant="text" size="small" aria-label="閉じる" title="閉じる" @click="closeWindow"><VIcon icon="mdi-close" aria-hidden="true" /></VBtn>
       </div>
-    </header>
-    <section class="writing-area" aria-label="本文編集領域">
+    </VAppBar>
+    <VMain class="writing-area" aria-label="本文編集領域">
       <EditorPane ref="editor" :settings="draftSettings" @change="onChange" />
-    </section>
-    <footer class="status-bar">{{ charCount.toLocaleString('ja-JP') }} 文字</footer>
-  </main>
+    </VMain>
+    <VFooter app class="status-bar" height="36">{{ charCount.toLocaleString('ja-JP') }} 文字</VFooter>
+  </VApp>
 </template>

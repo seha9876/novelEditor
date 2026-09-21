@@ -2,5 +2,6 @@
 import { createApp } from 'vue'
 import SettingsApp from './SettingsApp.vue'
 import './settings.css'
+import { vuetify } from './vuetify'
 
-createApp(SettingsApp).mount('#app')
+createApp(SettingsApp).use(vuetify).mount('#app')

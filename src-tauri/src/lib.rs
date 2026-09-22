@@ -1,9 +1,10 @@
-// Tauri 本体と、TXT の選択・読み書きに必要なプラグインを登録して起動する。
+// Tauri 本体と、ファイル操作・設定永続化に必要なプラグインを登録して起動する。
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_store::Builder::default().build())
         .run(tauri::generate_context!())
         .expect("failed to run the novel editor");
 }

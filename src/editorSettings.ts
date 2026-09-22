@@ -8,22 +8,8 @@ export type EditorSettings = {
   narrowWrapBehavior: NarrowWrapBehavior
 }
 
-export type SettingsSnapshot = {
-  saved: EditorSettings
-  draft: EditorSettings
-}
-
-export type SettingsCommand =
-  | { type: 'change'; value: Partial<EditorSettings> }
-  | { type: 'save' }
-  | { type: 'cancel' }
-
+/** 初回移行時に限って読む、旧LocalStorage設定のキー。 */
 export const SETTINGS_STORAGE_KEY = 'novel-editor-settings-v1'
-export const SETTINGS_COMMAND_EVENT = 'editor-settings-command'
-export const SETTINGS_READY_EVENT = 'editor-settings-ready'
-export const SETTINGS_STATE_EVENT = 'editor-settings-state'
-export const SETTINGS_SAVED_EVENT = 'editor-settings-saved'
-export const SETTINGS_ERROR_EVENT = 'editor-settings-error'
 
 export const defaultEditorSettings: EditorSettings = {
   wrapMode: 'window',
@@ -42,15 +28,5 @@ export function normalizeEditorSettings(value: unknown): EditorSettings {
       ? Number(settings.wrapColumns) : defaultEditorSettings.wrapColumns,
     narrowWrapBehavior: settings.narrowWrapBehavior === 'scroll' || settings.narrowWrapBehavior === 'fit'
       ? settings.narrowWrapBehavior : defaultEditorSettings.narrowWrapBehavior,
-  }
-}
-
-/** 前回保存した設定を読み込み、未保存または読み取り不能なら既定値を返す。 */
-export function loadSavedSettings(): EditorSettings {
-  try {
-    const stored = localStorage.getItem(SETTINGS_STORAGE_KEY)
-    return stored ? normalizeEditorSettings(JSON.parse(stored)) : { ...defaultEditorSettings }
-  } catch {
-    return { ...defaultEditorSettings }
   }
 }

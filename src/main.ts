@@ -2,5 +2,17 @@
 import { createApp } from 'vue'
 import App from './App.vue'
 import './style.css'
+import { vuetify } from './vuetify'
+import { initializeApplicationPreferences } from './appPreferences'
 
-createApp(App).mount('#app')
+/** 永続設定を初期化してからメイン画面を表示する。 */
+async function mountMainApplication(): Promise<void> {
+  const initialization = await initializeApplicationPreferences()
+  createApp(App, {
+    initialPreferences: initialization.preferences,
+    persistenceState: initialization.persistenceState,
+    persistenceError: initialization.error,
+  }).use(vuetify).mount('#app')
+}
+
+void mountMainApplication()

@@ -1,32 +1,134 @@
+/* 設定画面は Vuetify の標準部品を使い、ナビゲーション下部とスクロールを整える。 */
 :root {
-  font-family: "Yu Gothic UI", "Meiryo", sans-serif;
-  color: #26323a;
-  background: #faf9f6;
+  font-family: Roboto, "Yu Gothic UI", "Meiryo", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
 }
 
 * { box-sizing: border-box; }
 html, body, #app { width: 100%; height: 100%; margin: 0; }
-button, input { font: inherit; }
-.settings-shell { display: flex; flex-direction: column; height: 100%; }
-.settings-header { padding: 20px 24px 12px; border-bottom: 1px solid #e4e3df; }
-.settings-header h1 { margin: 0 0 6px; font-size: 20px; }
-.settings-header p { margin: 0; color: #68737a; font-size: 12px; }
-.settings-pending { display: inline-block; margin-top: 8px; color: #8b6340; font-size: 12px; }
-.settings-content { flex: 1; overflow-y: auto; padding: 4px 24px 20px; }
-.setting-section { padding: 16px 0; border-bottom: 1px solid #e8e8e4; }
-.setting-section h2 { margin: 0 0 10px; font-size: 15px; }
-.setting-section label { display: flex; align-items: center; gap: 8px; margin: 7px 0; font-size: 13px; }
-.setting-section input[type="radio"] { accent-color: #527887; }
-.columns-label input { width: 100px; padding: 4px 6px; border: 1px solid #c9cecd; border-radius: 4px; }
-.setting-help { margin: 5px 0; color: #68737a; font-size: 12px; }
-.setting-actions { display: flex; gap: 8px; margin-top: 12px; }
-.settings-shell button { min-height: 30px; padding: 4px 9px; color: #34444d; background: #f5f5f2; border: 1px solid #cdd2d0; border-radius: 4px; cursor: pointer; font-size: 12px; }
-.settings-shell button:hover:not(:disabled) { background: #e6e8e6; }
-.settings-shell button:focus-visible, .settings-shell input:focus-visible { outline: 2px solid #6e929e; outline-offset: 1px; }
-.settings-shell button:disabled { opacity: .45; cursor: default; }
-.settings-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 24px; border-top: 1px solid #e4e3df; background: #f5f5f2; }
-.footer-spacer { flex: 1; }
-.settings-shell .save-button { color: #fff; background: #426a79; border-color: #426a79; }
-.settings-shell .save-button:hover:not(:disabled) { background: #345966; }
-.settings-error { margin: 5px 0; color: #a22c24; font-size: 12px; }
-.settings-footer .settings-error { flex-basis: 100%; }
+.settings-shell { height: 100%; }
+.settings-shell .v-application__wrap { min-height: 100%; }
+.settings-navigation { padding-block: 12px; }
+.settings-navigation .v-navigation-drawer__content { display: flex; flex-direction: column; }
+.settings-navigation .v-list { flex: 1 1 auto; }
+.settings-navigation-footer { flex: none; padding: 12px; }
+.settings-main { min-height: 0; overflow: auto; }
+.settings-content { min-height: 100%; padding: 20px 24px 28px; }
+.settings-expand-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; margin-block-end: 8px; }
+.settings-category-heading { margin: 14px 0 8px; font-size: 1.125rem; font-weight: 600; line-height: 1.5; }
+.settings-expand-actions + .settings-category-heading { margin-block-start: 0; }
+.settings-page-heading { margin: 0 0 8px; font-size: 1rem; font-weight: 500; line-height: 1.5; }
+.setting-expansion-panels { align-items: stretch; overflow: visible; border-radius: 0; margin-block-end: 12px; }
+.setting-expansion-panels > .setting-expansion-section { flex: 1 0 100%; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 8px; }
+.setting-expansion-heading { margin: 0; }
+.setting-expansion-heading > .v-expansion-panel-title { width: 100%; }
+.setting-expansion-section.v-expansion-panel--active > .setting-expansion-heading > .v-expansion-panel-title { min-height: 64px; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.setting-expansion-title { font-size: 1rem; font-weight: 500; line-height: 1.5; white-space: normal; }
+.setting-expansion-panels .v-expansion-panel-title { gap: 8px; }
+.setting-expansion-panels .v-expansion-panel-text__wrapper { padding: 8px 20px 20px; }
+.setting-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.setting-help { margin: -8px 0 0; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: 0.75rem; }
+.setting-children { margin-block-start: 20px; margin-inline-start: clamp(0px, 2vw, 24px); }
+.setting-children-sheet { padding: 16px; }
+.setting-children-title { margin: 0 0 16px; font-size: 1rem; font-weight: 500; line-height: 1.5; }
+.setting-children-divider { margin-block: 16px; }
+.setting-subsection { min-width: 0; }
+.setting-subsection-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-block-end: 12px; }
+.setting-subsection-title { min-width: 0; margin: 0; font-size: 0.95rem; font-weight: 500; line-height: 1.5; }
+.setting-subsection-content { min-width: 0; }
+.setting-subsection-description { margin: 0 0 12px; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: 0.875rem; }
+.setting-subsection-actions { margin-block-start: 4px; }
+.toolbar-customizer { display: grid; grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr); gap: 20px; margin-block-start: 24px; }
+.toolbar-customizer-column { min-width: 0; }
+.toolbar-customizer-heading { margin: 0 0 8px; font-size: 1rem; font-weight: 500; line-height: 1.5; }
+.toolbar-customizer-list { max-height: 360px; overflow-y: auto; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 8px; }
+.toolbar-customizer-leading { display: flex; align-items: center; gap: 8px; }
+.toolbar-customizer-drag-handle,
+.toolbar-customizer-drag-handle-placeholder {
+  display: inline-flex;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+}
+.toolbar-customizer-drag-handle { color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); cursor: grab; transition: color 120ms ease; }
+.toolbar-customizer-drag-handle:hover,
+.toolbar-customizer-drag-handle:focus-visible { color: rgb(var(--v-theme-on-surface)); }
+.toolbar-customizer-drag-handle:focus-visible { border-radius: 4px; outline: 2px solid rgb(var(--v-theme-primary)); outline-offset: 1px; }
+.toolbar-customizer-drag-handle .v-icon { font-size: 20px; }
+.toolbar-customizer-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.toolbar-customizer-available-item { cursor: grab; }
+.toolbar-customizer-available-item:active { cursor: grabbing; }
+.toolbar-customizer-available-item:active .toolbar-customizer-drag-handle,
+.toolbar-customizer-item:active .toolbar-customizer-drag-handle { cursor: grabbing; }
+.toolbar-customizer-available-item--disabled { cursor: default; opacity: 0.72; }
+.toolbar-customizer-available-item--dragging { opacity: 0.45; }
+.toolbar-customizer-item { position: relative; cursor: grab; }
+.toolbar-customizer-item:active { cursor: grabbing; }
+.toolbar-customizer-item-dragging { opacity: 0.45; }
+.toolbar-customizer-live-region {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.toolbar-customizer-item--drop-before::before {
+  position: absolute;
+  z-index: 1;
+  inset-block-start: 0;
+  inset-inline: 12px;
+  height: 2px;
+  border-radius: 2px;
+  background-color: rgb(var(--v-theme-primary));
+  content: "";
+  pointer-events: none;
+}
+.toolbar-customizer-drop-end {
+  position: relative;
+  min-height: 12px;
+  cursor: default;
+}
+.toolbar-customizer-drop-end--active::before {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline: 12px;
+  height: 2px;
+  border-radius: 2px;
+  background-color: rgb(var(--v-theme-primary));
+  content: "";
+  pointer-events: none;
+}
+.toolbar-customizer-actions { display: flex; flex: 0 0 auto; }
+.toolbar-reset-actions { justify-content: flex-end; }
+.settings-history-actions { display: flex; align-items: center; gap: 2px; margin-inline-end: 16px; }
+.settings-history-tooltip-activator { display: inline-flex; }
+
+@media (max-width: 700px) {
+  .setting-expansion-panels .v-expansion-panel-text__wrapper { padding-inline: 12px; }
+}
+
+@media (max-width: 860px) {
+  .toolbar-customizer { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 700px) {
+  .settings-content { padding-inline: 12px; }
+}

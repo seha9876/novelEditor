@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main editor window with user-selected TXT files and settings window creation",
+  "description": "Main editor window with user-selected TXT files and child window creation",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -23,6 +23,7 @@
     "dialog:allow-ask",
     "dialog:allow-message",
     "fs:allow-read-file",
-    "fs:allow-write-file"
+    "fs:allow-write-file",
+    "store:default"
   ]
 }

@@ -7,20 +7,30 @@ import { emitTo, listen } from '@tauri-apps/api/event'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import EditorPane from './EditorPane.vue'
 import {
-  loadSavedSettings,
   getChangedEditorSettingKeys,
   normalizeEditorSettings,
-  SETTINGS_COMMAND_EVENT,
-  SETTINGS_ERROR_EVENT,
-  SETTINGS_READY_EVENT,
-  SETTINGS_SAVED_EVENT,
-  SETTINGS_STATE_EVENT,
-  SETTINGS_STORAGE_KEY,
   type EditorSettings,
-  type SettingsCommand,
-  type SettingsSnapshot,
   type WrapMode,
 } from './editorSettings'
+import { appCommandDefinitions, type AppCommand, type CommandId } from './appCommands'
+import {
+  saveSettingsPreferences,
+  saveToolbarVisibility,
+  normalizeToolbarDraftItems,
+  normalizeToolbarItems,
+  type ApplicationPreferencesV1,
+  type PreferencesPersistenceState,
+  type ToolbarItem,
+} from './appPreferences'
+import {
+  SETTINGS_COMMAND_EVENT,
+  SETTINGS_ERROR_EVENT,
+  SETTINGS_SAVED_EVENT,
+  SETTINGS_STATE_EVENT,
+  type SettingsCommand,
+  type SettingsPageId,
+  type SettingsSnapshot,
+} from './settingsSession'
 import {
   chooseSavePath,
   chooseTextFile,
@@ -40,6 +50,12 @@ type EditorHandle = {
   focus: () => void
 }
 
+const props = defineProps<{
+  initialPreferences: ApplicationPreferencesV1
+  persistenceState: PreferencesPersistenceState
+  persistenceError?: string
+}>()
+
 // 本文は CodeMirror を正本とし、Vue 側には保存時の比較基準と表示に必要な状態だけを置く。
 const editor = ref<EditorHandle | null>(null)
 const path = ref<string | null>(null)
@@ -50,12 +66,39 @@ const busy = ref(false)
 const currentFile = ref<TextFile | null>(null)
 const maximized = ref(false)
 const alwaysOnTop = ref(false)
-const openMenu = ref<'file' | 'settings' | 'window' | null>(null)
+const openMenu = ref<'file' | 'settings' | 'display' | 'window' | null>(null)
 const settingsSubmenuOpen = ref(false)
 const appWindow = getCurrentWindow()
-const savedSettings = ref(loadSavedSettings())
+const savedSettings = ref({ ...props.initialPreferences.editor })
 const draftSettings = ref<EditorSettings>({ ...savedSettings.value })
-const settingsPending = computed(() => getChangedEditorSettingKeys(savedSettings.value, draftSettings.value).size > 0)
+const toolbarPreferences = ref({
+  visible: props.initialPreferences.ui.toolbar.visible,
+  items: props.initialPreferences.ui.toolbar.items.map((item) => ({ ...item })),
+})
+const toolbarPreviewItems = ref<ToolbarItem[] | null>(null)
+const toolbarPreviewVisible = ref<boolean | null>(null)
+const displayedToolbarItems = computed(() => toolbarPreviewItems.value ?? toolbarPreferences.value.items)
+const displayedToolbarVisible = computed(() => toolbarPreviewVisible.value ?? toolbarPreferences.value.visible)
+const settingsDraftToolbar = ref({
+  visible: toolbarPreferences.value.visible,
+  items: toolbarPreferences.value.items.map((item) => ({ ...item })),
+})
+const settingsPending = computed(() => getChangedEditorSettingKeys(savedSettings.value, draftSettings.value).size > 0 ||
+  settingsDraftToolbar.value.visible !== toolbarPreferences.value.visible ||
+  JSON.stringify(settingsDraftToolbar.value.items) !== JSON.stringify(toolbarPreferences.value.items))
+const displayMenuOpen = computed({
+  get: (): boolean => openMenu.value === 'display',
+  set: (value: boolean): void => {
+    openMenu.value = value ? 'display' : (openMenu.value === 'display' ? null : openMenu.value)
+  },
+})
+const settingsWindowOpen = ref(false)
+const settingsSaveInProgress = ref(false)
+const settingsPage = ref<SettingsPageId>('editor.wrapping')
+const toolbarContextMenuOpen = ref(false)
+const toolbarContextMenuTarget = ref<[number, number]>([0, 0])
+const persistenceNotice = ref('')
+const persistenceNoticeOpen = ref(false)
 const fileMenuOpen = computed({
   get: (): boolean => openMenu.value === 'file',
   set: (value: boolean): void => {
@@ -80,8 +123,32 @@ const displayName = computed(() => path.value ? fileName(path.value) : '無題')
 let unlistenClose: (() => void) | undefined
 let unlistenResize: (() => void) | undefined
 let unlistenSettingsCommand: (() => void) | undefined
-let unlistenSettingsReady: (() => void) | undefined
 let settingsWindowOpening = false
+let settingsWindow: WebviewWindow | null = null
+
+const commandActions: Record<CommandId, () => Promise<void>> = {
+  'document.new': newDocument,
+  'document.open': openDocument,
+  'document.save': saveDocument,
+  'settings.open': openSettingsWindow,
+  'wrap.window': () => chooseWrapMode('window'),
+  'wrap.columns': () => chooseWrapMode('columns'),
+  'wrap.none': () => chooseWrapMode('none'),
+  'window.minimize': minimizeWindow,
+  'window.maximize': maximizeWindow,
+  'window.maximizeVertical': () => maximizeWindowAxis('vertical'),
+  'window.maximizeHorizontal': () => maximizeWindowAxis('horizontal'),
+  'window.alwaysOnTop': toggleAlwaysOnTop,
+  'window.close': closeWindow,
+  'view.toolbar.toggle': toggleToolbarVisibility,
+  'view.toolbar.customize': async () => openSettingsWindow('appearance.toolbar'),
+}
+const appCommands = Object.fromEntries(appCommandDefinitions.map((definition) => [definition.id, {
+  ...definition,
+  execute: commandActions[definition.id],
+  isEnabled: () => !isCommandDisabled(definition.id),
+  isChecked: () => isCommandChecked(definition.id),
+}])) as Record<CommandId, AppCommand>
 
 /** CodeMirror から受けた本文と文字数で表示を更新し、保存済み本文との差から未保存状態を判定する。 */
 function onChange(text: string, count: number): void {
@@ -104,6 +171,12 @@ async function showError(action: string, error: unknown): Promise<void> {
     title: '小説エディタ',
     kind: 'error',
   })
+}
+
+/** 永続化に関する状態を一時通知として表示する。 */
+function showPersistenceNotice(text: string): void {
+  persistenceNotice.value = text
+  persistenceNoticeOpen.value = true
 }
 
 /** 必要なら破棄を確認して新規文書へ切り替え、保存先と編集履歴を初期化する。 */
@@ -166,23 +239,123 @@ async function updateMaximized(): Promise<void> {
   maximized.value = await appWindow.isMaximized()
 }
 
-/** 項目選択時にメニューを閉じてから操作を開始する。 */
-function runMenuAction(action: () => Promise<void>): void {
+/** メニュー項目から共通コマンドを実行する。 */
+function runMenuCommand(commandId: CommandId): void {
   openMenu.value = null
   settingsSubmenuOpen.value = false
-  void action()
+  executeCommand(commandId)
 }
 
-/** 試用中の設定を設定ウィンドウへ送り、両画面の表示を揃える。 */
+/** メニュー、ショートカット、ツールバーで共有するコマンドを実行する。 */
+function executeCommand(commandId: CommandId): void {
+  const command = appCommands[commandId]
+  if (!command.isEnabled()) return
+  void command.execute()
+}
+
+/** 文書処理中に利用できないコマンドを判定する。 */
+function isCommandDisabled(commandId: CommandId): boolean {
+  return (busy.value && (commandId === 'document.new' || commandId === 'document.open' || commandId === 'document.save')) ||
+    (settingsSaveInProgress.value && commandId === 'view.toolbar.toggle')
+}
+
+/** 現在選択されている状態付きコマンドかを判定する。 */
+function isCommandChecked(commandId: CommandId): boolean {
+  if (commandId === 'wrap.window') return draftSettings.value.wrapMode === 'window'
+  if (commandId === 'wrap.columns') return draftSettings.value.wrapMode === 'columns'
+  if (commandId === 'wrap.none') return draftSettings.value.wrapMode === 'none'
+  return commandId === 'window.alwaysOnTop' && alwaysOnTop.value
+}
+
+/** コマンドIDから表示情報を取得する。 */
+function getCommandLabel(commandId: CommandId): string {
+  return appCommands[commandId].label
+}
+
+/** コマンド定義からショートカット表記を取得する。 */
+function getCommandShortcut(commandId: CommandId): string | undefined {
+  return appCommands[commandId].shortcut
+}
+
+/** 右クリック位置へツールバーの操作メニューを開く。 */
+function openToolbarContextMenu(event: MouseEvent): void {
+  event.preventDefault()
+  openMenu.value = null
+  settingsSubmenuOpen.value = false
+  toolbarContextMenuTarget.value = [event.clientX, event.clientY]
+  toolbarContextMenuOpen.value = true
+}
+
+/** 保存値と編集中の両セクションを設定ウィンドウへ送る。 */
 async function publishSettingsState(): Promise<void> {
   if (!await WebviewWindow.getByLabel('settings')) return
-  const snapshot: SettingsSnapshot = { saved: savedSettings.value, draft: draftSettings.value }
+  const snapshot: SettingsSnapshot = {
+    saved: { ...savedSettings.value },
+    draft: { ...draftSettings.value },
+    savedToolbar: {
+      visible: toolbarPreferences.value.visible,
+      items: toolbarPreferences.value.items.map((item) => ({ ...item })),
+    },
+    draftToolbar: {
+      visible: settingsDraftToolbar.value.visible,
+      items: settingsDraftToolbar.value.items.map((item) => ({ ...item })),
+    },
+    page: settingsPage.value,
+  }
   await emitTo('settings', SETTINGS_STATE_EVENT, snapshot)
 }
 
-/** メニューから選んだ折り返し方法を試用状態へ反映する。保存は設定画面で行う。 */
+/** ツールバー設定のドラフトを表示内容へ反映する。 */
+function applyToolbarDraftPreview(): void {
+  toolbarPreviewVisible.value = settingsDraftToolbar.value.visible
+  toolbarPreviewItems.value = settingsDraftToolbar.value.items.map((item) => ({ ...item }))
+}
+
+/** 表示メニューからの切替を設定中はドラフトへ、通常時は即時保存する。 */
+async function toggleToolbarVisibility(): Promise<void> {
+  if (settingsSaveInProgress.value) return
+  const nextVisibility = !displayedToolbarVisible.value
+  if (settingsWindowOpen.value) {
+    settingsDraftToolbar.value.visible = nextVisibility
+    applyToolbarDraftPreview()
+    try {
+      await publishSettingsState()
+    } catch (error) {
+      await showError('設定の同期', error)
+    }
+    return
+  }
+
+  const previousVisibility = toolbarPreferences.value.visible
+  toolbarPreferences.value.visible = nextVisibility
+  try {
+    await saveToolbarVisibility(nextVisibility)
+  } catch (error) {
+    toolbarPreferences.value.visible = previousVisibility
+    showPersistenceNotice(`ツールバーの表示状態を保存できませんでした。${String(error)}`)
+  }
+}
+
+/** 設定ウィンドウが予期せず閉じたとき、編集中の値とプレビューを破棄する。 */
+function handleSettingsWindowDestroyed(destroyedWindow: WebviewWindow): void {
+  if (settingsWindow !== destroyedWindow) return
+  settingsWindow = null
+  settingsWindowOpening = false
+  if (!settingsWindowOpen.value || settingsSaveInProgress.value) return
+  settingsWindowOpen.value = false
+  draftSettings.value = { ...savedSettings.value }
+  settingsDraftToolbar.value = {
+    visible: toolbarPreferences.value.visible,
+    items: toolbarPreferences.value.items.map((item) => ({ ...item })),
+  }
+  toolbarPreviewVisible.value = null
+  toolbarPreviewItems.value = null
+}
+
+/** メニューから選んだ折り返し方法を試用状態へ反映する。 */
 async function chooseWrapMode(mode: WrapMode): Promise<void> {
   draftSettings.value = { ...draftSettings.value, wrapMode: mode }
+  if (settingsWindowOpen.value) settingsPage.value = 'editor.wrapping'
   try {
     await publishSettingsState()
   } catch (error) {
@@ -190,53 +363,119 @@ async function chooseWrapMode(mode: WrapMode): Promise<void> {
   }
 }
 
-/** 設定画面から受けた変更・保存・取消をメインウィンドウで処理する。 */
+/** 設定画面から受けたページ遷移・変更・保存・取消を処理する。 */
 async function handleSettingsCommand(command: SettingsCommand): Promise<void> {
   try {
-    if (command.type === 'change') {
+    if (command.type === 'ready') {
+      settingsWindowOpen.value = true
+      await publishSettingsState()
+    } else if (command.type === 'navigate') {
+      settingsPage.value = command.page
+      await publishSettingsState()
+    } else if (command.type === 'change-editor') {
       draftSettings.value = normalizeEditorSettings({ ...draftSettings.value, ...command.value })
       await publishSettingsState()
-    } else if (command.type === 'cancel') {
-      draftSettings.value = { ...savedSettings.value }
+    } else if (command.type === 'change-toolbar') {
+      settingsDraftToolbar.value = {
+        ...settingsDraftToolbar.value,
+        ...command.value,
+        items: command.value.items
+          ? normalizeToolbarDraftItems(command.value.items)
+          : settingsDraftToolbar.value.items,
+      }
+      applyToolbarDraftPreview()
       await publishSettingsState()
+    } else if (command.type === 'cancel') {
+      if (settingsSaveInProgress.value) return
+      draftSettings.value = { ...savedSettings.value }
+      settingsDraftToolbar.value = {
+        visible: toolbarPreferences.value.visible,
+        items: toolbarPreferences.value.items.map((item) => ({ ...item })),
+      }
+      toolbarPreviewVisible.value = null
+      toolbarPreviewItems.value = null
+      settingsWindowOpen.value = false
     } else if (command.type === 'save') {
-      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(draftSettings.value))
-      savedSettings.value = { ...draftSettings.value }
+      if (settingsSaveInProgress.value) return
+      settingsSaveInProgress.value = true
+      const editorCandidate = { ...draftSettings.value }
+      const toolbarCandidate = {
+        visible: settingsDraftToolbar.value.visible,
+        items: normalizeToolbarItems(settingsDraftToolbar.value.items),
+      }
+      await saveSettingsPreferences(editorCandidate, toolbarCandidate)
+      savedSettings.value = editorCandidate
+      toolbarPreferences.value = toolbarCandidate
+      settingsDraftToolbar.value = {
+        visible: toolbarCandidate.visible,
+        items: toolbarCandidate.items.map((item) => ({ ...item })),
+      }
+      toolbarPreviewVisible.value = null
+      toolbarPreviewItems.value = null
+      settingsWindowOpen.value = false
       await emitTo('settings', SETTINGS_SAVED_EVENT)
     }
   } catch (error) {
     await emitTo('settings', SETTINGS_ERROR_EVENT, String(error))
+  } finally {
+    if (command.type === 'save') settingsSaveInProgress.value = false
   }
 }
 
-/** 設定ウィンドウを一つだけ開き、既存のウィンドウがあれば前面へ移す。 */
-async function openSettingsWindow(): Promise<void> {
+/** 設定ウィンドウを開き、指定されたページを表示して前面へ移す。 */
+async function openSettingsWindow(page: SettingsPageId = 'editor.wrapping'): Promise<void> {
+  settingsPage.value = page
   if (settingsWindowOpening) return
+  settingsWindowOpening = true
   try {
     const existing = await WebviewWindow.getByLabel('settings')
     if (existing) {
+      settingsWindow = existing
+      if (!settingsWindowOpen.value) {
+        settingsWindowOpen.value = true
+        settingsDraftToolbar.value = {
+          visible: toolbarPreferences.value.visible,
+          items: toolbarPreferences.value.items.map((item) => ({ ...item })),
+        }
+        applyToolbarDraftPreview()
+      }
+      await publishSettingsState()
       await existing.setFocus()
+      settingsWindowOpening = false
       return
     }
-    settingsWindowOpening = true
-    const settingsWindow = new WebviewWindow('settings', {
+    settingsWindowOpen.value = true
+    settingsDraftToolbar.value = {
+      visible: toolbarPreferences.value.visible,
+      items: toolbarPreferences.value.items.map((item) => ({ ...item })),
+    }
+    applyToolbarDraftPreview()
+    const createdSettingsWindow = new WebviewWindow('settings', {
       url: 'settings.html',
       title: '設定',
       parent: 'main',
       center: true,
-      width: 560,
-      height: 520,
-      minWidth: 480,
-      minHeight: 420,
+      width: 900,
+      height: 680,
+      minWidth: 700,
+      minHeight: 520,
       decorations: true,
     })
-    await settingsWindow.once('tauri://created', () => { settingsWindowOpening = false })
-    await settingsWindow.once('tauri://error', (event) => {
+    settingsWindow = createdSettingsWindow
+    void createdSettingsWindow.once('tauri://destroyed', () => handleSettingsWindowDestroyed(createdSettingsWindow))
+    void createdSettingsWindow.once('tauri://created', () => { settingsWindowOpening = false })
+    void createdSettingsWindow.once('tauri://error', (event) => {
       settingsWindowOpening = false
+      settingsWindowOpen.value = false
+      toolbarPreviewVisible.value = null
+      toolbarPreviewItems.value = null
       void showError('設定画面を開く操作', event.payload)
     })
   } catch (error) {
     settingsWindowOpening = false
+    settingsWindowOpen.value = false
+    toolbarPreviewVisible.value = null
+    toolbarPreviewItems.value = null
     await showError('設定画面を開く操作', error)
   }
 }
@@ -332,15 +571,11 @@ function onKeydown(event: KeyboardEvent): void {
     return
   }
   if (event.ctrlKey && !event.altKey && !event.shiftKey) {
-    if (event.key.toLowerCase() === 's') {
+    const shortcut = `ctrl+${event.key.toLowerCase()}`
+    const command = appCommandDefinitions.find((definition) => definition.shortcut?.toLowerCase() === shortcut)
+    if (command) {
       event.preventDefault()
-      void saveDocument()
-    } else if (event.key.toLowerCase() === 'o') {
-      event.preventDefault()
-      void openDocument()
-    } else if (event.key.toLowerCase() === 'n') {
-      event.preventDefault()
-      void newDocument()
+      executeCommand(command.id)
     }
   }
 }
@@ -348,6 +583,12 @@ function onKeydown(event: KeyboardEvent): void {
 // 画面のマウント時にショートカットと Tauri のウィンドウ終了要求を購読する。
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
+  if (props.persistenceState !== 'ready') {
+    const detail = props.persistenceError ? ` ${props.persistenceError}` : ''
+    showPersistenceNotice(props.persistenceState === 'recovered'
+      ? `設定データを読み込めなかったため、初期値で再作成しました。${detail}`
+      : `設定を保存できません。今回の変更はアプリ終了後に失われます。${detail}`)
+  }
   // 保存処理中や未保存のまま終了しないよう、終了要求を必要に応じて取り消す。
   unlistenClose = await appWindow.onCloseRequested(async (event) => {
     if (busy.value) {
@@ -363,7 +604,6 @@ onMounted(async () => {
   unlistenSettingsCommand = await listen<SettingsCommand>(SETTINGS_COMMAND_EVENT, (event) => {
     void handleSettingsCommand(event.payload)
   })
-  unlistenSettingsReady = await listen(SETTINGS_READY_EVENT, () => { void publishSettingsState() })
   await updateMaximized()
   alwaysOnTop.value = await appWindow.isAlwaysOnTop()
 })
@@ -374,36 +614,42 @@ onBeforeUnmount(() => {
   unlistenClose?.()
   unlistenResize?.()
   unlistenSettingsCommand?.()
-  unlistenSettingsReady?.()
+  void settingsWindow?.destroy()
 })
 </script>
 
 <template>
   <VApp class="app-shell">
-    <VAppBar class="titlebar" :height="48" flat>
+    <VAppBar
+      class="titlebar"
+      :height="48"
+      :extended="displayedToolbarVisible"
+      :extension-height="40"
+      flat
+    >
       <nav class="menu-bar" aria-label="メニューバー">
         <VMenu v-model="fileMenuOpen" :close-on-content-click="false" :transition="false">
-          <template #activator="{ props }">
-            <VBtn v-bind="props" class="menu-heading" size="small" variant="text">ファイル</VBtn>
+          <template #activator="{ props: fileMenuProps }">
+            <VBtn v-bind="fileMenuProps" class="menu-heading" size="small" variant="text">ファイル</VBtn>
           </template>
           <VList density="compact" min-width="220" role="menu" aria-label="ファイル">
-            <VListItem role="menuitem" :disabled="busy" title="新規" @click="runMenuAction(newDocument)">
-              <template #append><span class="menu-shortcut">Ctrl+N</span></template>
+            <VListItem role="menuitem" :disabled="isCommandDisabled('document.new')" title="新規" @click="runMenuCommand('document.new')">
+              <template #append><span class="menu-shortcut">{{ getCommandShortcut('document.new') }}</span></template>
             </VListItem>
-            <VListItem role="menuitem" :disabled="busy" title="開く" @click="runMenuAction(openDocument)">
-              <template #append><span class="menu-shortcut">Ctrl+O</span></template>
+            <VListItem role="menuitem" :disabled="isCommandDisabled('document.open')" title="開く" @click="runMenuCommand('document.open')">
+              <template #append><span class="menu-shortcut">{{ getCommandShortcut('document.open') }}</span></template>
             </VListItem>
-            <VListItem role="menuitem" :disabled="busy" title="保存" @click="runMenuAction(saveDocument)">
-              <template #append><span class="menu-shortcut">Ctrl+S</span></template>
+            <VListItem role="menuitem" :disabled="isCommandDisabled('document.save')" title="保存" @click="runMenuCommand('document.save')">
+              <template #append><span class="menu-shortcut">{{ getCommandShortcut('document.save') }}</span></template>
             </VListItem>
           </VList>
         </VMenu>
         <VMenu v-model="settingsMenuOpen" :close-on-content-click="false" :transition="false">
-          <template #activator="{ props }">
-            <VBtn v-bind="props" class="menu-heading" size="small" variant="text">設定</VBtn>
+          <template #activator="{ props: settingsMenuProps }">
+            <VBtn v-bind="settingsMenuProps" class="menu-heading" size="small" variant="text">設定</VBtn>
           </template>
           <VList density="compact" min-width="240" role="menu" aria-label="設定">
-            <VListItem role="menuitem" title="設定画面を開く" @click="runMenuAction(openSettingsWindow)">
+            <VListItem role="menuitem" title="設定画面を開く" @click="runMenuCommand('settings.open')">
               <template #append><span v-if="settingsPending" class="menu-shortcut">未保存</span></template>
             </VListItem>
             <VDivider class="my-1" />
@@ -412,33 +658,44 @@ onBeforeUnmount(() => {
                 <VListItem v-bind="submenuProps" role="menuitem" title="折り返し設定" append-icon="mdi-chevron-right" />
               </template>
               <VList density="compact" min-width="240" role="menu" aria-label="折り返し設定">
-                <VListItem role="menuitemradio" :aria-checked="draftSettings.wrapMode === 'window'" :active="draftSettings.wrapMode === 'window'" title="右端で折り返し" @click="runMenuAction(() => chooseWrapMode('window'))">
+                <VListItem role="menuitemradio" :aria-checked="draftSettings.wrapMode === 'window'" :active="draftSettings.wrapMode === 'window'" title="右端で折り返し" @click="runMenuCommand('wrap.window')">
                   <template #prepend><VIcon icon="mdi-check" :style="{ visibility: draftSettings.wrapMode === 'window' ? 'visible' : 'hidden' }" aria-hidden="true" /></template>
                 </VListItem>
-                <VListItem role="menuitemradio" :aria-checked="draftSettings.wrapMode === 'columns'" :active="draftSettings.wrapMode === 'columns'" title="指定桁数で折り返し" @click="runMenuAction(() => chooseWrapMode('columns'))">
+                <VListItem role="menuitemradio" :aria-checked="draftSettings.wrapMode === 'columns'" :active="draftSettings.wrapMode === 'columns'" title="指定桁数で折り返し" @click="runMenuCommand('wrap.columns')">
                   <template #prepend><VIcon icon="mdi-check" :style="{ visibility: draftSettings.wrapMode === 'columns' ? 'visible' : 'hidden' }" aria-hidden="true" /></template>
                 </VListItem>
-                <VListItem role="menuitemradio" :aria-checked="draftSettings.wrapMode === 'none'" :active="draftSettings.wrapMode === 'none'" title="折り返さない" @click="runMenuAction(() => chooseWrapMode('none'))">
+                <VListItem role="menuitemradio" :aria-checked="draftSettings.wrapMode === 'none'" :active="draftSettings.wrapMode === 'none'" title="折り返さない" @click="runMenuCommand('wrap.none')">
                   <template #prepend><VIcon icon="mdi-check" :style="{ visibility: draftSettings.wrapMode === 'none' ? 'visible' : 'hidden' }" aria-hidden="true" /></template>
                 </VListItem>
               </VList>
             </VMenu>
           </VList>
         </VMenu>
+        <VMenu v-model="displayMenuOpen" :close-on-content-click="false" :transition="false">
+          <template #activator="{ props: displayMenuProps }">
+            <VBtn v-bind="displayMenuProps" class="menu-heading" size="small" variant="text">表示</VBtn>
+          </template>
+          <VList density="compact" min-width="240" role="menu" aria-label="表示">
+            <VListItem role="menuitemcheckbox" :aria-checked="displayedToolbarVisible" :active="displayedToolbarVisible" title="ツールバーを表示" :disabled="settingsSaveInProgress" @click="runMenuCommand('view.toolbar.toggle')">
+              <template #prepend><VIcon icon="mdi-check" :style="{ visibility: displayedToolbarVisible ? 'visible' : 'hidden' }" aria-hidden="true" /></template>
+            </VListItem>
+            <VListItem role="menuitem" title="ツールバーをカスタマイズ…" @click="runMenuCommand('view.toolbar.customize')" />
+          </VList>
+        </VMenu>
         <VMenu v-model="windowMenuOpen" :close-on-content-click="false" :transition="false">
-          <template #activator="{ props }">
-            <VBtn v-bind="props" class="menu-heading" size="small" variant="text">ウィンドウ</VBtn>
+          <template #activator="{ props: windowMenuProps }">
+            <VBtn v-bind="windowMenuProps" class="menu-heading" size="small" variant="text">ウィンドウ</VBtn>
           </template>
           <VList density="compact" min-width="260" role="menu" aria-label="ウィンドウ">
-            <VListItem role="menuitem" title="最小化" @click="runMenuAction(minimizeWindow)" />
-            <VListItem role="menuitem" title="最大化" @click="runMenuAction(maximizeWindow)" />
-            <VListItem role="menuitem" title="縦方向に最大化" @click="runMenuAction(() => maximizeWindowAxis('vertical'))" />
-            <VListItem role="menuitem" title="横方向に最大化" @click="runMenuAction(() => maximizeWindowAxis('horizontal'))" />
-            <VListItem role="menuitemcheckbox" :aria-checked="alwaysOnTop" :active="alwaysOnTop" title="常に手前に表示" @click="runMenuAction(toggleAlwaysOnTop)">
+            <VListItem role="menuitem" title="最小化" @click="runMenuCommand('window.minimize')" />
+            <VListItem role="menuitem" title="最大化" @click="runMenuCommand('window.maximize')" />
+            <VListItem role="menuitem" title="縦方向に最大化" @click="runMenuCommand('window.maximizeVertical')" />
+            <VListItem role="menuitem" title="横方向に最大化" @click="runMenuCommand('window.maximizeHorizontal')" />
+            <VListItem role="menuitemcheckbox" :aria-checked="alwaysOnTop" :active="alwaysOnTop" title="常に手前に表示" @click="runMenuCommand('window.alwaysOnTop')">
               <template #prepend><VIcon icon="mdi-check" :style="{ visibility: alwaysOnTop ? 'visible' : 'hidden' }" aria-hidden="true" /></template>
             </VListItem>
             <VDivider class="my-1" />
-            <VListItem role="menuitem" title="閉じる" @click="runMenuAction(closeWindow)" />
+            <VListItem role="menuitem" title="閉じる" @click="runMenuCommand('window.close')" />
           </VList>
         </VMenu>
         <VBtn class="menu-heading menu-placeholder" size="small" variant="text" disabled>ヘルプ</VBtn>
@@ -450,11 +707,48 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="window-controls" aria-label="ウィンドウ操作">
-        <VBtn icon variant="text" size="small" aria-label="最小化" title="最小化" @click="minimizeWindow"><VIcon icon="mdi-minus" aria-hidden="true" /></VBtn>
+        <VBtn icon variant="text" size="small" aria-label="最小化" title="最小化" @click="executeCommand('window.minimize')"><VIcon icon="mdi-minus" aria-hidden="true" /></VBtn>
         <VBtn icon variant="text" size="small" :aria-label="maximized ? '元に戻す' : '最大化'" :title="maximized ? '元に戻す' : '最大化'" @click="toggleMaximizeWindow"><VIcon :icon="maximized ? 'mdi-window-restore' : 'mdi-square-outline'" aria-hidden="true" /></VBtn>
-        <VBtn class="window-close" icon variant="text" size="small" aria-label="閉じる" title="閉じる" @click="closeWindow"><VIcon icon="mdi-close" aria-hidden="true" /></VBtn>
+        <VBtn class="window-close" icon variant="text" size="small" aria-label="閉じる" title="閉じる" @click="executeCommand('window.close')"><VIcon icon="mdi-close" aria-hidden="true" /></VBtn>
       </div>
+      <template #extension>
+        <div v-if="displayedToolbarVisible" class="toolbar-strip" role="toolbar" aria-label="ツールバー" @contextmenu="openToolbarContextMenu">
+          <div class="toolbar-scroll">
+            <template v-for="item in displayedToolbarItems" :key="item.type === 'command' ? item.commandId : item.id">
+              <VDivider v-if="item.type === 'separator'" class="toolbar-divider" vertical inset />
+              <VTooltip v-else :text="getCommandLabel(item.commandId)" location="bottom">
+                <template #activator="{ props: tooltipProps }">
+                  <VBtn
+                    v-bind="tooltipProps"
+                    class="toolbar-command"
+                    icon
+                    size="small"
+                    :variant="isCommandChecked(item.commandId) ? 'tonal' : 'text'"
+                    :color="isCommandChecked(item.commandId) ? 'primary' : undefined"
+                    :disabled="isCommandDisabled(item.commandId)"
+                    :aria-label="getCommandLabel(item.commandId)"
+                    :aria-pressed="['wrap.window', 'wrap.columns', 'wrap.none', 'window.alwaysOnTop'].includes(item.commandId) ? isCommandChecked(item.commandId) : undefined"
+                    @click="executeCommand(item.commandId)"
+                  >
+                    <VIcon :icon="appCommands[item.commandId].icon" aria-hidden="true" />
+                  </VBtn>
+                </template>
+              </VTooltip>
+            </template>
+          </div>
+        </div>
+      </template>
     </VAppBar>
+    <VMenu v-model="toolbarContextMenuOpen" :target="toolbarContextMenuTarget" location="bottom start" :close-on-content-click="true">
+      <VList density="compact" min-width="240" role="menu" aria-label="ツールバー操作">
+        <VListItem role="menuitem" title="ツールバーをカスタマイズ…" @click="executeCommand('view.toolbar.customize')" />
+        <VDivider class="my-1" />
+        <VListItem role="menuitem" title="ツールバーを非表示" :disabled="settingsSaveInProgress" @click="executeCommand('view.toolbar.toggle')" />
+      </VList>
+    </VMenu>
+    <VSnackbar v-model="persistenceNoticeOpen" timeout="9000" location="bottom">
+      {{ persistenceNotice }}
+    </VSnackbar>
     <VMain class="writing-area" aria-label="本文編集領域">
       <EditorPane ref="editor" :settings="draftSettings" @change="onChange" />
     </VMain>

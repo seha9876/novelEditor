@@ -8,6 +8,7 @@ import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import EditorPane from './EditorPane.vue'
 import {
   loadSavedSettings,
+  getChangedEditorSettingKeys,
   normalizeEditorSettings,
   SETTINGS_COMMAND_EVENT,
   SETTINGS_ERROR_EVENT,
@@ -54,7 +55,7 @@ const settingsSubmenuOpen = ref(false)
 const appWindow = getCurrentWindow()
 const savedSettings = ref(loadSavedSettings())
 const draftSettings = ref<EditorSettings>({ ...savedSettings.value })
-const settingsPending = computed(() => JSON.stringify(draftSettings.value) !== JSON.stringify(savedSettings.value))
+const settingsPending = computed(() => getChangedEditorSettingKeys(savedSettings.value, draftSettings.value).size > 0)
 const fileMenuOpen = computed({
   get: (): boolean => openMenu.value === 'file',
   set: (value: boolean): void => {

@@ -24,9 +24,9 @@ import {
   SETTINGS_ERROR_EVENT,
   SETTINGS_STATE_EVENT,
   type SettingsCommand,
-  type SettingsPageId,
   type SettingsSnapshot,
 } from './settingsSession'
+import type { SettingsPageId, SettingsViewId } from './settingsDefinitions'
 import {
   chooseSavePath,
   chooseTextFile,
@@ -51,6 +51,11 @@ const props = defineProps<{
   persistenceState: PreferencesPersistenceState
   persistenceError?: string
 }>()
+
+type SettingsValues = {
+  editor: EditorSettings
+  toolbar: ToolbarPreferences
+}
 
 // 本文は CodeMirror、設定はVueの現在値を正本とし、設定更新は明示保存経路へ集約する。
 const editor = ref<EditorHandle | null>(null)
@@ -79,8 +84,7 @@ const displayMenuOpen = computed({
   },
 })
 const settingsWindowOpen = ref(false)
-const settingsSaveState = ref<'idle' | 'pending' | 'saving'>('idle')
-const settingsPage = ref<SettingsPageId>('editor.wrapping')
+const settingsPage = ref<SettingsViewId>('editor.wrapping')
 const toolbarContextMenuOpen = ref(false)
 const toolbarContextMenuTarget = ref<[number, number]>([0, 0])
 const persistenceNotice = ref('')
@@ -119,6 +123,10 @@ let settingsChangeRevision = 0
 let persistedSettingsRevision = 0
 let settingsStateRevision = 0
 let lastPersistedSettings = cloneSettings(editorSettings.value, toolbarPreferences.value)
+let settingsHistoryActive = false
+const settingsUndoHistory: SettingsValues[] = []
+const settingsRedoHistory: SettingsValues[] = []
+const settingsHistoryLimit = 100
 let mainCloseInProgress = false
 
 const commandActions: Record<CommandId, () => Promise<void>> = {
@@ -298,7 +306,10 @@ async function publishSettingsState(): Promise<void> {
       editor: { ...editorSettings.value },
       toolbar: cloneToolbarPreferences(toolbarPreferences.value),
       page: settingsPage.value,
-      saveState: settingsSaveState.value,
+      history: {
+        canUndo: settingsUndoHistory.length > 0,
+        canRedo: settingsRedoHistory.length > 0,
+      },
       revision: ++settingsStateRevision,
     }
     await emitTo('settings', SETTINGS_STATE_EVENT, snapshot)
@@ -308,10 +319,7 @@ async function publishSettingsState(): Promise<void> {
 }
 
 /** エディター設定とツールバー設定を分離せず複製する。 */
-function cloneSettings(editorValue: EditorSettings, toolbarValue: ToolbarPreferences): {
-  editor: EditorSettings
-  toolbar: ToolbarPreferences
-} {
+function cloneSettings(editorValue: EditorSettings, toolbarValue: ToolbarPreferences): SettingsValues {
   return {
     editor: { ...editorValue },
     toolbar: cloneToolbarPreferences(toolbarValue),
@@ -326,7 +334,6 @@ function cloneToolbarPreferences(value: ToolbarPreferences): ToolbarPreferences 
 /** 設定変更を250msまとめて保存し、頻繁な連続操作によるStore書き込みを抑える。 */
 function scheduleSettingsSave(): void {
   if (settingsSaveTimer) clearTimeout(settingsSaveTimer)
-  settingsSaveState.value = 'pending'
   settingsSaveTimer = setTimeout(() => {
     settingsSaveTimer = undefined
     requestSettingsFlush()
@@ -346,6 +353,7 @@ function updateCurrentSettings(
   editorPatch?: Partial<EditorSettings>,
   toolbarPatch?: Partial<ToolbarPreferences>,
   flushImmediately = false,
+  recordHistory = true,
 ): void {
   const nextEditor = normalizeEditorSettings({ ...editorSettings.value, ...editorPatch })
   const nextToolbar = {
@@ -362,6 +370,11 @@ function updateCurrentSettings(
     return
   }
 
+  if (recordHistory && settingsHistoryActive) {
+    settingsUndoHistory.push(cloneSettings(editorSettings.value, toolbarPreferences.value))
+    if (settingsUndoHistory.length > settingsHistoryLimit) settingsUndoHistory.shift()
+    settingsRedoHistory.length = 0
+  }
   editorSettings.value = nextEditor
   toolbarPreferences.value = nextToolbar
   settingsChangeRevision += 1
@@ -369,7 +382,45 @@ function updateCurrentSettings(
   if (flushImmediately) requestSettingsFlush(true)
 }
 
-/** 現在値をStoreへ直列保存し、保存待ち中の変更は最新値へまとめて処理する。 */
+/** 設定ウィンドウの表示中だけ使うUndo履歴を新しく開始する。 */
+function beginSettingsHistorySession(): void {
+  clearSettingsHistory()
+  settingsHistoryActive = true
+}
+
+/** Undo／Redoの両履歴を空にし、現在の設定状態にそろえる。 */
+function clearSettingsHistory(): void {
+  settingsUndoHistory.length = 0
+  settingsRedoHistory.length = 0
+}
+
+/** 設定ウィンドウ終了時に履歴セッションを破棄する。 */
+function endSettingsHistorySession(): void {
+  settingsHistoryActive = false
+  clearSettingsHistory()
+}
+
+/** Undoで直前状態を適用し、現在状態をRedo履歴へ移す。 */
+function undoSettingsChange(): void {
+  const previous = settingsUndoHistory.pop()
+  if (!previous) return
+
+  settingsRedoHistory.push(cloneSettings(editorSettings.value, toolbarPreferences.value))
+  updateCurrentSettings(previous.editor, previous.toolbar, false, false)
+  void publishSettingsState()
+}
+
+/** Redoで取り消した状態を適用し、現在状態をUndo履歴へ移す。 */
+function redoSettingsChange(): void {
+  const next = settingsRedoHistory.pop()
+  if (!next) return
+
+  settingsUndoHistory.push(cloneSettings(editorSettings.value, toolbarPreferences.value))
+  updateCurrentSettings(next.editor, next.toolbar, false, false)
+  void publishSettingsState()
+}
+
+/** 現在値をStoreへ直列保存し、保存中に加わった変更は最新値へまとめて処理する。 */
 async function flushSettingsSave(immediate = false): Promise<void> {
   if (settingsSaveTimer) {
     clearTimeout(settingsSaveTimer)
@@ -384,12 +435,10 @@ async function flushSettingsSave(immediate = false): Promise<void> {
   }
 
   if (settingsChangeRevision <= persistedSettingsRevision) {
-    settingsSaveState.value = 'idle'
     await publishSettingsState()
     return
   }
 
-  settingsSaveState.value = 'saving'
   // 共有PromiseにはStore書き込みだけでなく、状態確定と必要な追随保存も含める。
   const saveCycle = runSettingsSaveSequence(immediate).catch((error: unknown) => {
     restoreLastPersistedSettings(error)
@@ -409,19 +458,16 @@ async function runSettingsSaveSequence(immediate: boolean): Promise<void> {
   while (settingsChangeRevision > persistedSettingsRevision) {
     const writeRevision = settingsChangeRevision
     const writeSnapshot = cloneSettings(editorSettings.value, toolbarPreferences.value)
-    settingsSaveState.value = 'saving'
     await runSettingsSaveCycle(writeSnapshot, writeRevision)
     const hasNewerChanges = settingsChangeRevision > persistedSettingsRevision
 
     if (!hasNewerChanges) {
-      settingsSaveState.value = 'idle'
       flushAfterCurrentSave = false
       trailingSaveDue = false
       await publishSettingsState()
       return
     }
 
-    settingsSaveState.value = 'pending'
     await publishSettingsState()
     if (flushAfterCurrentSave || (flushImmediately && trailingSaveDue)) {
       flushAfterCurrentSave = false
@@ -436,7 +482,6 @@ async function runSettingsSaveSequence(immediate: boolean): Promise<void> {
     return
   }
 
-  settingsSaveState.value = 'idle'
   flushAfterCurrentSave = false
   trailingSaveDue = false
   await publishSettingsState()
@@ -450,9 +495,9 @@ function restoreLastPersistedSettings(error: unknown): void {
   toolbarPreferences.value = cloneToolbarPreferences(lastPersistedSettings.toolbar)
   settingsChangeRevision += 1
   persistedSettingsRevision = settingsChangeRevision
-  settingsSaveState.value = 'idle'
   flushAfterCurrentSave = false
   trailingSaveDue = false
+  clearSettingsHistory()
 
   const detail = `設定を保存できなかったため、直近の保存内容へ戻しました。${String(error)}`
   showPersistenceNotice(detail)
@@ -489,6 +534,7 @@ function handleSettingsWindowDestroyed(destroyedWindow: WebviewWindow): void {
   settingsWindow = null
   settingsWindowOpening = false
   settingsWindowOpen.value = false
+  endSettingsHistorySession()
 }
 
 /** メニューから選んだ折り返し方法を即時反映し、自動保存へ渡す。 */
@@ -502,11 +548,16 @@ async function chooseWrapMode(mode: WrapMode): Promise<void> {
 async function handleSettingsCommand(command: SettingsCommand): Promise<void> {
   try {
     if (command.type === 'ready') {
+      if (!settingsHistoryActive) beginSettingsHistorySession()
       settingsWindowOpen.value = true
       await publishSettingsState()
     } else if (command.type === 'navigate') {
       settingsPage.value = command.page
       await publishSettingsState()
+    } else if (command.type === 'undo') {
+      undoSettingsChange()
+    } else if (command.type === 'redo') {
+      redoSettingsChange()
     } else if (command.type === 'change') {
       updateCurrentSettings(command.editor, command.toolbar, command.flush ?? false)
     }
@@ -644,7 +695,7 @@ async function flushAllSettingsChanges(): Promise<void> {
   }
 }
 
-/** Esc でメニューを閉じ、ファイル操作の Ctrl ショートカットを処理する。Undo/Redo は CodeMirror に任せる。 */
+/** Esc でメニューを閉じ、ファイル操作の Ctrl ショートカットを処理する。 */
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape' && settingsSubmenuOpen.value) {
     event.preventDefault()

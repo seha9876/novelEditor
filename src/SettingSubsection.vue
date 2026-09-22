@@ -1,13 +1,14 @@
 <script setup lang="ts">
 defineProps<{
   title: string
+  headingLevel?: number
 }>()
 </script>
 
 <template>
   <section class="setting-subsection">
     <div class="setting-subsection-heading">
-      <h3 class="setting-subsection-title">{{ title }}</h3>
+      <component :is="`h${headingLevel ?? 3}`" class="setting-subsection-title">{{ title }}</component>
     </div>
     <div class="setting-subsection-content">
       <slot />

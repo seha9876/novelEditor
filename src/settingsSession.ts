@@ -1,22 +1,25 @@
 import type { EditorSettings } from './editorSettings'
 import type { ToolbarItem, ToolbarPreferences } from './appPreferences'
+import type { SettingsViewId } from './settingsDefinitions'
 
-/** 設定ウィンドウで表示するページを識別する。 */
-export type SettingsPageId = 'editor.wrapping' | 'appearance.toolbar'
-
-/** 設定ウィンドウへ配信する現在値と自動保存の状態。 */
+/** 設定ウィンドウへ配信する現在値とUndo／Redoの状態。 */
 export type SettingsSnapshot = {
   editor: EditorSettings
   toolbar: ToolbarPreferences
-  page: SettingsPageId
-  saveState: 'idle' | 'pending' | 'saving'
+  page: SettingsViewId
+  history: {
+    canUndo: boolean
+    canRedo: boolean
+  }
   revision: number
 }
 
-/** 設定ウィンドウからメイン画面へ送るページ移動と型付き部分更新。 */
+/** 設定ウィンドウからメイン画面へ送る履歴操作、ページ移動、型付き部分更新。 */
 export type SettingsCommand =
   | { type: 'ready' }
-  | { type: 'navigate'; page: SettingsPageId }
+  | { type: 'navigate'; page: SettingsViewId }
+  | { type: 'undo' }
+  | { type: 'redo' }
   | {
       type: 'change'
       editor?: Partial<EditorSettings>

@@ -68,37 +68,10 @@ export function createDefaultToolbarItems(): ToolbarItem[] {
   return defaultToolbarItems.map((item) => ({ ...item }))
 }
 
-/** 保存されたツールバー構成を検査し、不正な項目を除いて返す。 */
+/** ツールバー構成を検査し、利用者が配置したセパレーターの位置を保って返す。 */
 export function normalizeToolbarItems(value: unknown): ToolbarItem[] {
   if (!Array.isArray(value)) return defaultToolbarItems.map((item) => ({ ...item }))
   if (value.length === 0) return []
-
-  const availableCommandIds = new Set(getToolbarCommandDefinitions().map((command) => command.id))
-  const seenCommands = new Set<string>()
-  const normalized: ToolbarItem[] = []
-  let separatorNumber = 0
-
-  for (const candidate of value) {
-    if (!candidate || typeof candidate !== 'object') continue
-    const item = candidate as Record<string, unknown>
-    if (item.type === 'command' && isCommandId(item.commandId) && availableCommandIds.has(item.commandId)) {
-      if (seenCommands.has(item.commandId)) continue
-      seenCommands.add(item.commandId)
-      normalized.push({ type: 'command', commandId: item.commandId })
-    } else if (item.type === 'separator' && normalized.at(-1)?.type !== 'separator') {
-      separatorNumber += 1
-      normalized.push({ type: 'separator', id: `separator-${separatorNumber}` })
-    }
-  }
-
-  if (normalized[0]?.type === 'separator') normalized.shift()
-  if (normalized.at(-1)?.type === 'separator') normalized.pop()
-  return normalized.length > 0 ? normalized : createDefaultToolbarItems()
-}
-
-/** ツールバー編集中の項目を検査し、配置途中のセパレーターはそのまま保持する。 */
-export function normalizeToolbarDraftItems(value: unknown): ToolbarItem[] {
-  if (!Array.isArray(value)) return []
 
   const availableCommandIds = new Set(getToolbarCommandDefinitions().map((command) => command.id))
   const seenCommands = new Set<string>()
@@ -126,7 +99,7 @@ export function normalizeToolbarDraftItems(value: unknown): ToolbarItem[] {
     }
   }
 
-  return normalized
+  return normalized.length > 0 ? normalized : createDefaultToolbarItems()
 }
 
 /** 外部データをセクション単位で検査し、利用可能な設定へ正規化する。 */
@@ -238,7 +211,7 @@ async function writePreferences(targetStore: Store, preferences: ApplicationPref
   await targetStore.save()
 }
 
-/** エディターとツールバーの設定を一つの更新として保存する。 */
+/** エディターとツールバーの現在値を一つのStore更新として保存する。 */
 export function saveSettingsPreferences(editor: EditorSettings, toolbar: ToolbarPreferences): Promise<void> {
   return savePreferenceUpdate((current) => ({
     ...current,
@@ -250,14 +223,6 @@ export function saveSettingsPreferences(editor: EditorSettings, toolbar: Toolbar
         items: normalizeToolbarItems(toolbar.items),
       },
     },
-  }))
-}
-
-/** ツールバーの表示状態だけを最新設定へ反映し、構成を保って保存する。 */
-export function saveToolbarVisibility(visible: boolean): Promise<void> {
-  return savePreferenceUpdate((current) => ({
-    ...current,
-    ui: { ...current.ui, toolbar: { ...current.ui.toolbar, visible } },
   }))
 }
 

@@ -1,4 +1,4 @@
-/* 設定画面は Vuetify の標準部品を使い、スクロールとフッター配置だけを補う。 */
+/* 設定画面は Vuetify の標準部品を使い、ナビゲーション下部とスクロールを整える。 */
 :root {
   font-family: Roboto, "Yu Gothic UI", "Meiryo", sans-serif;
   font-synthesis: none;
@@ -11,13 +11,15 @@ html, body, #app { width: 100%; height: 100%; margin: 0; }
 .settings-shell { height: 100%; }
 .settings-shell .v-application__wrap { min-height: 100%; }
 .settings-navigation { padding-block: 12px; }
+.settings-navigation .v-navigation-drawer__content { display: flex; flex-direction: column; }
+.settings-navigation .v-list { flex: 1 1 auto; }
+.settings-navigation-footer { flex: none; padding: 12px; }
 .settings-main { min-height: 0; overflow: auto; }
 .settings-content { min-height: 100%; padding: 20px 24px 28px; }
 .settings-page-title { margin: 0 0 20px; font-size: 1.25rem; font-weight: 500; line-height: 1.5; }
 .setting-card { height: 100%; }
 .setting-card-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; white-space: normal; }
 .setting-card-title > span:first-child { min-width: 0; }
-.setting-pending { flex: 0 0 auto; }
 .setting-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .setting-help { margin: -8px 0 0; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: 0.75rem; }
 .setting-children { margin-block-start: 20px; margin-inline-start: clamp(0px, 2vw, 24px); }
@@ -35,14 +37,38 @@ html, body, #app { width: 100%; height: 100%; margin: 0; }
 .toolbar-customizer-heading { margin: 0 0 8px; font-size: 1rem; font-weight: 500; line-height: 1.5; }
 .toolbar-customizer-help { margin: 0 0 8px; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: 0.875rem; }
 .toolbar-customizer-list { max-height: 360px; overflow-y: auto; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 8px; }
-.toolbar-customizer-item { cursor: grab; }
+.toolbar-customizer-item { position: relative; cursor: grab; }
 .toolbar-customizer-item:active { cursor: grabbing; }
 .toolbar-customizer-item-dragging { opacity: 0.45; }
+.toolbar-customizer-item--drop-before::before {
+  position: absolute;
+  z-index: 1;
+  inset-block-start: 0;
+  inset-inline: 12px;
+  height: 2px;
+  border-radius: 2px;
+  background-color: rgb(var(--v-theme-primary));
+  content: "";
+  pointer-events: none;
+}
+.toolbar-customizer-drop-end {
+  position: relative;
+  min-height: 12px;
+  cursor: default;
+}
+.toolbar-customizer-drop-end--active::before {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline: 12px;
+  height: 2px;
+  border-radius: 2px;
+  background-color: rgb(var(--v-theme-primary));
+  content: "";
+  pointer-events: none;
+}
 .toolbar-customizer-actions { display: flex; flex: 0 0 auto; }
 .toolbar-reset-actions { justify-content: flex-end; }
-.settings-pending { margin-inline-end: 16px; }
-.settings-footer { flex: none; min-height: 64px; gap: 8px; padding: 12px 24px; }
-.settings-error { flex: 1 1 100%; }
+.settings-save-state { margin-inline-end: 16px; }
 
 @media (max-width: 860px) {
   .toolbar-customizer { grid-template-columns: minmax(0, 1fr); }
@@ -50,6 +76,4 @@ html, body, #app { width: 100%; height: 100%; margin: 0; }
 
 @media (max-width: 700px) {
   .settings-content { padding-inline: 12px; }
-  .settings-footer { flex-wrap: wrap; padding-inline: 12px; }
-  .settings-error { order: -1; }
 }

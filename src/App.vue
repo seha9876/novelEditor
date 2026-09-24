@@ -1572,7 +1572,7 @@ onBeforeUnmount(() => {
       class="titlebar"
       :height="48"
       :extended="displayedToolbarVisible"
-      :extension-height="40"
+      :extension-height="60"
       flat
     >
       <nav class="menu-bar" aria-label="メニューバー">

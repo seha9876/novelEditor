@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 保存先を開けないときに、移行の再試行・取消・既存データの再指定を行う。
 import { computed, ref } from 'vue'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { open } from '@tauri-apps/plugin-dialog'
 import {
   cancelStorageChange,
@@ -16,8 +17,20 @@ const props = defineProps<{
 
 const status = ref(props.initialStatus)
 const errorMessage = ref(props.initialError ?? props.initialStatus?.blockedReason ?? '保存先を確認できません。')
+const closeErrorMessage = ref('')
 const busy = ref(false)
 const pendingDirectory = computed(() => status.value?.pendingDirectory ?? null)
+const appWindow = getCurrentWindow()
+
+/** 現在のウィンドウを閉じ、失敗した場合だけ画面へ理由を表示する。 */
+async function closeStartupWindow(): Promise<void> {
+  closeErrorMessage.value = ''
+  try {
+    await appWindow.close()
+  } catch (error) {
+    closeErrorMessage.value = String(error)
+  }
+}
 
 /** 起動時の保存先確認を再試行し、成功したら通常の初期化をやり直す。 */
 async function retryStartup(): Promise<void> {
@@ -86,6 +99,16 @@ async function chooseExistingDataDirectory(): Promise<void> {
 
 <template>
   <VApp>
+    <VAppBar class="titlebar storage-startup-titlebar" :height="48" flat>
+      <div class="titlebar-drag-region" data-tauri-drag-region>
+        <span class="file-name">保存先の確認</span>
+      </div>
+      <div class="window-controls" aria-label="ウィンドウ操作">
+        <VBtn class="window-close" icon variant="text" size="small" type="button" aria-label="閉じる" title="閉じる" @click="closeStartupWindow">
+          <VIcon icon="mdi-close" aria-hidden="true" />
+        </VBtn>
+      </div>
+    </VAppBar>
     <VMain class="storage-startup-main">
       <VContainer class="storage-startup-container">
         <VCard max-width="760" class="mx-auto" variant="outlined">
@@ -94,6 +117,9 @@ async function chooseExistingDataDirectory(): Promise<void> {
             <p>保存先を確認できないため、設定・プロジェクトツリー・復元データを読み込んでいません。別の空のデータで起動することはありません。</p>
             <VAlert v-if="errorMessage" type="error" variant="tonal" class="storage-startup-message" role="alert">
               {{ errorMessage }}
+            </VAlert>
+            <VAlert v-if="closeErrorMessage" type="error" variant="tonal" class="storage-startup-message" role="alert">
+              ウィンドウを閉じられませんでした: {{ closeErrorMessage }}
             </VAlert>
             <VAlert v-if="status" type="info" variant="tonal" class="storage-startup-message">
               <div><strong>現在の保存先</strong></div>

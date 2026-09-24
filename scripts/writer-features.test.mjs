@@ -838,3 +838,40 @@ test('ドラッグ開始時は未実行の幅保存だけを取り消し、終�
   assert.deepEqual(clearedTimers, [123])
   assert.equal(withoutPendingTimer.savePromise, inFlightSavePromise)
 })
+
+test('保存先エラー画面の閉じる操作は現在のウィンドウを閉じ、失敗だけを表示する', async () => {
+  const component = readFileSync(resolve(projectRoot, 'src/StorageStartup.vue'), 'utf8')
+  const styles = readFileSync(resolve(projectRoot, 'src/style.css'), 'utf8')
+  const setupScript = component.match(/<script setup[^>]*>([\s\S]*?)<\/script>/)?.[1]
+  assert.ok(setupScript)
+  const sourceFile = ts.createSourceFile('StorageStartup.vue.ts', setupScript, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  let closeFunction
+  const findCloseFunction = (node) => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'closeStartupWindow') {
+      closeFunction = node.getText(sourceFile)
+    }
+    ts.forEachChild(node, findCloseFunction)
+  }
+  findCloseFunction(sourceFile)
+  assert.ok(closeFunction)
+
+  const executable = ts.transpileModule(`
+    ${closeFunction}
+    return closeStartupWindow
+  `, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
+  const createCloseHandler = new Function('appWindow', 'closeErrorMessage', executable)
+  let closeCount = 0
+  const closeErrorMessage = { value: '' }
+  const close = createCloseHandler({ close: async () => { closeCount += 1 } }, closeErrorMessage)
+  await close()
+  assert.equal(closeCount, 1)
+  assert.equal(closeErrorMessage.value, '')
+
+  const failingClose = createCloseHandler({ close: async () => { throw new Error('終了できません') } }, closeErrorMessage)
+  await failingClose()
+  assert.equal(closeErrorMessage.value, 'Error: 終了できません')
+  assert.match(component, /<VAppBar class="titlebar storage-startup-titlebar"/)
+  assert.match(component, /aria-label="閉じる" title="閉じる" @click="closeStartupWindow"/)
+  assert.match(component, /v-if="closeErrorMessage"[\s\S]*?ウィンドウを閉じられませんでした/)
+  assert.match(styles, /\.storage-startup-main \{[^}]*overflow-y: auto;/)
+})

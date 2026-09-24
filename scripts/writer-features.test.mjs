@@ -656,3 +656,89 @@ test('分離ツリーは開く結果を反映してからドックし、復帰�
   assert.match(main, /if \(result\.error && result\.unavailable\) unavailable\.add\(result\.nodeId\)\s*else if \(!result\.error\) unavailable\.delete\(result\.nodeId\)/)
   assert.match(main, /ファイル操作の結果を分離ツリーへ伝えられませんでした/)
 })
+
+test('ツリー幅ドラッグ中だけ遷移を止め、ポインター中は保存を遅らせる', () => {
+  const main = readFileSync(resolve(projectRoot, 'src/App.vue'), 'utf8')
+  const styles = readFileSync(resolve(projectRoot, 'src/style.css'), 'utf8')
+
+  assert.match(main, /:class="\{ 'is-project-tree-resizing': projectTreeResizing \}"/)
+  assert.match(main, /setProjectTreeWidth\(projectTreeResizeStart\.startWidth \+ event\.clientX - projectTreeResizeStart\.startX, false\)/)
+  assert.match(main, /@lostpointercapture="endProjectTreeResize"/)
+  assert.match(main, /projectTreeResizing\.value = false\s*scheduleProjectTreePreferencesSave\(\)/)
+  assert.match(main, /if \(persist\) scheduleProjectTreePreferencesSave\(\)/)
+  assert.match(styles, /\.app-shell\.is-project-tree-resizing \.project-navigation,[\s\S]*?\.writing-area \{ transition: none; \}/)
+})
+
+test('ドラッグ開始時は未実行の幅保存だけを取り消し、終了処理は一度だけ保存する', () => {
+  const app = readFileSync(resolve(projectRoot, 'src/App.vue'), 'utf8')
+  const setupScript = app.match(/<script setup[^>]*>([\s\S]*?)<\/script>/)?.[1]
+  assert.ok(setupScript)
+  const sourceFile = ts.createSourceFile('App.vue.ts', setupScript, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const functions = new Map()
+  const findResizeFunctions = (node) => {
+    if (ts.isFunctionDeclaration(node) && node.name
+      && ['startProjectTreeResize', 'endProjectTreeResize'].includes(node.name.text)) {
+      functions.set(node.name.text, node.getText(sourceFile))
+    }
+    ts.forEachChild(node, findResizeFunctions)
+  }
+  findResizeFunctions(sourceFile)
+  assert.ok(functions.has('startProjectTreeResize'))
+  assert.ok(functions.has('endProjectTreeResize'))
+
+  const harnessSource = `
+    let projectTreeSaveTimer = initialTimer
+    let projectTreeResizeStart = null
+    const projectTreeDisplayWidth = { value: 280 }
+    const projectTreeResizing = { value: false }
+    const projectTreeSavePromise = activeSavePromise
+    let scheduledSaveCount = 0
+    function scheduleProjectTreePreferencesSave() { scheduledSaveCount += 1 }
+    ${functions.get('startProjectTreeResize')}
+    ${functions.get('endProjectTreeResize')}
+    return {
+      start: (event) => startProjectTreeResize(event),
+      end: (event) => endProjectTreeResize(event),
+      get timer() { return projectTreeSaveTimer },
+      get resizeStart() { return projectTreeResizeStart },
+      get isResizing() { return projectTreeResizing.value },
+      get scheduledSaveCount() { return scheduledSaveCount },
+      savePromise: projectTreeSavePromise,
+    }
+  `
+  const executable = ts.transpileModule(harnessSource, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+  }).outputText
+  const createHarness = new Function('initialTimer', 'activeSavePromise', 'clearTimeout', executable)
+  const clearedTimers = []
+  const inFlightSavePromise = Promise.resolve('既に開始済み')
+  const harness = createHarness(123, inFlightSavePromise, (timer) => clearedTimers.push(timer))
+  let capturedPointerId = null
+  const event = {
+    button: 0,
+    pointerId: 7,
+    clientX: 300,
+    preventDefault() {},
+    currentTarget: { setPointerCapture: (pointerId) => { capturedPointerId = pointerId } },
+  }
+
+  harness.start(event)
+  assert.deepEqual(clearedTimers, [123])
+  assert.equal(harness.timer, undefined)
+  assert.equal(harness.scheduledSaveCount, 0)
+  assert.equal(harness.isResizing, true)
+  assert.equal(capturedPointerId, 7)
+  assert.equal(harness.savePromise, inFlightSavePromise)
+
+  harness.end(event)
+  assert.equal(harness.isResizing, false)
+  assert.equal(harness.resizeStart, null)
+  assert.equal(harness.scheduledSaveCount, 1)
+  harness.end(event)
+  assert.equal(harness.scheduledSaveCount, 1)
+
+  const withoutPendingTimer = createHarness(undefined, inFlightSavePromise, (timer) => clearedTimers.push(timer))
+  withoutPendingTimer.start(event)
+  assert.deepEqual(clearedTimers, [123])
+  assert.equal(withoutPendingTimer.savePromise, inFlightSavePromise)
+})

@@ -106,6 +106,7 @@ const toolbarPreferences = ref<ToolbarPreferences>({
 })
 const projectTreeWidth = ref(props.initialPreferences.ui.projectTree.width)
 const projectTreeDetached = ref(props.initialPreferences.ui.projectTree.detached)
+const projectTreeResizing = ref(false)
 const mainViewportWidth = ref(window.innerWidth)
 const expandedProjectTreeFolderIds = ref<number[]>([])
 const projectTreeUnavailableNodeIds = ref<number[]>([])
@@ -519,10 +520,10 @@ async function flushProjectTreePreferences(): Promise<void> {
   }
 }
 
-/** 画面幅と本文の最低幅に合わせてツリー幅を更新し、設定保存を予約する。 */
-function setProjectTreeWidth(width: number): void {
+/** 表示上限を適用してツリー幅を更新し、必要な操作のときだけ設定保存を予約する。 */
+function setProjectTreeWidth(width: number, persist = true): void {
   projectTreeWidth.value = Math.max(220, Math.min(projectTreeMaximumWidth.value, Math.round(width)))
-  scheduleProjectTreePreferencesSave()
+  if (persist) scheduleProjectTreePreferencesSave()
 }
 
 /** メインウィンドウの実幅を取り直し、本文の最小幅を保つ表示上限を更新する。 */
@@ -552,9 +553,13 @@ function consumeProjectTreeOpenResult(requestId: string): void {
   if (projectTreeDetached.value) void publishProjectTreeWindowState()
 }
 
-/** マウスで境界をドラッグした開始幅と位置を記録する。 */
+/** 保留中の幅保存をドラッグ終了時へ集約し、開始幅とポインター捕捉を設定する。 */
 function startProjectTreeResize(event: PointerEvent): void {
   if (event.button !== 0) return
+  if (projectTreeSaveTimer !== undefined) {
+    clearTimeout(projectTreeSaveTimer)
+    projectTreeSaveTimer = undefined
+  }
   event.preventDefault()
   projectTreeResizeStart = {
     pointerId: event.pointerId,
@@ -562,18 +567,20 @@ function startProjectTreeResize(event: PointerEvent): void {
     startWidth: projectTreeDisplayWidth.value,
   }
   ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+  projectTreeResizing.value = true
 }
 
 /** ポインター移動量をドック幅へ反映する。 */
 function moveProjectTreeResize(event: PointerEvent): void {
   if (projectTreeResizeStart?.pointerId !== event.pointerId) return
-  setProjectTreeWidth(projectTreeResizeStart.startWidth + event.clientX - projectTreeResizeStart.startX)
+  setProjectTreeWidth(projectTreeResizeStart.startWidth + event.clientX - projectTreeResizeStart.startX, false)
 }
 
-/** ドラッグを終了し、幅保存の遅延タイマーを確定する。 */
+/** ドラッグ終了・キャンセル・キャプチャ喪失を確定し、幅を一度だけ保存予約する。 */
 function endProjectTreeResize(event: PointerEvent): void {
   if (projectTreeResizeStart?.pointerId !== event.pointerId) return
   projectTreeResizeStart = null
+  projectTreeResizing.value = false
   scheduleProjectTreePreferencesSave()
 }
 
@@ -1524,7 +1531,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <VApp class="app-shell">
+  <VApp class="app-shell" :class="{ 'is-project-tree-resizing': projectTreeResizing }">
     <VAppBar
       class="titlebar"
       :height="48"
@@ -1702,6 +1709,7 @@ onBeforeUnmount(() => {
         @pointermove="moveProjectTreeResize"
         @pointerup="endProjectTreeResize"
         @pointercancel="endProjectTreeResize"
+        @lostpointercapture="endProjectTreeResize"
         @keydown="onProjectTreeResizeKeydown"
       />
     </VNavigationDrawer>

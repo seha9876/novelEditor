@@ -1,9 +1,11 @@
 <script setup lang="ts">
-// 設定ページを切り替えながら編集し、確定した変更を共通経路で自動保存する。
+// 設定ページを切り替えながら編集し、変更を共通経路へ反映して自動保存する。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { emitTo, listen } from '@tauri-apps/api/event'
 import ToolbarSettingsPage from './ToolbarSettingsPage.vue'
 import WrappingSettingsPage from './WrappingSettingsPage.vue'
+import TypographySettingsPage from './TypographySettingsPage.vue'
+import StorageSettingsPage from './StorageSettingsPage.vue'
 import {
   createDefaultToolbarItems,
   type ToolbarItem,
@@ -11,6 +13,7 @@ import {
 } from './appPreferences'
 import {
   defaultEditorSettings,
+  isValidTypographyNumber,
   type EditorSettings,
 } from './editorSettings'
 import {
@@ -33,11 +36,23 @@ import {
 } from './settingsDefinitions'
 
 const snapshot = ref<SettingsSnapshot | null>(null)
+const columnsValue = ref(defaultEditorSettings.wrapColumns)
 const columnsInput = ref(String(defaultEditorSettings.wrapColumns))
 const columnsInputDirty = ref(false)
+let columnsPendingValue: number | null = null
+const typographyFields = ['fontSize', 'lineHeight'] as const
+type TypographyField = typeof typographyFields[number]
+const typographyValues = ref({ fontSize: defaultEditorSettings.fontSize, lineHeight: defaultEditorSettings.lineHeight })
+const typographyInputs = ref({ fontSize: String(defaultEditorSettings.fontSize), lineHeight: String(defaultEditorSettings.lineHeight) })
+const typographyDirty = { fontSize: false, lineHeight: false }
+const typographyPendingValues: Record<TypographyField, number | null> = { fontSize: null, lineHeight: null }
+const typographyErrors = computed(() => ({
+  fontSize: typographyInputError('fontSize'),
+  lineHeight: typographyInputError('lineHeight'),
+}))
 const errorMessage = ref('')
 const activeView = ref<SettingsViewId>('editor.wrapping')
-const openedGroups = ref(['editor', 'appearance'])
+const openedGroups = ref(['editor', 'appearance', 'application'])
 const openedSectionIds = ref<SettingsSectionId[]>([...allSettingsSectionIds])
 const toolbarDragResetRevision = ref(0)
 const toolbarResetDialog = ref(false)
@@ -59,6 +74,7 @@ let lastSnapshotRevision = -1
 const settingsPagesByCategory = computed<Record<SettingsCategoryId, typeof settingsPageDefinitions[number][]>>(() => ({
   editor: settingsPageDefinitions.filter((page) => page.categoryId === 'editor'),
   appearance: settingsPageDefinitions.filter((page) => page.categoryId === 'appearance'),
+  application: settingsPageDefinitions.filter((page) => page.categoryId === 'application'),
 }))
 
 const visiblePageDefinitions = computed(() => {
@@ -84,7 +100,63 @@ const allSectionsExpanded = computed(() =>
   allSettingsSectionIds.length > 0 && allSettingsSectionIds.every((sectionId) => openedSectionIds.value.includes(sectionId)),
 )
 const allSectionsCollapsed = computed(() => !allSettingsSectionIds.some((sectionId) => openedSectionIds.value.includes(sectionId)))
-const hasInputError = computed(() => columnError.value.length > 0)
+const hasInputError = computed(() => Boolean(columnError.value || typographyErrors.value.fontSize || typographyErrors.value.lineHeight))
+
+/** 数値は十進表記と範囲を検証し、不正な入力は設定値へ送らない。 */
+function typographyInputError(field: TypographyField): string {
+  const input = typographyInputs.value[field]
+  if (/^\d+(?:\.\d+)?$/.test(input) && isValidTypographyNumber(field, Number(input))) return ''
+  return field === 'fontSize'
+    ? '12～48の整数を入力してください。変更は保存されていません。'
+    : '1.0～3.0を0.1刻みで入力してください。変更は保存されていません。'
+}
+
+/** 文字サイズ・行間の入力途中の文字列を保持し、エラー表示へ反映する。 */
+function onTypographyInput(field: TypographyField, value: string): void {
+  typographyInputs.value[field] = value
+  typographyDirty[field] = true
+}
+
+/** 有効な文字サイズ・行間を即時反映し、共通のUndo・自動保存経路へ送る。 */
+function onTypographyValue(field: TypographyField, value: number): void {
+  if (!snapshot.value || typographyErrors.value[field] || !isValidTypographyNumber(field, value)) return
+  typographyValues.value[field] = value
+  typographyDirty[field] = true
+  const hasPendingValue = typographyPendingValues[field] !== null
+  if (!hasPendingValue && snapshot.value.editor[field] === value) return
+
+  typographyPendingValues[field] = value
+  void sendCommand({ type: 'change', editor: { [field]: value } })
+}
+
+/** スピン操作やホイール操作の後、確定済み数値へ入力状態をそろえる。 */
+function onTypographyInteraction(field: TypographyField, value: number): void {
+  if (!snapshot.value || typographyErrors.value[field] || !isValidTypographyNumber(field, value)) return
+  typographyValues.value[field] = value
+  typographyInputs.value[field] = String(value)
+  typographyDirty[field] = false
+}
+
+/** フォーカス移動後の有効値を整え、保存待ちの変更を確実に書き出す。 */
+function commitTypographyInput(field: TypographyField): void {
+  if (!snapshot.value || typographyErrors.value[field]) return
+  const value = Number(typographyInputs.value[field])
+  if (!isValidTypographyNumber(field, value)) return
+  typographyValues.value[field] = value
+  typographyInputs.value[field] = String(value)
+  typographyDirty[field] = false
+  if (typographyPendingValues[field] === null && snapshot.value.editor[field] === value) return
+  typographyPendingValues[field] = value
+  void sendCommand({ type: 'change', editor: { [field]: value }, flush: true })
+}
+
+/** 現在値より古い状態通知で入力欄を巻き戻さないよう、反映待ちの値を記録する。 */
+function trackTypographyPendingValue(field: TypographyField, value: number): void {
+  if (!snapshot.value) return
+  if (typographyPendingValues[field] !== null || snapshot.value.editor[field] !== value) {
+    typographyPendingValues[field] = value
+  }
+}
 
 /** 「すべて表示」の全セクションを一度に展開する。 */
 function expandAllSections(): void {
@@ -127,35 +199,76 @@ function selectView(page: SettingsViewId): void {
   void sendCommand({ type: 'navigate', page })
 }
 
-/** 折り返し設定の部分変更を共通の自動保存経路へ送る。 */
+/** 本文設定の部分変更を共通の自動保存経路へ送る。 */
 function changeEditor(value: Partial<EditorSettings>): void {
   if (!snapshot.value) return
   void sendCommand({ type: 'change', editor: value })
 }
 
-/** 指定桁数の入力途中の文字列を保持し、確定処理はblurまたはEnterまで待つ。 */
-function onColumnsInput(value: string | number | null): void {
-  columnsInput.value = value === null ? '' : String(value)
+/** 指定桁数の入力途中の文字列を保持し、エラー表示へ反映する。 */
+function onColumnsInput(value: string): void {
+  columnsInput.value = value
   columnsInputDirty.value = true
 }
 
-/** 有効な指定桁数だけを現在値へ反映し、すぐに永続化する。 */
+/** 有効な指定桁数を即時反映し、共通のUndo・自動保存経路へ送る。 */
+function onColumnsValue(value: number): void {
+  if (!snapshot.value || columnError.value || !Number.isInteger(value) || value < 1 || value > 500) return
+  columnsValue.value = value
+  columnsInputDirty.value = true
+  if (columnsPendingValue === null && snapshot.value.editor.wrapColumns === value) return
+
+  columnsPendingValue = value
+  void sendCommand({ type: 'change', editor: { wrapColumns: value } })
+}
+
+/** 指定桁数のスピン操作やホイール操作後に、dirty状態を解除する。 */
+function onColumnsInteraction(value: number): void {
+  if (!snapshot.value || columnError.value || !Number.isInteger(value) || value < 1 || value > 500) return
+  columnsValue.value = value
+  columnsInput.value = String(value)
+  columnsInputDirty.value = false
+}
+
+/** フォーカス移動後の有効な桁数を整え、保存待ちの変更を確実に書き出す。 */
 function commitColumnsInput(): void {
-  if (!snapshot.value || !columnsInputDirty.value || columnError.value) return
+  if (!snapshot.value || columnError.value) return
   const wrapColumns = Number(columnsInput.value)
+  columnsValue.value = wrapColumns
   columnsInput.value = String(wrapColumns)
   columnsInputDirty.value = false
+  if (columnsPendingValue === null && snapshot.value.editor.wrapColumns === wrapColumns) return
+  columnsPendingValue = wrapColumns
   void sendCommand({ type: 'change', editor: { wrapColumns }, flush: true })
+}
+
+/** 表示中の状態通知に先行して入力した指定桁数を、同期完了まで保持する。 */
+function trackColumnsPendingValue(value: number): void {
+  if (!snapshot.value) return
+  if (columnsPendingValue !== null || snapshot.value.editor.wrapColumns !== value) {
+    columnsPendingValue = value
+  }
 }
 
 /** 個別設定を対応する初期値へ戻し、自動保存する。 */
 function restoreField(field: keyof EditorSettings): void {
   if (!snapshot.value) return
   if (field === 'wrapColumns') {
+    columnsValue.value = defaultEditorSettings.wrapColumns
     columnsInput.value = String(defaultEditorSettings.wrapColumns)
     columnsInputDirty.value = false
+    trackColumnsPendingValue(defaultEditorSettings.wrapColumns)
   }
-  void sendCommand({ type: 'change', editor: { [field]: defaultEditorSettings[field] } })
+  if (field === 'fontSize' || field === 'lineHeight') {
+    typographyValues.value[field] = defaultEditorSettings[field]
+    typographyInputs.value[field] = String(defaultEditorSettings[field])
+    typographyDirty[field] = false
+    trackTypographyPendingValue(field, defaultEditorSettings[field])
+  }
+  const editor = field === 'fontFamily'
+    ? { fontFamily: defaultEditorSettings.fontFamily, fontFallback: defaultEditorSettings.fontFallback }
+    : { [field]: defaultEditorSettings[field] }
+  void sendCommand({ type: 'change', editor })
 }
 
 /** ツールバーの現在値を画面へ反映し、自動保存要求へ送る。 */
@@ -193,6 +306,12 @@ function confirmAllDefaults(): void {
   allResetDialog.value = false
   if (!snapshot.value) return
   const toolbar = { visible: true, items: createDefaultToolbarItems() }
+  columnsValue.value = defaultEditorSettings.wrapColumns
+  trackColumnsPendingValue(defaultEditorSettings.wrapColumns)
+  for (const field of typographyFields) {
+    typographyValues.value[field] = defaultEditorSettings[field]
+    trackTypographyPendingValue(field, defaultEditorSettings[field])
+  }
   snapshot.value = {
     ...snapshot.value,
     editor: { ...defaultEditorSettings },
@@ -200,6 +319,10 @@ function confirmAllDefaults(): void {
   }
   columnsInput.value = String(defaultEditorSettings.wrapColumns)
   columnsInputDirty.value = false
+  for (const field of typographyFields) {
+    typographyInputs.value[field] = String(defaultEditorSettings[field])
+    typographyDirty[field] = false
+  }
   void sendCommand({
     type: 'change',
     editor: { ...defaultEditorSettings },
@@ -217,9 +340,21 @@ function receiveSettingsSnapshot(nextSnapshot: SettingsSnapshot): void {
     previousSnapshot.editor.wrapColumns !== nextSnapshot.editor.wrapColumns
   snapshot.value = nextSnapshot
   activeView.value = nextSnapshot.page
-  if (!previousSnapshot || editorValueChanged) {
+  if (columnsPendingValue !== null && columnsPendingValue === nextSnapshot.editor.wrapColumns) {
+    columnsPendingValue = null
+  }
+  if ((!previousSnapshot || editorValueChanged) && !columnsInputDirty.value && columnsPendingValue === null) {
+    columnsValue.value = nextSnapshot.editor.wrapColumns
     columnsInput.value = String(nextSnapshot.editor.wrapColumns)
-    columnsInputDirty.value = false
+  }
+  for (const field of typographyFields) {
+    if (typographyPendingValues[field] !== null && typographyPendingValues[field] === nextSnapshot.editor[field]) {
+      typographyPendingValues[field] = null
+    }
+    if ((!previousSnapshot || previousSnapshot.editor[field] !== nextSnapshot.editor[field]) && !typographyDirty[field] && typographyPendingValues[field] === null) {
+      typographyValues.value[field] = nextSnapshot.editor[field]
+      typographyInputs.value[field] = String(nextSnapshot.editor[field])
+    }
   }
 }
 
@@ -233,6 +368,7 @@ function isTextEditingTarget(target: EventTarget | null): boolean {
 
 /** 設定画面内のCtrlショートカットから共有Undo／Redo履歴を操作する。 */
 function onKeydown(event: KeyboardEvent): void {
+  if (activeView.value === 'application.storage') return
   if (!event.ctrlKey || event.altKey || event.isComposing || isTextEditingTarget(event.target)) return
   if (toolbarResetDialog.value || allResetDialog.value) return
 
@@ -280,7 +416,7 @@ onBeforeUnmount(() => {
                 <VBtn
                   icon="mdi-undo"
                   variant="text"
-                  :disabled="!snapshot?.history.canUndo"
+                  :disabled="!snapshot?.history.canUndo || activeView === 'application.storage'"
                   aria-label="元に戻す"
                   aria-keyshortcuts="Control+Z"
                   @click="sendCommand({ type: 'undo' })"
@@ -294,7 +430,7 @@ onBeforeUnmount(() => {
                 <VBtn
                   icon="mdi-redo"
                   variant="text"
-                  :disabled="!snapshot?.history.canRedo"
+                  :disabled="!snapshot?.history.canRedo || activeView === 'application.storage'"
                   aria-label="やり直す"
                   aria-keyshortcuts="Control+Y Control+Shift+Z"
                   @click="sendCommand({ type: 'redo' })"
@@ -315,7 +451,7 @@ onBeforeUnmount(() => {
           @click="selectView('all')"
         >
           <template #append>
-            <VChip v-if="hasInputError" color="error" size="x-small" variant="tonal" aria-label="指定桁数に入力エラーがあります">入力エラー</VChip>
+            <VChip v-if="hasInputError" color="error" size="x-small" variant="tonal" aria-label="設定の入力エラーがあります">入力エラー</VChip>
           </template>
         </VListItem>
         <VListGroup v-for="category in settingsCategoryDefinitions" :key="category.id" :value="category.id">
@@ -331,7 +467,7 @@ onBeforeUnmount(() => {
             @click="selectView(page.id)"
           >
             <template #append>
-              <VChip v-if="page.id === 'editor.wrapping' && hasInputError" color="error" size="x-small" variant="tonal" aria-label="指定桁数に入力エラーがあります">入力エラー</VChip>
+              <VChip v-if="page.id === 'editor.wrapping' && columnError || page.id === 'editor.typography' && (typographyErrors.fontSize || typographyErrors.lineHeight)" color="error" size="x-small" variant="tonal" aria-label="設定の入力エラーがあります">入力エラー</VChip>
             </template>
           </VListItem>
         </VListGroup>
@@ -351,7 +487,9 @@ onBeforeUnmount(() => {
           <h3 v-if="activeView === 'all'" class="settings-page-heading">{{ page.label }}</h3>
           <WrappingSettingsPage
             v-if="page.id === 'editor.wrapping'"
+            :key="`${page.id}-${activeView}`"
             :editor="snapshot.editor"
+            :columns-value="columnsValue"
             :columns-input="columnsInput"
             :column-error="columnError"
             :heading-level="activeView === 'all' ? 4 : 2"
@@ -359,9 +497,19 @@ onBeforeUnmount(() => {
             :expanded-section-ids="openedSectionIds"
             @update-editor="changeEditor"
             @columns-input="onColumnsInput"
+            @columns-value="onColumnsValue"
             @columns-commit="commitColumnsInput"
+            @columns-interaction="onColumnsInteraction"
             @restore-field="restoreField"
             @toggle-section="toggleSection"
+          />
+          <TypographySettingsPage
+            v-else-if="page.id === 'editor.typography'"
+            :key="`${page.id}-${activeView}`"
+            :editor="snapshot.editor" :values="typographyValues" :inputs="typographyInputs" :errors="typographyErrors"
+            :heading-level="activeView === 'all' ? 4 : 2" :sections="page.sections" :expanded-section-ids="openedSectionIds"
+            @update-editor="changeEditor" @number-input="onTypographyInput" @number-value="onTypographyValue" @number-commit="commitTypographyInput" @number-interaction="onTypographyInteraction"
+            @restore-field="restoreField" @toggle-section="toggleSection"
           />
           <ToolbarSettingsPage
             v-else-if="page.id === 'appearance.toolbar'"
@@ -372,6 +520,13 @@ onBeforeUnmount(() => {
             :drag-reset-revision="toolbarDragResetRevision"
             @update-toolbar="changeToolbar"
             @reset-toolbar="restoreToolbarDefaults"
+            @toggle-section="toggleSection"
+          />
+          <StorageSettingsPage
+            v-else-if="page.id === 'application.storage'"
+            :heading-level="activeView === 'all' ? 4 : 2"
+            :sections="page.sections"
+            :expanded-section-ids="openedSectionIds"
             @toggle-section="toggleSection"
           />
         </template>
@@ -392,7 +547,7 @@ onBeforeUnmount(() => {
     </VDialog>
     <VDialog v-model="allResetDialog" max-width="440">
       <VCard title="すべての設定を初期値に戻しますか？">
-        <VCardText>折り返し設定とツールバー設定を初期値へ変更し、自動保存します。</VCardText>
+        <VCardText>本文表示、折り返し、ツールバーの設定を初期値へ変更し、自動保存します。データ保存先は変更しません。</VCardText>
         <VCardActions>
           <VSpacer />
           <VBtn variant="text" @click="allResetDialog = false">戻る</VBtn>

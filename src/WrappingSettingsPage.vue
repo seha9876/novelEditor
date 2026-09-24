@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import SettingExpansionSection from './SettingExpansionSection.vue'
+import SettingNumberInput from './SettingNumberInput.vue'
 import SettingSubsection from './SettingSubsection.vue'
 import type { EditorSettings, NarrowWrapBehavior, WrapMode } from './editorSettings'
 import type { SettingsSectionDefinition, SettingsSectionId } from './settingsDefinitions'
 
 defineProps<{
   editor: EditorSettings
+  columnsValue: number
   columnsInput: string
   columnError: string
   headingLevel: number
@@ -15,8 +17,10 @@ defineProps<{
 
 const emit = defineEmits<{
   updateEditor: [editor: Partial<EditorSettings>]
-  columnsInput: [value: string | number | null]
+  columnsInput: [value: string]
+  columnsValue: [value: number]
   columnsCommit: []
+  columnsInteraction: [value: number]
   restoreField: [field: keyof EditorSettings]
   toggleSection: [sectionId: SettingsSectionId, expanded: boolean]
 }>()
@@ -62,20 +66,22 @@ function setNarrowBehavior(behavior: NarrowWrapBehavior): void {
             <component :is="`h${headingLevel + 1}`" id="wrap-children-title" class="setting-children-title">指定桁数で折り返す場合の設定</component>
             <SettingSubsection title="指定桁数" :heading-level="headingLevel + 2">
               <p class="setting-subsection-description">現在の書体で、おおよその表示幅を指定します。</p>
-              <VTextField
-                :model-value="columnsInput"
+              <SettingNumberInput
+                :model-value="columnsValue"
+                :input-text="columnsInput"
                 label="桁数"
-                type="text"
-                inputmode="numeric"
-                min="1"
-                max="500"
+                :min="1"
+                :max="500"
+                :step="1"
+                :precision="0"
                 aria-describedby="columns-help"
                 :error-messages="columnError ? [columnError] : []"
-                @update:model-value="emit('columnsInput', $event)"
-                @blur="emit('columnsCommit')"
-                @keydown.enter.prevent="emit('columnsCommit')"
+                @input-text="emit('columnsInput', $event)"
+                @update:model-value="emit('columnsValue', $event)"
+                @commit="emit('columnsCommit')"
+                @interaction="emit('columnsInteraction', $event)"
               />
-              <p id="columns-help" class="setting-help">1～500の整数で指定します。</p>
+              <p id="columns-help" class="setting-help">1～500の整数。有効な値は入力中に反映され、範囲外の値はフォーカス移動時に補正されます。</p>
               <template #actions>
                 <VBtn size="small" variant="outlined" @click="emit('restoreField', 'wrapColumns')">初期値に戻す</VBtn>
               </template>

@@ -1,0 +1,12 @@
+/* 本文を隠さず使える小さな検索窓。縮小時も操作と結果は縦スクロールで利用できる。 */
+:root { font-family: Roboto, "Yu Gothic UI", "Meiryo", sans-serif; font-synthesis: none; }
+* { box-sizing: border-box; }
+html, body, #app { width: 100%; min-height: 100%; margin: 0; }
+.search-shell .v-application__wrap { min-height: 100vh; }
+.search-content { display: flex; flex-direction: column; gap: 10px; padding: 18px 16px; }
+.search-options, .search-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.search-options { gap: 0 20px; }
+.search-options .v-input { flex: none; }
+.search-options .v-label { font-size: 0.875rem; }
+.search-status { min-height: 20px; margin: 0; font-size: 0.875rem; }
+.search-help { margin: 0; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: 0.75rem; }

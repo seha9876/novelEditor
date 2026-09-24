@@ -1,24 +1,46 @@
 <script setup lang="ts">
 // 文書操作と画面表示をまとめ、本文そのものは EditorPane の CodeMirror に保持する。
-import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { ask, message } from '@tauri-apps/plugin-dialog'
 import { currentMonitor, getCurrentWindow, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/window'
 import { emitTo, listen } from '@tauri-apps/api/event'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import EditorPane from './EditorPane.vue'
+import ProjectTreeSidebar from './ProjectTreeSidebar.vue'
+import ToolbarTypographyNumber from './ToolbarTypographyNumber.vue'
+import StatisticsStatus from './StatisticsStatus.vue'
+import { createEmptyStatistics } from './editorStatistics'
 import {
+  editorFontOptions,
+  isValidTypographyNumber,
   normalizeEditorSettings,
   type EditorSettings,
   type WrapMode,
 } from './editorSettings'
-import { appCommandDefinitions, type AppCommand, type CommandId } from './appCommands'
+import { appCommandDefinitions, findShortcutCommand, type AppCommand, type CommandId } from './appCommands'
+import { loadRecoverySnapshot, saveRecoverySnapshot } from './recoveryStore'
+import { confirmStorageStartup } from './storageLocation'
+import {
+  SEARCH_COMMAND_EVENT, SEARCH_STATE_EVENT, SearchSession,
+  type SearchAction, type SearchCommand, type SearchConditions, type SearchField, type SearchSnapshot, type SearchStatus,
+} from './searchSession'
 import {
   saveSettingsPreferences,
+  saveProjectTreePreferences,
   normalizeToolbarItems,
   type ApplicationPreferencesV1,
   type PreferencesPersistenceState,
   type ToolbarPreferences,
 } from './appPreferences'
+import { authorizeProjectFile, loadProjectTreeSnapshot } from './projectTree'
+import {
+  PROJECT_TREE_WINDOW_COMMAND_EVENT,
+  PROJECT_TREE_WINDOW_STATE_EVENT,
+  type ProjectTreeOpenRequest,
+  type ProjectTreeOpenResult,
+  type ProjectTreeWindowCommand,
+  type ProjectTreeWindowState,
+} from './projectTreeWindow'
 import {
   SETTINGS_COMMAND_EVENT,
   SETTINGS_ERROR_EVENT,
@@ -40,16 +62,21 @@ import {
 type EditorHandle = {
   /** CodeMirror が保持する現在の本文を返す。 */
   getText: () => string
-  /** 本文と改行形式を切り替え、編集履歴を初期化する。 */
-  setDocument: (text: string, lineEnding?: LineEnding) => void
+  /** 本文を切り替え、編集履歴を初期化する。 */
+  setDocument: (text: string) => void
   /** 本文領域へ入力フォーカスを移す。 */
   focus: () => void
+  /** 検索条件とハイライトの有効状態を本文へ反映する。 */
+  setSearch: (conditions: SearchConditions, active: boolean) => void
+  /** 本文の選択とUndo履歴を使って検索・置換を実行する。 */
+  runSearch: (action: SearchAction) => void
 }
 
 const props = defineProps<{
   initialPreferences: ApplicationPreferencesV1
   persistenceState: PreferencesPersistenceState
   persistenceError?: string
+  storageInitializationReady: boolean
 }>()
 
 type SettingsValues = {
@@ -60,14 +87,19 @@ type SettingsValues = {
 // 本文は CodeMirror、設定はVueの現在値を正本とし、設定更新は明示保存経路へ集約する。
 const editor = ref<EditorHandle | null>(null)
 const path = ref<string | null>(null)
+const documentOrigin = ref<{ nodeId: number; projectId: number } | null>(null)
 const savedText = ref('')
 const dirty = ref(false)
-const charCount = ref(0)
-const busy = ref(false)
+const statistics = ref(createEmptyStatistics())
+const busy = ref(true)
+const documentLocked = ref(true)
 const currentFile = ref<TextFile | null>(null)
+const documentFormat = ref<{ lineEnding: LineEnding; hasBom: boolean }>({ lineEnding: '\n', hasBom: false })
+const suggestedFileName = ref('無題.txt')
+const restoredUnsaved = ref(false)
 const maximized = ref(false)
 const alwaysOnTop = ref(false)
-const openMenu = ref<'file' | 'settings' | 'display' | 'window' | null>(null)
+const openMenu = ref<'file' | 'edit' | 'settings' | 'display' | 'window' | null>(null)
 const settingsSubmenuOpen = ref(false)
 const appWindow = getCurrentWindow()
 const editorSettings = ref<EditorSettings>({ ...props.initialPreferences.editor })
@@ -75,8 +107,25 @@ const toolbarPreferences = ref<ToolbarPreferences>({
   visible: props.initialPreferences.ui.toolbar.visible,
   items: props.initialPreferences.ui.toolbar.items.map((item) => ({ ...item })),
 })
+const projectTreeWidth = ref(props.initialPreferences.ui.projectTree.width)
+const projectTreeDetached = ref(props.initialPreferences.ui.projectTree.detached)
+const projectTreeResizing = ref(false)
+const mainViewportWidth = ref(window.innerWidth)
+const expandedProjectTreeFolderIds = ref<number[]>([])
+const projectTreeUnavailableNodeIds = ref<number[]>([])
+const projectTreeOpenResult = ref<ProjectTreeOpenResult | null>(null)
+const projectTreeWindowDisabled = computed(() => busy.value || mainCloseInProgress.value)
+const projectTreeMaximumWidth = computed(() => Math.max(220, Math.min(480, mainViewportWidth.value - 320)))
+const projectTreeDisplayWidth = computed(() => Math.min(projectTreeWidth.value, projectTreeMaximumWidth.value))
 const displayedToolbarItems = computed(() => toolbarPreferences.value.items)
 const displayedToolbarVisible = computed(() => toolbarPreferences.value.visible)
+const toolbarFontItems = computed(() => {
+  const items: { title: string; value: string }[] = editorFontOptions.map((option) => ({ title: option.label, value: option.fontFamily }))
+  if (!items.some((item) => item.value === editorSettings.value.fontFamily)) {
+    items.push({ title: editorSettings.value.fontFamily, value: editorSettings.value.fontFamily })
+  }
+  return items
+})
 const displayMenuOpen = computed({
   get: (): boolean => openMenu.value === 'display',
   set: (value: boolean): void => {
@@ -95,6 +144,12 @@ const fileMenuOpen = computed({
     openMenu.value = value ? 'file' : (openMenu.value === 'file' ? null : openMenu.value)
   },
 })
+const editMenuOpen = computed({
+  get: (): boolean => openMenu.value === 'edit',
+  set: (value: boolean): void => {
+    openMenu.value = value ? 'edit' : (openMenu.value === 'edit' ? null : openMenu.value)
+  },
+})
 const settingsMenuOpen = computed({
   get: (): boolean => openMenu.value === 'settings',
   set: (value: boolean): void => {
@@ -109,7 +164,10 @@ const windowMenuOpen = computed({
   },
 })
 // 保存先が未定なら、上部には新規文書の名前を表示する。
-const displayName = computed(() => path.value ? fileName(path.value) : '無題')
+const displayName = computed(() => path.value ? fileName(path.value) : restoredUnsaved.value ? suggestedFileName.value : '無題')
+let recoveryReady = false
+let recoveryTimer: ReturnType<typeof setTimeout> | undefined
+let recoveryErrorReported = false
 let unlistenClose: (() => void) | undefined
 let unlistenResize: (() => void) | undefined
 let unlistenSettingsCommand: (() => void) | undefined
@@ -127,12 +185,46 @@ let settingsHistoryActive = false
 const settingsUndoHistory: SettingsValues[] = []
 const settingsRedoHistory: SettingsValues[] = []
 const settingsHistoryLimit = 100
-let mainCloseInProgress = false
+const mainCloseInProgress = ref(false)
+const searchSession = new SearchSession()
+let searchWindow: WebviewWindow | null = null
+let searchWindowOpening = false
+let searchWindowReady = false
+let searchWindowClosing = false
+let searchStatus: SearchStatus = 'empty'
+let searchStateRevision = 0
+let searchWindowError = ''
+let searchFocus = { field: 'search' as SearchField, revision: 0 }
+let unlistenSearchCommand: (() => void) | undefined
+let unlistenProjectTreeCommand: (() => void) | undefined
+let unlistenViewportResize: (() => void) | undefined
+let projectTreeWindow: WebviewWindow | null = null
+let projectTreeWindowId = ''
+let projectTreeWindowOpeningPromise: Promise<boolean> | null = null
+let projectTreeWindowClosePromise: Promise<void> | null = null
+let projectTreeWindowClosingForDock = false
+let projectTreeWindowClosingForExit = false
+let projectTreeWindowStateRevision = 0
+let projectTreeSaveTimer: ReturnType<typeof setTimeout> | undefined
+let projectTreeSavePromise = Promise.resolve()
+let projectTreeResizeStart: { pointerId: number; startX: number; startWidth: number } | null = null
+
+watch(documentLocked, (locked) => {
+  searchSession.setLocked(locked)
+  void publishSearchState()
+}, { flush: 'sync' })
+
+watch([busy, documentLocked, documentOrigin, mainCloseInProgress], () => {
+  void publishProjectTreeWindowState()
+}, { deep: true })
 
 const commandActions: Record<CommandId, () => Promise<void>> = {
   'document.new': newDocument,
   'document.open': openDocument,
   'document.save': saveDocument,
+  'document.saveAs': saveDocumentAs,
+  'edit.find': () => openSearchWindow('search'),
+  'edit.replace': () => openSearchWindow('replace'),
   'settings.open': openSettingsWindow,
   'wrap.window': () => chooseWrapMode('window'),
   'wrap.columns': () => chooseWrapMode('columns'),
@@ -143,6 +235,10 @@ const commandActions: Record<CommandId, () => Promise<void>> = {
   'window.maximizeHorizontal': () => maximizeWindowAxis('horizontal'),
   'window.alwaysOnTop': toggleAlwaysOnTop,
   'window.close': closeWindow,
+  'toolbar.typography.fontFamily': async () => openSettingsWindow('editor.typography'),
+  'toolbar.typography.fontSize': async () => openSettingsWindow('editor.typography'),
+  'toolbar.typography.fontSizeAdjust': async () => openSettingsWindow('editor.typography'),
+  'toolbar.typography.lineHeight': async () => openSettingsWindow('editor.typography'),
   'view.toolbar.toggle': toggleToolbarVisibility,
   'view.toolbar.customize': async () => openSettingsWindow('appearance.toolbar'),
 }
@@ -153,10 +249,89 @@ const appCommands = Object.fromEntries(appCommandDefinitions.map((definition) =>
   isChecked: () => isCommandChecked(definition.id),
 }])) as Record<CommandId, AppCommand>
 
-/** CodeMirror から受けた本文と文字数で表示を更新し、保存済み本文との差から未保存状態を判定する。 */
-function onChange(text: string, count: number): void {
-  charCount.value = count
-  dirty.value = text !== savedText.value
+/** CodeMirrorの本文変更だけから未保存状態を判定する。統計・選択の通知は関与しない。 */
+function onChange(text: string): void {
+  dirty.value = restoredUnsaved.value || text !== savedText.value
+  scheduleRecoverySave()
+}
+
+/** 古い本文に対する遅延処理を取り消し、文書切り替え後に復元候補が復活しないようにする。 */
+function cancelRecoveryTimer(): void {
+  if (recoveryTimer) clearTimeout(recoveryTimer)
+  recoveryTimer = undefined
+}
+
+/** 入力が1秒止まった時点で最新本文を保護し、Undo等で保存済みに戻った場合は候補を削除する。 */
+function scheduleRecoverySave(): void {
+  if (!recoveryReady) return
+  cancelRecoveryTimer()
+  if (!dirty.value) {
+    void syncRecoverySnapshot()
+    return
+  }
+  recoveryTimer = setTimeout(() => {
+    recoveryTimer = undefined
+    void syncRecoverySnapshot()
+  }, 1000)
+}
+
+/** 現在の未保存本文、または候補の削除を直列Storeへ渡す。失敗は編集を妨げず通知する。 */
+async function syncRecoverySnapshot(): Promise<void> {
+  if (!recoveryReady) return
+  cancelRecoveryTimer()
+  try {
+    await saveRecoverySnapshot(dirty.value ? {
+      schemaVersion: 1,
+      text: editor.value?.getText() ?? '',
+      fileName: path.value ? fileName(path.value) : suggestedFileName.value,
+      ...documentFormat.value,
+      updatedAt: new Date().toISOString(),
+    } : null)
+    recoveryErrorReported = false
+  } catch (error) {
+    if (!recoveryErrorReported) {
+      showPersistenceNotice(`復元データを更新できません。本文を通常の保存で保護してください。${String(error)}`)
+      recoveryErrorReported = true
+    }
+  }
+}
+
+/** 復元候補を確認し、保存先を持たない未保存文書として開く。空の本文でも明示保存までは未保存を維持する。 */
+async function initializeRecovery(): Promise<boolean> {
+  let unresolvedSnapshot = false
+  let recoveryLoaded = false
+  try {
+    const snapshot = await loadRecoverySnapshot()
+    recoveryLoaded = true
+    if (snapshot) {
+      unresolvedSnapshot = true
+      const restore = await ask(`前回の未保存の本文があります。復元しますか？\n${snapshot.fileName}\n${new Date(snapshot.updatedAt).toLocaleString('ja-JP')}`, {
+        title: '本文の復元',
+        kind: 'warning',
+        okLabel: '復元',
+        cancelLabel: '破棄',
+      })
+      unresolvedSnapshot = false
+      if (restore) {
+        suggestedFileName.value = snapshot.fileName
+        documentFormat.value = { lineEnding: snapshot.lineEnding, hasBom: snapshot.hasBom }
+        restoredUnsaved.value = true
+        editor.value?.setDocument(snapshot.text)
+      } else {
+        await saveRecoverySnapshot(null)
+      }
+    }
+  } catch (error) {
+    showPersistenceNotice(unresolvedSnapshot
+      ? `復元の確認ができませんでした。前回の候補を保護するため、今回は復元データの自動保存を停止します。${String(error)}`
+      : `復元データを読み込めませんでした。${String(error)}`)
+  } finally {
+    recoveryReady = !unresolvedSnapshot
+    busy.value = false
+    documentLocked.value = false
+    editor.value?.focus()
+  }
+  return recoveryLoaded
 }
 
 /** 未保存の変更を破棄してよいか確認し、続行できる場合に true を返す。確認ダイアログを開く。 */
@@ -194,52 +369,477 @@ async function publishSettingsError(detail: string): Promise<void> {
 
 /** 必要なら破棄を確認して新規文書へ切り替え、保存先と編集履歴を初期化する。 */
 async function newDocument(): Promise<void> {
-  if (busy.value || !(await confirmDiscard())) return
-  path.value = null
-  currentFile.value = null
-  savedText.value = ''
-  editor.value?.setDocument('')
-  editor.value?.focus()
+  if (busy.value || mainCloseInProgress.value) return
+  busy.value = true
+  documentLocked.value = true
+  try {
+    if (!(await confirmDiscard())) return
+    cancelRecoveryTimer()
+    path.value = null
+    documentOrigin.value = null
+    currentFile.value = null
+    documentFormat.value = { lineEnding: '\n', hasBom: false }
+    suggestedFileName.value = '無題.txt'
+    restoredUnsaved.value = false
+    savedText.value = ''
+    editor.value?.setDocument('')
+    await syncRecoverySnapshot()
+    editor.value?.focus()
+  } catch (error) {
+    await showError('新規作成', error)
+  } finally {
+    busy.value = false
+    documentLocked.value = false
+  }
 }
 
 /** 選択した TXT を読み込み、本文・保存先・未保存判定の基準を更新する。選択取消時は現状を保つ。 */
 async function openDocument(): Promise<void> {
-  if (busy.value || !(await confirmDiscard())) return
+  if (busy.value || mainCloseInProgress.value) return
   busy.value = true
+  documentLocked.value = true
   try {
     const selected = await chooseTextFile()
     if (!selected) return
     const file = await loadTextFile(selected)
+    if (!(await confirmDiscard())) return
+    cancelRecoveryTimer()
+    documentOrigin.value = null
     currentFile.value = file
     path.value = file.path
-    editor.value?.setDocument(file.text, file.lineEnding)
+    documentFormat.value = { lineEnding: file.lineEnding, hasBom: file.hasBom }
+    suggestedFileName.value = fileName(file.path)
+    restoredUnsaved.value = false
+    editor.value?.setDocument(file.text)
     // CodeMirror は改行を内部表現へ揃えるため、未保存判定の基準も読み込み後の本文に合わせる。
     file.editorText = editor.value?.getText() ?? file.text
     savedText.value = file.editorText
     dirty.value = false
+    await syncRecoverySnapshot()
     editor.value?.focus()
   } catch (error) {
     await showError('ファイルを開く操作', error)
   } finally {
     busy.value = false
+    documentLocked.value = false
   }
+}
+
+/** ツリーの要求元を問わず、メイン画面で参照先を検証して本文へ開く。 */
+async function openProjectTreeFile(request: ProjectTreeOpenRequest, sourceWindowId?: string): Promise<void> {
+  if (busy.value || mainCloseInProgress.value) {
+    reportProjectTreeOpenResult({ requestId: request.requestId, nodeId: request.nodeId, error: '別の操作中のため、ファイルを開けませんでした。' }, sourceWindowId)
+    return
+  }
+  busy.value = true
+  documentLocked.value = true
+  let unavailable = false
+  try {
+    const snapshot = await loadProjectTreeSnapshot()
+    const node = snapshot.nodes.find((item) => item.id === request.nodeId)
+    if (!node || node.kind !== 'file' || node.projectId !== request.projectId) {
+      unavailable = true
+      throw new Error('選択した登録ファイルは既に変更されています。')
+    }
+    let authorizedPath: string
+    try {
+      authorizedPath = await authorizeProjectFile(request.nodeId)
+    } catch (error) {
+      unavailable = true
+      throw error
+    }
+    const file = await loadTextFile(authorizedPath)
+    if (!(await confirmDiscard())) {
+      reportProjectTreeOpenResult({ requestId: request.requestId, nodeId: request.nodeId }, sourceWindowId)
+      return
+    }
+    cancelRecoveryTimer()
+    currentFile.value = file
+    path.value = file.path
+    documentOrigin.value = { nodeId: request.nodeId, projectId: request.projectId }
+    documentFormat.value = { lineEnding: file.lineEnding, hasBom: file.hasBom }
+    suggestedFileName.value = fileName(file.path)
+    restoredUnsaved.value = false
+    editor.value?.setDocument(file.text)
+    file.editorText = editor.value?.getText() ?? file.text
+    savedText.value = file.editorText
+    dirty.value = false
+    await syncRecoverySnapshot()
+    editor.value?.focus()
+    reportProjectTreeOpenResult({ requestId: request.requestId, nodeId: request.nodeId }, sourceWindowId)
+  } catch (error) {
+    reportProjectTreeOpenResult({
+      requestId: request.requestId,
+      nodeId: request.nodeId,
+      error: String(error),
+      unavailable,
+    }, sourceWindowId)
+  } finally {
+    busy.value = false
+    documentLocked.value = false
+  }
+}
+
+/** 開く操作の成否を元のツリーへ返し、参照切れ表示と既存エラー通知を維持する。 */
+function reportProjectTreeOpenResult(result: ProjectTreeOpenResult, sourceWindowId?: string): void {
+  const unavailable = new Set(projectTreeUnavailableNodeIds.value)
+  if (result.error && result.unavailable) unavailable.add(result.nodeId)
+  else if (!result.error) unavailable.delete(result.nodeId)
+  updateProjectTreeUnavailableNodeIds([...unavailable], false)
+  projectTreeOpenResult.value = result
+  if (sourceWindowId && sourceWindowId === projectTreeWindowId && projectTreeWindow) {
+    const requestWindowId = sourceWindowId
+    void publishProjectTreeWindowState(result).then((published) => {
+      if (published || requestWindowId !== projectTreeWindowId || !projectTreeWindow
+        || projectTreeWindowClosingForDock || projectTreeWindowClosingForExit) return
+      if (projectTreeOpenResult.value?.requestId === result.requestId) projectTreeOpenResult.value = null
+      const detail = result.error
+        ? `ファイル操作の結果を分離ツリーへ伝えられませんでした。${result.error}`
+        : 'ファイル操作の結果を分離ツリーへ伝えられませんでした。'
+      showPersistenceNotice(`${detail} メイン画面へ戻します。`)
+      void dockProjectTreeWindow()
+    })
+  }
+}
+
+/** 最新のツリー幅と分離状態を設定Storeへ直列保存する。 */
+function persistProjectTreePreferences(): Promise<void> {
+  projectTreeSavePromise = projectTreeSavePromise.catch(() => undefined).then(async () => {
+    try {
+      await saveProjectTreePreferences({ width: projectTreeWidth.value, detached: projectTreeDetached.value })
+    } catch (error) {
+      showPersistenceNotice(`プロジェクトツリーの表示設定を保存できません。${String(error)}`)
+    }
+  })
+  return projectTreeSavePromise
+}
+
+/** 連続した幅変更をまとめ、最後の位置だけを保存する。 */
+function scheduleProjectTreePreferencesSave(): void {
+  if (projectTreeSaveTimer) clearTimeout(projectTreeSaveTimer)
+  projectTreeSaveTimer = setTimeout(() => {
+    projectTreeSaveTimer = undefined
+    void persistProjectTreePreferences()
+  }, 250)
+}
+
+/** 終了前に遅延中の表示設定保存を完了させる。 */
+async function flushProjectTreePreferences(): Promise<void> {
+  if (projectTreeSaveTimer) {
+    clearTimeout(projectTreeSaveTimer)
+    projectTreeSaveTimer = undefined
+    await persistProjectTreePreferences()
+  } else {
+    await projectTreeSavePromise
+  }
+}
+
+/** 表示上限を適用してツリー幅を更新し、必要な操作のときだけ設定保存を予約する。 */
+function setProjectTreeWidth(width: number, persist = true): void {
+  projectTreeWidth.value = Math.max(220, Math.min(projectTreeMaximumWidth.value, Math.round(width)))
+  if (persist) scheduleProjectTreePreferencesSave()
+}
+
+/** メインウィンドウの実幅を取り直し、本文の最小幅を保つ表示上限を更新する。 */
+function updateMainViewportWidth(): void {
+  mainViewportWidth.value = window.innerWidth
+}
+
+/** メインに表示中のツリーから受け取った展開状態を分離時の引き継ぎ値にする。 */
+function updateExpandedProjectTreeFolders(nodeIds: number[]): void {
+  expandedProjectTreeFolderIds.value = normalizeProjectTreeNodeIds(nodeIds)
+}
+
+/** 参照切れノードの状態を保持し、ドック後のツリーへ引き継ぐ。 */
+function updateProjectTreeUnavailableNodeIds(nodeIds: number[], publishChild = true): boolean {
+  const normalized = normalizeProjectTreeNodeIds(nodeIds)
+  const current = projectTreeUnavailableNodeIds.value
+  if (current.length === normalized.length && current.every((nodeId, index) => nodeId === normalized[index])) return false
+  projectTreeUnavailableNodeIds.value = normalized
+  if (publishChild && projectTreeDetached.value) void publishProjectTreeWindowState()
+  return true
+}
+
+/** 開く結果を一時イベントとして消費し、古い失敗状態の再適用を防ぐ。 */
+function consumeProjectTreeOpenResult(requestId: string): void {
+  if (projectTreeOpenResult.value?.requestId !== requestId) return
+  projectTreeOpenResult.value = null
+  if (projectTreeDetached.value) void publishProjectTreeWindowState()
+}
+
+/** 保留中の幅保存をドラッグ終了時へ集約し、開始幅とポインター捕捉を設定する。 */
+function startProjectTreeResize(event: PointerEvent): void {
+  if (event.button !== 0) return
+  if (projectTreeSaveTimer !== undefined) {
+    clearTimeout(projectTreeSaveTimer)
+    projectTreeSaveTimer = undefined
+  }
+  event.preventDefault()
+  projectTreeResizeStart = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startWidth: projectTreeDisplayWidth.value,
+  }
+  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+  projectTreeResizing.value = true
+}
+
+/** ポインター移動量をドック幅へ反映する。 */
+function moveProjectTreeResize(event: PointerEvent): void {
+  if (projectTreeResizeStart?.pointerId !== event.pointerId) return
+  setProjectTreeWidth(projectTreeResizeStart.startWidth + event.clientX - projectTreeResizeStart.startX, false)
+}
+
+/** ドラッグ終了・キャンセル・キャプチャ喪失を確定し、幅を一度だけ保存予約する。 */
+function endProjectTreeResize(event: PointerEvent): void {
+  if (projectTreeResizeStart?.pointerId !== event.pointerId) return
+  projectTreeResizeStart = null
+  projectTreeResizing.value = false
+  scheduleProjectTreePreferencesSave()
+}
+
+/** 左右キーと Home/End でツリー幅を調整する。 */
+function onProjectTreeResizeKeydown(event: KeyboardEvent): void {
+  if (event.key === 'ArrowLeft') setProjectTreeWidth(projectTreeDisplayWidth.value - 16)
+  else if (event.key === 'ArrowRight') setProjectTreeWidth(projectTreeDisplayWidth.value + 16)
+  else if (event.key === 'Home') setProjectTreeWidth(220)
+  else if (event.key === 'End') setProjectTreeWidth(projectTreeMaximumWidth.value)
+  else return
+  event.preventDefault()
+}
+
+/** メイン画面の状態とツリーの展開状態を、識別子付きで分離ウィンドウへ送る。 */
+async function publishProjectTreeWindowState(openResult = projectTreeOpenResult.value): Promise<boolean> {
+  const windowId = projectTreeWindowId
+  if (!windowId || !projectTreeWindow || projectTreeWindowClosingForDock || projectTreeWindowClosingForExit) return false
+  const state: ProjectTreeWindowState = {
+    windowId,
+    revision: ++projectTreeWindowStateRevision,
+    disabled: projectTreeWindowDisabled.value,
+    documentOrigin: documentOrigin.value ? { ...documentOrigin.value } : null,
+    expandedFolderIds: [...expandedProjectTreeFolderIds.value],
+    unavailableNodeIds: [...projectTreeUnavailableNodeIds.value],
+    ...(openResult ? { openResult } : {}),
+  }
+  try {
+    await emitTo('project-tree', PROJECT_TREE_WINDOW_STATE_EVENT, state)
+    return true
+  } catch (error) {
+    if (windowId === projectTreeWindowId) {
+      showPersistenceNotice(`分離したプロジェクトツリーへ状態を送れません。${String(error)}`)
+    }
+    return false
+  }
+}
+
+/** 分離中の操作をウィンドウIDで検査し、現在の子ウィンドウ要求だけを処理する。 */
+function handleProjectTreeWindowCommand(command: ProjectTreeWindowCommand): void {
+  if (!command || command.windowId !== projectTreeWindowId || !projectTreeWindow || !projectTreeDetached.value) return
+  if (command.type === 'ready') {
+    void publishProjectTreeWindowState()
+  } else if (command.type === 'dock') {
+    if (command.expandedFolderIds) expandedProjectTreeFolderIds.value = normalizeProjectTreeNodeIds(command.expandedFolderIds)
+    if (command.unavailableNodeIds) updateProjectTreeUnavailableNodeIds(command.unavailableNodeIds, false)
+    void dockProjectTreeWindow()
+  } else if (command.type === 'expanded-change') {
+    expandedProjectTreeFolderIds.value = normalizeProjectTreeNodeIds(command.nodeIds)
+    void publishProjectTreeWindowState()
+  } else if (command.type === 'unavailable-change') {
+    if (updateProjectTreeUnavailableNodeIds(command.nodeIds, false)) void publishProjectTreeWindowState()
+  } else if (command.type === 'origin-detached') {
+    detachDocumentOrigin(command.nodeId)
+  } else if (command.type === 'open-file') {
+    void openProjectTreeFile(command.request, command.windowId)
+  } else if (command.type === 'open-result-applied') {
+    consumeProjectTreeOpenResult(command.requestId)
+  }
+}
+
+/** 不正な値や重複 ID を除き、展開中フォルダーの同期値を正規化する。 */
+function normalizeProjectTreeNodeIds(nodeIds: number[]): number[] {
+  return [...new Set(nodeIds.filter((nodeId) => Number.isSafeInteger(nodeId) && nodeId > 0))]
+}
+
+/** 分離ウィンドウを一つだけ作成し、生成失敗時はメイン画面表示へ戻す。 */
+async function openProjectTreeWindow(): Promise<boolean> {
+  if (projectTreeWindowClosePromise) {
+    try {
+      await projectTreeWindowClosePromise
+    } catch {
+      // 破棄に失敗した場合は、残っている子ウィンドウを前面へ戻す。
+    }
+  }
+  if (projectTreeWindow) {
+    try {
+      await projectTreeWindow.setFocus()
+    } catch (error) {
+      showPersistenceNotice(`分離したプロジェクトツリーへ切り替えられません。${String(error)}`)
+    }
+    return true
+  }
+  if (projectTreeWindowOpeningPromise) return projectTreeWindowOpeningPromise
+
+  const opening = createProjectTreeWindow()
+  projectTreeWindowOpeningPromise = opening
+  try {
+    return await opening
+  } finally {
+    if (projectTreeWindowOpeningPromise === opening) projectTreeWindowOpeningPromise = null
+  }
+}
+
+/** 分離ウィンドウの生成イベントを登録し、成功・失敗を呼び出し元へ返す。 */
+function createProjectTreeWindow(): Promise<boolean> {
+  projectTreeWindowId = crypto.randomUUID()
+  projectTreeWindowStateRevision = 0
+  const windowId = projectTreeWindowId
+  return new Promise((resolve) => {
+    try {
+      const createdWindow = new WebviewWindow('project-tree', {
+        url: `project-tree.html?windowId=${encodeURIComponent(windowId)}`,
+        title: 'プロジェクトツリー',
+        parent: 'main',
+        width: Math.max(320, projectTreeDisplayWidth.value + 40),
+        height: 720,
+        minWidth: 260,
+        minHeight: 360,
+        resizable: true,
+        decorations: true,
+        dragDropEnabled: true,
+      })
+      projectTreeWindow = createdWindow
+      void createdWindow.once('tauri://created', () => {
+        if (projectTreeWindowId !== windowId) return
+        projectTreeDetached.value = true
+        scheduleProjectTreePreferencesSave()
+        void publishProjectTreeWindowState()
+        resolve(true)
+      })
+      void createdWindow.once('tauri://error', (event) => {
+        if (projectTreeWindowId === windowId) {
+          projectTreeWindow = null
+          projectTreeWindowId = ''
+          projectTreeDetached.value = false
+          scheduleProjectTreePreferencesSave()
+          showPersistenceNotice(`分離ウィンドウを作成できないため、ツリーをメイン画面に表示します。${String(event.payload)}`)
+        }
+        resolve(false)
+      })
+      void createdWindow.once('tauri://destroyed', () => handleProjectTreeWindowDestroyed(createdWindow))
+    } catch (error) {
+      projectTreeWindow = null
+      projectTreeWindowId = ''
+      projectTreeDetached.value = false
+      scheduleProjectTreePreferencesSave()
+      showPersistenceNotice(`分離ウィンドウを作成できないため、ツリーをメイン画面に表示します。${String(error)}`)
+      resolve(false)
+    }
+  })
+}
+
+/** ボタンまたは子ウィンドウの×から分離窓を閉じ、展開状態を保ってドックへ戻す。 */
+async function dockProjectTreeWindow(): Promise<void> {
+  if (!projectTreeDetached.value && !projectTreeWindow) return
+  projectTreeDetached.value = false
+  scheduleProjectTreePreferencesSave()
+  const closingWindow = projectTreeWindow
+  if (!closingWindow) return
+
+  projectTreeWindowClosingForDock = true
+  const closing = closingWindow.destroy().then(() => undefined)
+  projectTreeWindowClosePromise = closing
+  try {
+    await closing
+  } catch (error) {
+    projectTreeDetached.value = projectTreeWindow === closingWindow
+    projectTreeWindowClosingForDock = false
+    scheduleProjectTreePreferencesSave()
+    await showError('プロジェクトツリーを戻す操作', error)
+  } finally {
+    if (projectTreeWindow === closingWindow && !projectTreeDetached.value) {
+      projectTreeWindow = null
+      projectTreeWindowId = ''
+      projectTreeWindowClosingForDock = false
+    }
+    projectTreeWindowClosePromise = null
+  }
+}
+
+/** 予期しない子ウィンドウ終了をドッキング扱いにし、終了処理中は設定を維持する。 */
+function handleProjectTreeWindowDestroyed(destroyedWindow: WebviewWindow): void {
+  if (projectTreeWindow !== destroyedWindow) return
+  projectTreeWindow = null
+  projectTreeWindowId = ''
+  if (projectTreeWindowClosingForDock) {
+    projectTreeWindowClosingForDock = false
+    return
+  }
+  if (projectTreeWindowClosingForExit) return
+  if (projectTreeDetached.value) {
+    projectTreeDetached.value = false
+    scheduleProjectTreePreferencesSave()
+    showPersistenceNotice('分離したプロジェクトツリーが閉じたため、メイン画面へ戻しました。')
+  }
+}
+
+/** メイン画面の終了時に子窓も閉じ、分離設定は次回起動用に保持する。 */
+async function closeProjectTreeWindowForExit(): Promise<void> {
+  if (projectTreeWindowOpeningPromise) await projectTreeWindowOpeningPromise
+  const closingWindow = projectTreeWindow
+  if (!closingWindow) return
+  projectTreeWindowClosingForExit = true
+  try {
+    await closingWindow.destroy()
+    if (projectTreeWindow === closingWindow) {
+      projectTreeWindow = null
+      projectTreeWindowId = ''
+    }
+  } catch (error) {
+    projectTreeWindowClosingForExit = false
+    throw error
+  }
+}
+
+/** 分離設定を復元する起動時とボタン操作の両方で、作成失敗を画面内通知する。 */
+async function requestProjectTreeDetach(): Promise<void> {
+  await openProjectTreeWindow()
+}
+
+/** 登録解除や参照先変更後も、開いている本文を維持してノード出自だけを解除する。 */
+function detachDocumentOrigin(nodeId: number): void {
+  if (documentOrigin.value?.nodeId === nodeId) documentOrigin.value = null
 }
 
 /** 現在の本文を TXT に書き込み、成功した内容を保存済みの基準にする。保存先がなければ選択を求める。 */
 async function saveDocument(): Promise<void> {
-  if (busy.value) return
+  await saveCurrentDocument(false)
+}
+
+/** 常に保存先を確認し、成功後は別名のファイルを現在の保存先として扱う。 */
+async function saveDocumentAs(): Promise<void> {
+  await saveCurrentDocument(true)
+}
+
+/** 保存開始時の本文を記録し、書き込み中に増えた編集は未保存と復元候補に残す。 */
+async function saveCurrentDocument(saveAs: boolean): Promise<void> {
+  if (busy.value || mainCloseInProgress.value) return
   busy.value = true
   try {
-    const target = path.value ?? await chooseSavePath('無題.txt')
+    const target = !saveAs && path.value ? path.value : await chooseSavePath(path.value ?? suggestedFileName.value)
     if (!target) return
+    const previousPath = path.value
     const text = editor.value?.getText() ?? ''
-    const lineEnding = currentFile.value?.lineEnding ?? '\n'
-    const hasBom = currentFile.value?.hasBom ?? false
-    await saveTextFile(target, text, lineEnding, hasBom, currentFile.value ?? undefined)
+    const { lineEnding, hasBom } = documentFormat.value
+    const savedFile = await saveTextFile(target, text, lineEnding, hasBom, currentFile.value ?? undefined)
     path.value = target
+    if (previousPath !== target) documentOrigin.value = null
+    currentFile.value = savedFile
+    suggestedFileName.value = fileName(target)
+    restoredUnsaved.value = false
     savedText.value = text
     // 書き込み中にも編集できるので、保存開始時の本文と現在の本文を改めて比較する。
     dirty.value = (editor.value?.getText() ?? '') !== text
+    await syncRecoverySnapshot()
   } catch (error) {
     await showError('保存', error)
   } finally {
@@ -268,7 +868,31 @@ function executeCommand(commandId: CommandId): void {
 
 /** 文書処理中に利用できないコマンドを判定する。 */
 function isCommandDisabled(commandId: CommandId): boolean {
-  return busy.value && (commandId === 'document.new' || commandId === 'document.open' || commandId === 'document.save')
+  if (mainCloseInProgress.value) return true
+  if (commandId === 'edit.find' || commandId === 'edit.replace') return documentLocked.value
+  if (commandId.startsWith('toolbar.typography.')) return busy.value || documentLocked.value
+  return busy.value && commandId.startsWith('document.')
+}
+
+/** 書体プリセットでは代替書体も一緒に更新し、既知でない保存済み名はそのまま扱う。 */
+function updateToolbarFontFamily(value: unknown): void {
+  if (typeof value !== 'string') return
+  const option = editorFontOptions.find((candidate) => candidate.fontFamily === value)
+  updateCurrentSettings(option
+    ? { fontFamily: option.fontFamily, fontFallback: option.fontFallback }
+    : { fontFamily: value })
+}
+
+/** ツールバーの数値入力を本文設定の共通範囲で検証して保存する。 */
+function updateToolbarTypographyNumber(field: 'fontSize' | 'lineHeight', value: number): void {
+  if (!isValidTypographyNumber(field, value)) return
+  updateCurrentSettings({ [field]: value })
+}
+
+/** 本文文字サイズを1pxずつ調整し、12～48pxの範囲を超えないようにする。 */
+function adjustToolbarFontSize(direction: -1 | 1): void {
+  const next = editorSettings.value.fontSize + direction
+  if (isValidTypographyNumber('fontSize', next)) updateCurrentSettings({ fontSize: next })
 }
 
 /** 現在選択されている状態付きコマンドかを判定する。 */
@@ -610,6 +1234,143 @@ async function openSettingsWindow(page: SettingsPageId = 'editor.wrapping'): Pro
   }
 }
 
+/** 本文の検索結果と操作可否を配信する。revisionで古い配信の到着を区別する。 */
+async function publishSearchState(): Promise<void> {
+  if (!searchWindowReady || !searchSession.sessionId) return
+  const snapshot: SearchSnapshot = {
+    sessionId: searchSession.sessionId,
+    conditions: { ...searchSession.conditions },
+    status: searchStatus,
+    locked: documentLocked.value,
+    documentRevision: searchSession.documentRevision,
+    acknowledgedSequence: searchSession.sequence,
+    revision: ++searchStateRevision,
+    focus: { ...searchFocus },
+    error: searchWindowError,
+  }
+  try {
+    await emitTo('search', SEARCH_STATE_EVENT, snapshot)
+  } catch (error) {
+    if (searchWindowReady) showPersistenceNotice(`検索画面へ結果を送れません。${String(error)}`)
+  }
+}
+
+/** 本文が変わった場合も検索結果を更新し、開いている検索画面へ通知する。 */
+function onSearchStatus(status: SearchStatus): void {
+  searchStatus = status
+  void publishSearchState()
+}
+
+/** 本文側のF3は条件があればそのまま検索し、未指定なら検索画面を開く。 */
+function onSearchNavigate(action: SearchAction): void {
+  if (documentLocked.value || mainCloseInProgress.value) return
+  if (!searchSession.conditions.search) {
+    void openSearchWindow('search')
+    return
+  }
+  editor.value?.runSearch(action)
+}
+
+/** 入力と操作を同じ要求として処理し、操作時の条件を非同期の到着順へ依存させない。 */
+function handleSearchCommand(command: SearchCommand): void {
+  if (!searchWindow || searchWindowClosing || command.sessionId !== searchSession.sessionId) return
+  searchWindowError = ''
+  if (command.type === 'ready') {
+    searchWindowReady = true
+    editor.value?.setSearch(searchSession.conditions, true)
+  } else {
+    const result = searchSession.receive(command)
+    if (!result.accepted) return
+    editor.value?.setSearch(searchSession.conditions, true)
+    if (result.action) editor.value?.runSearch(result.action)
+    if (command.type === 'close') {
+      void closeSearchWindow().catch((error: unknown) => showError('検索画面を閉じる操作', error))
+      return
+    }
+  }
+  void publishSearchState()
+}
+
+/** 検索窓の破棄を反映する。条件は残し、通常の終了時だけ本文へフォーカスを戻す。 */
+function handleSearchWindowDestroyed(destroyedWindow: WebviewWindow): void {
+  if (searchWindow !== destroyedWindow) return
+  searchWindow = null
+  searchWindowOpening = false
+  searchWindowClosing = false
+  searchWindowReady = false
+  searchSession.stop()
+  editor.value?.setSearch(searchSession.conditions, false)
+  if (!mainCloseInProgress.value) {
+    void appWindow.setFocus().then(() => editor.value?.focus()).catch((error: unknown) => {
+      showPersistenceNotice(`本文へフォーカスを戻せません。${String(error)}`)
+    })
+  }
+}
+
+/** メイン側で破棄することで、閉じる直前の入力を確定してから検索窓を終了する。 */
+async function closeSearchWindow(): Promise<void> {
+  if (!searchWindow) return
+  const closingWindow = searchWindow
+  searchWindowClosing = true
+  try {
+    await closingWindow.destroy()
+    handleSearchWindowDestroyed(closingWindow)
+  } catch (error) {
+    searchWindowError = `検索画面を閉じられません。もう一度操作してください。${String(error)}`
+    await publishSearchState()
+    throw error
+  } finally {
+    searchWindowClosing = false
+  }
+}
+
+/** 独立した非モーダル検索窓を1つだけ開き、既存の窓では指定入力へフォーカスする。 */
+async function openSearchWindow(field: SearchField): Promise<void> {
+  if (documentLocked.value || mainCloseInProgress.value || searchWindowClosing) return
+  searchFocus = { field, revision: searchFocus.revision + 1 }
+  if (searchWindowOpening) return
+  if (searchWindow) {
+    try {
+      await searchWindow.unminimize()
+      await searchWindow.setFocus()
+      await publishSearchState()
+    } catch (error) {
+      await showError('検索画面を開く操作', error)
+    }
+    return
+  }
+  searchWindowOpening = true
+  searchWindowError = ''
+  const sessionId = crypto.randomUUID()
+  searchSession.start(sessionId)
+  try {
+    const createdWindow = new WebviewWindow('search', {
+      url: `search.html?session=${encodeURIComponent(sessionId)}`,
+      title: '検索・置換',
+      parent: 'main',
+      center: true,
+      width: 640,
+      height: 380,
+      minWidth: 480,
+      minHeight: 340,
+      resizable: true,
+      decorations: true,
+      dragDropEnabled: false,
+    })
+    searchWindow = createdWindow
+    void createdWindow.once('tauri://destroyed', () => handleSearchWindowDestroyed(createdWindow))
+    void createdWindow.once('tauri://created', () => { searchWindowOpening = false })
+    void createdWindow.once('tauri://error', (event) => {
+      handleSearchWindowDestroyed(createdWindow)
+      void showError('検索画面を開く操作', event.payload)
+    })
+  } catch (error) {
+    searchWindowOpening = false
+    searchSession.stop()
+    await showError('検索画面を開く操作', error)
+  }
+}
+
 /** ウィンドウを最小化する。 */
 async function minimizeWindow(): Promise<void> {
   try {
@@ -695,7 +1456,7 @@ async function flushAllSettingsChanges(): Promise<void> {
   }
 }
 
-/** Esc でメニューを閉じ、ファイル操作の Ctrl ショートカットを処理する。 */
+/** Esc でメニューを閉じ、修飾キーを含む共通ショートカットを処理する。 */
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape' && settingsSubmenuOpen.value) {
     event.preventDefault()
@@ -707,66 +1468,106 @@ function onKeydown(event: KeyboardEvent): void {
     openMenu.value = null
     return
   }
-  if (event.ctrlKey && !event.altKey && !event.shiftKey) {
-    const shortcut = `ctrl+${event.key.toLowerCase()}`
-    const command = appCommandDefinitions.find((definition) => definition.shortcut?.toLowerCase() === shortcut)
-    if (command) {
-      event.preventDefault()
-      executeCommand(command.id)
-    }
+  const command = findShortcutCommand(event)
+  if (command) {
+    event.preventDefault()
+    executeCommand(command.id)
   }
 }
 
 // 画面のマウント時にショートカットと Tauri のウィンドウ終了要求を購読する。
 onMounted(async () => {
-  window.addEventListener('keydown', onKeydown)
+  window.addEventListener('keydown', onKeydown, true)
   if (props.persistenceState !== 'ready') {
     const detail = props.persistenceError ? ` ${props.persistenceError}` : ''
     showPersistenceNotice(props.persistenceState === 'recovered'
       ? `設定データを読み込めなかったため、初期値で再作成しました。${detail}`
       : `設定を保存できません。今回の変更はアプリ終了後に失われます。${detail}`)
   }
+  window.addEventListener('resize', updateMainViewportWidth)
+  unlistenViewportResize = () => window.removeEventListener('resize', updateMainViewportWidth)
   // 設定保存と文書終了確認を終えてから、メインウィンドウを閉じる。
   unlistenClose = await appWindow.onCloseRequested(async (event) => {
-    if (busy.value) {
-      event.preventDefault()
-      return
-    }
-    const settingsNeedFlush = !!settingsSaveTimer || !!settingsSavePromise || settingsChangeRevision > persistedSettingsRevision
-    if (!dirty.value && !settingsNeedFlush) return
     event.preventDefault()
-    if (mainCloseInProgress) return
-    mainCloseInProgress = true
+    if (busy.value || mainCloseInProgress.value) return
+    mainCloseInProgress.value = true
+    void publishProjectTreeWindowState()
+    documentLocked.value = true
+    let destroyed = false
     try {
       if (dirty.value && !(await confirmDiscard())) return
       await flushAllSettingsChanges()
+      await flushProjectTreePreferences()
+      cancelRecoveryTimer()
+      if (recoveryReady) {
+        try {
+          // 実行中の自動保存の後に削除を並べ、明示破棄した本文を復活させない。
+          await saveRecoverySnapshot(null)
+        } catch (error) {
+          await showError('復元候補の削除', error)
+        }
+      }
+      await closeSearchWindow()
+      await closeProjectTreeWindowForExit()
       await appWindow.destroy()
+      destroyed = true
     } catch (error) {
-      await showError('設定の保存', error)
+      await showError('終了処理', error)
     } finally {
-      mainCloseInProgress = false
+      mainCloseInProgress.value = false
+      if (!destroyed) {
+        documentLocked.value = false
+        projectTreeWindowClosingForExit = false
+        void publishProjectTreeWindowState()
+        scheduleRecoverySave()
+        if (projectTreeDetached.value && !projectTreeWindow) await openProjectTreeWindow()
+      }
     }
   })
   unlistenResize = await appWindow.onResized(() => { void updateMaximized() })
   unlistenSettingsCommand = await listen<SettingsCommand>(SETTINGS_COMMAND_EVENT, (event) => {
     void handleSettingsCommand(event.payload)
   })
+  unlistenSearchCommand = await listen<SearchCommand>(SEARCH_COMMAND_EVENT, (event) => {
+    handleSearchCommand(event.payload)
+  })
+  unlistenProjectTreeCommand = await listen<ProjectTreeWindowCommand>(PROJECT_TREE_WINDOW_COMMAND_EVENT, (event) => {
+    handleProjectTreeWindowCommand(event.payload)
+  })
   await updateMaximized()
   alwaysOnTop.value = await appWindow.isAlwaysOnTop()
+  const recoveryLoaded = await initializeRecovery()
+  if (props.storageInitializationReady && recoveryLoaded) {
+    try {
+      await confirmStorageStartup()
+    } catch (error) {
+      showPersistenceNotice(`移行元データを片付けられませんでした。次回起動時に再試行します。${String(error)}`)
+    }
+  }
+  if (projectTreeDetached.value) await openProjectTreeWindow()
 })
 
 // 画面の破棄時に購読を解除し、同じ操作が重複して処理されることを防ぐ。
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('keydown', onKeydown, true)
+  cancelRecoveryTimer()
+  recoveryReady = false
   unlistenClose?.()
   unlistenResize?.()
   unlistenSettingsCommand?.()
+  unlistenSearchCommand?.()
+  unlistenProjectTreeCommand?.()
+  unlistenViewportResize?.()
+  searchWindowReady = false
+  void searchWindow?.destroy()
   void settingsWindow?.destroy()
+  if (projectTreeWindow) projectTreeWindowClosingForExit = true
+  void projectTreeWindow?.destroy()
 })
 </script>
 
 <template>
-  <VApp class="app-shell">
+  <VApp class="app-shell" :class="{ 'is-project-tree-resizing': projectTreeResizing }">
     <VAppBar
       class="titlebar"
       :height="48"
@@ -788,6 +1589,22 @@ onBeforeUnmount(() => {
             </VListItem>
             <VListItem role="menuitem" :disabled="isCommandDisabled('document.save')" title="保存" @click="runMenuCommand('document.save')">
               <template #append><span class="menu-shortcut">{{ getCommandShortcut('document.save') }}</span></template>
+            </VListItem>
+            <VListItem role="menuitem" :disabled="isCommandDisabled('document.saveAs')" title="名前を付けて保存" @click="runMenuCommand('document.saveAs')">
+              <template #append><span class="menu-shortcut">{{ getCommandShortcut('document.saveAs') }}</span></template>
+            </VListItem>
+          </VList>
+        </VMenu>
+        <VMenu v-model="editMenuOpen" :close-on-content-click="false" :transition="false">
+          <template #activator="{ props: editMenuProps }">
+            <VBtn v-bind="editMenuProps" class="menu-heading" size="small" variant="text">編集</VBtn>
+          </template>
+          <VList density="compact" min-width="220" role="menu" aria-label="編集">
+            <VListItem role="menuitem" :disabled="isCommandDisabled('edit.find')" title="検索" @click="runMenuCommand('edit.find')">
+              <template #append><span class="menu-shortcut">{{ getCommandShortcut('edit.find') }}</span></template>
+            </VListItem>
+            <VListItem role="menuitem" :disabled="isCommandDisabled('edit.replace')" title="置換" @click="runMenuCommand('edit.replace')">
+              <template #append><span class="menu-shortcut">{{ getCommandShortcut('edit.replace') }}</span></template>
             </VListItem>
           </VList>
         </VMenu>
@@ -861,6 +1678,59 @@ onBeforeUnmount(() => {
           <div class="toolbar-scroll">
             <template v-for="item in displayedToolbarItems" :key="item.type === 'command' ? item.commandId : item.id">
               <VDivider v-if="item.type === 'separator'" class="toolbar-divider" vertical inset />
+              <VSelect
+                v-else-if="item.commandId === 'toolbar.typography.fontFamily'"
+                class="toolbar-typography-font"
+                :model-value="editorSettings.fontFamily"
+                :items="toolbarFontItems"
+                item-title="title"
+                item-value="value"
+                label="書体"
+                density="compact"
+                variant="outlined"
+                hide-details
+                :disabled="isCommandDisabled(item.commandId)"
+                aria-label="本文の書体"
+                @update:model-value="updateToolbarFontFamily"
+              />
+              <ToolbarTypographyNumber
+                v-else-if="item.commandId === 'toolbar.typography.fontSize'"
+                :model-value="editorSettings.fontSize"
+                field="fontSize"
+                label="サイズ"
+                suffix="px"
+                :disabled="isCommandDisabled(item.commandId)"
+                @update:model-value="updateToolbarTypographyNumber('fontSize', $event)"
+              />
+              <div v-else-if="item.commandId === 'toolbar.typography.fontSizeAdjust'" class="toolbar-font-size-adjust" role="group" aria-label="文字サイズを1pxずつ変更">
+                <VBtn
+                  icon="mdi-minus"
+                  size="small"
+                  variant="text"
+                  :disabled="isCommandDisabled(item.commandId) || editorSettings.fontSize <= 12"
+                  aria-label="文字サイズを1px小さくする"
+                  title="文字サイズを1px小さくする"
+                  @click="adjustToolbarFontSize(-1)"
+                />
+                <VBtn
+                  icon="mdi-plus"
+                  size="small"
+                  variant="text"
+                  :disabled="isCommandDisabled(item.commandId) || editorSettings.fontSize >= 48"
+                  aria-label="文字サイズを1px大きくする"
+                  title="文字サイズを1px大きくする"
+                  @click="adjustToolbarFontSize(1)"
+                />
+              </div>
+              <ToolbarTypographyNumber
+                v-else-if="item.commandId === 'toolbar.typography.lineHeight'"
+                :model-value="editorSettings.lineHeight"
+                field="lineHeight"
+                label="行間"
+                suffix="倍"
+                :disabled="isCommandDisabled(item.commandId)"
+                @update:model-value="updateToolbarTypographyNumber('lineHeight', $event)"
+              />
               <VTooltip v-else :text="getCommandLabel(item.commandId)" location="bottom">
                 <template #activator="{ props: tooltipProps }">
                   <VBtn
@@ -894,9 +1764,47 @@ onBeforeUnmount(() => {
     <VSnackbar v-model="persistenceNoticeOpen" timeout="9000" location="bottom">
       {{ persistenceNotice }}
     </VSnackbar>
+    <VNavigationDrawer
+      v-if="!projectTreeDetached"
+      class="project-navigation"
+      app
+      permanent
+      :width="projectTreeDisplayWidth"
+      aria-label="プロジェクトツリー"
+    >
+      <ProjectTreeSidebar
+        :disabled="projectTreeWindowDisabled"
+        :document-origin="documentOrigin"
+        :expanded-folder-ids="expandedProjectTreeFolderIds"
+        :unavailable-node-ids="projectTreeUnavailableNodeIds"
+        :open-result="projectTreeOpenResult"
+        @detach-request="requestProjectTreeDetach"
+        @open-file="openProjectTreeFile"
+        @open-result-applied="consumeProjectTreeOpenResult"
+        @origin-detached="detachDocumentOrigin"
+        @expanded-change="updateExpandedProjectTreeFolders"
+        @unavailable-change="updateProjectTreeUnavailableNodeIds"
+      />
+      <div
+        class="project-tree-resize-handle"
+        role="separator"
+        tabindex="0"
+        aria-label="プロジェクトツリーの幅"
+        aria-orientation="vertical"
+        :aria-valuemin="220"
+        :aria-valuemax="projectTreeMaximumWidth"
+        :aria-valuenow="projectTreeDisplayWidth"
+        @pointerdown="startProjectTreeResize"
+        @pointermove="moveProjectTreeResize"
+        @pointerup="endProjectTreeResize"
+        @pointercancel="endProjectTreeResize"
+        @lostpointercapture="endProjectTreeResize"
+        @keydown="onProjectTreeResizeKeydown"
+      />
+    </VNavigationDrawer>
     <VMain class="writing-area" aria-label="本文編集領域">
-      <EditorPane ref="editor" :settings="editorSettings" @change="onChange" />
+      <EditorPane ref="editor" :settings="editorSettings" :read-only="documentLocked" @change="onChange" @statistics="statistics = $event" @search-status="onSearchStatus" @search-navigate="onSearchNavigate" />
     </VMain>
-    <VFooter app class="status-bar" height="36">{{ charCount.toLocaleString('ja-JP') }} 文字</VFooter>
+    <VFooter app class="status-bar" height="36"><StatisticsStatus :statistics="statistics" /></VFooter>
   </VApp>
 </template>

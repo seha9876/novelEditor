@@ -120,6 +120,21 @@ html, body, #app { width: 100%; height: 100%; margin: 0; }
 .toolbar-reset-actions { justify-content: flex-end; }
 .settings-history-actions { display: flex; align-items: center; gap: 2px; margin-inline-end: 16px; }
 .settings-history-tooltip-activator { display: inline-flex; }
+.storage-location-current { min-width: 0; padding: 16px; margin-block: 12px; }
+.storage-location-current-label,
+.storage-location-default-label,
+.storage-location-pending-label { font-weight: 500; }
+.storage-location-current-path { margin-block-start: 4px; font-size: 1rem; font-weight: 500; line-height: 1.6; }
+.storage-location-divider { margin-block: 14px 10px; }
+.storage-location-path { min-width: 0; overflow-wrap: anywhere; line-height: 1.5; user-select: text; }
+.storage-location-default-description,
+.storage-location-pending-description { margin-block: 6px 0; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: 0.8125rem; }
+.storage-location-pending-path { margin-block-start: 4px; }
+.storage-location-pending-description { margin-block-end: 4px; }
+.storage-location-help { margin-block-start: 12px; }
+.storage-location-message { margin-block-start: 12px; }
+.storage-location-message p { margin: 0; }
+.storage-location-message .v-btn { margin-inline-start: -8px; }
 
 @media (max-width: 700px) {
   .setting-expansion-panels .v-expansion-panel-text__wrapper { padding-inline: 12px; }

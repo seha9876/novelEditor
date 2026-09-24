@@ -3,4 +3,8 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 *.log
-/.codex
+
+# Codex / AI 開発支援専用のローカル設定・指示ファイル
+# アプリ本体・ビルド・テスト・配布に必要なファイルは引き続き Git で管理する
+/.codex/
+/AGENTS.md

@@ -46,6 +46,18 @@ export function isValidTypographyNumber(field: 'fontSize' | 'lineHeight', value:
     : value >= 1 && value <= 3 && Math.abs(value * 10 - Math.round(value * 10)) < 1e-9
 }
 
+/** IME変換中のEnterを設定値の確定として扱わない。 */
+export function shouldCommitTypographyInput(event: Pick<KeyboardEvent, 'key' | 'isComposing' | 'keyCode'>): boolean {
+  return event.key === 'Enter' && !event.isComposing && event.keyCode !== 229
+}
+
+/** ツールバーの候補一覧を設定値と同じ範囲・刻みで作る。 */
+export function getTypographyNumberOptions(field: 'fontSize' | 'lineHeight'): number[] {
+  return field === 'fontSize'
+    ? Array.from({ length: 37 }, (_, index) => index + 12)
+    : Array.from({ length: 21 }, (_, index) => Number(((index + 10) / 10).toFixed(1)))
+}
+
 /** 外部から読み込んだ値を検査し、不正な項目は既定値へ戻す。 */
 export function normalizeEditorSettings(value: unknown): EditorSettings {
   if (!value || typeof value !== 'object') return { ...defaultEditorSettings }

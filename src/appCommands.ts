@@ -16,6 +16,10 @@ export type CommandId =
   | 'window.maximizeHorizontal'
   | 'window.alwaysOnTop'
   | 'window.close'
+  | 'toolbar.typography.fontFamily'
+  | 'toolbar.typography.fontSize'
+  | 'toolbar.typography.fontSizeAdjust'
+  | 'toolbar.typography.lineHeight'
   | 'view.toolbar.toggle'
   | 'view.toolbar.customize'
 
@@ -53,6 +57,10 @@ export const appCommandDefinitions: readonly AppCommandDefinition[] = [
   { id: 'window.maximizeHorizontal', label: '横方向に最大化', icon: 'mdi-arrow-expand-horizontal', toolbarEligible: true },
   { id: 'window.alwaysOnTop', label: '常に手前に表示', icon: 'mdi-pin-outline', toolbarEligible: true },
   { id: 'window.close', label: '閉じる', icon: 'mdi-window-close', toolbarEligible: true },
+  { id: 'toolbar.typography.fontFamily', label: '本文の書体', icon: 'mdi-format-font', toolbarEligible: true },
+  { id: 'toolbar.typography.fontSize', label: '文字サイズ（px）', icon: 'mdi-format-size', toolbarEligible: true },
+  { id: 'toolbar.typography.fontSizeAdjust', label: '文字サイズを1px変更', icon: 'mdi-plus-minus-variant', toolbarEligible: true },
+  { id: 'toolbar.typography.lineHeight', label: '行間', icon: 'mdi-format-line-spacing', toolbarEligible: true },
   { id: 'view.toolbar.toggle', label: 'ツールバーを表示', icon: 'mdi-toolbar', toolbarEligible: false },
   { id: 'view.toolbar.customize', label: 'ツールバーをカスタマイズ', icon: 'mdi-tune-variant', toolbarEligible: false },
 ]

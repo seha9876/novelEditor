@@ -7,9 +7,12 @@ import { emitTo, listen } from '@tauri-apps/api/event'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import EditorPane from './EditorPane.vue'
 import ProjectTreeSidebar from './ProjectTreeSidebar.vue'
+import ToolbarTypographyNumber from './ToolbarTypographyNumber.vue'
 import StatisticsStatus from './StatisticsStatus.vue'
 import { createEmptyStatistics } from './editorStatistics'
 import {
+  editorFontOptions,
+  isValidTypographyNumber,
   normalizeEditorSettings,
   type EditorSettings,
   type WrapMode,
@@ -116,6 +119,13 @@ const projectTreeMaximumWidth = computed(() => Math.max(220, Math.min(480, mainV
 const projectTreeDisplayWidth = computed(() => Math.min(projectTreeWidth.value, projectTreeMaximumWidth.value))
 const displayedToolbarItems = computed(() => toolbarPreferences.value.items)
 const displayedToolbarVisible = computed(() => toolbarPreferences.value.visible)
+const toolbarFontItems = computed(() => {
+  const items: { title: string; value: string }[] = editorFontOptions.map((option) => ({ title: option.label, value: option.fontFamily }))
+  if (!items.some((item) => item.value === editorSettings.value.fontFamily)) {
+    items.push({ title: editorSettings.value.fontFamily, value: editorSettings.value.fontFamily })
+  }
+  return items
+})
 const displayMenuOpen = computed({
   get: (): boolean => openMenu.value === 'display',
   set: (value: boolean): void => {
@@ -225,6 +235,10 @@ const commandActions: Record<CommandId, () => Promise<void>> = {
   'window.maximizeHorizontal': () => maximizeWindowAxis('horizontal'),
   'window.alwaysOnTop': toggleAlwaysOnTop,
   'window.close': closeWindow,
+  'toolbar.typography.fontFamily': async () => openSettingsWindow('editor.typography'),
+  'toolbar.typography.fontSize': async () => openSettingsWindow('editor.typography'),
+  'toolbar.typography.fontSizeAdjust': async () => openSettingsWindow('editor.typography'),
+  'toolbar.typography.lineHeight': async () => openSettingsWindow('editor.typography'),
   'view.toolbar.toggle': toggleToolbarVisibility,
   'view.toolbar.customize': async () => openSettingsWindow('appearance.toolbar'),
 }
@@ -411,7 +425,7 @@ async function openDocument(): Promise<void> {
   }
 }
 
-/** ツリーの要求元を問わず、メイン画面で許可した登録ファイルを本文へ開く。 */
+/** ツリーの要求元を問わず、メイン画面で参照先を検証して本文へ開く。 */
 async function openProjectTreeFile(request: ProjectTreeOpenRequest, sourceWindowId?: string): Promise<void> {
   if (busy.value || mainCloseInProgress.value) {
     reportProjectTreeOpenResult({ requestId: request.requestId, nodeId: request.nodeId, error: '別の操作中のため、ファイルを開けませんでした。' }, sourceWindowId)
@@ -691,7 +705,7 @@ function createProjectTreeWindow(): Promise<boolean> {
         minHeight: 360,
         resizable: true,
         decorations: true,
-        dragDropEnabled: false,
+        dragDropEnabled: true,
       })
       projectTreeWindow = createdWindow
       void createdWindow.once('tauri://created', () => {
@@ -856,7 +870,29 @@ function executeCommand(commandId: CommandId): void {
 function isCommandDisabled(commandId: CommandId): boolean {
   if (mainCloseInProgress.value) return true
   if (commandId === 'edit.find' || commandId === 'edit.replace') return documentLocked.value
+  if (commandId.startsWith('toolbar.typography.')) return busy.value || documentLocked.value
   return busy.value && commandId.startsWith('document.')
+}
+
+/** 書体プリセットでは代替書体も一緒に更新し、既知でない保存済み名はそのまま扱う。 */
+function updateToolbarFontFamily(value: unknown): void {
+  if (typeof value !== 'string') return
+  const option = editorFontOptions.find((candidate) => candidate.fontFamily === value)
+  updateCurrentSettings(option
+    ? { fontFamily: option.fontFamily, fontFallback: option.fontFallback }
+    : { fontFamily: value })
+}
+
+/** ツールバーの数値入力を本文設定の共通範囲で検証して保存する。 */
+function updateToolbarTypographyNumber(field: 'fontSize' | 'lineHeight', value: number): void {
+  if (!isValidTypographyNumber(field, value)) return
+  updateCurrentSettings({ [field]: value })
+}
+
+/** 本文文字サイズを1pxずつ調整し、12～48pxの範囲を超えないようにする。 */
+function adjustToolbarFontSize(direction: -1 | 1): void {
+  const next = editorSettings.value.fontSize + direction
+  if (isValidTypographyNumber('fontSize', next)) updateCurrentSettings({ fontSize: next })
 }
 
 /** 現在選択されている状態付きコマンドかを判定する。 */
@@ -1642,6 +1678,59 @@ onBeforeUnmount(() => {
           <div class="toolbar-scroll">
             <template v-for="item in displayedToolbarItems" :key="item.type === 'command' ? item.commandId : item.id">
               <VDivider v-if="item.type === 'separator'" class="toolbar-divider" vertical inset />
+              <VSelect
+                v-else-if="item.commandId === 'toolbar.typography.fontFamily'"
+                class="toolbar-typography-font"
+                :model-value="editorSettings.fontFamily"
+                :items="toolbarFontItems"
+                item-title="title"
+                item-value="value"
+                label="書体"
+                density="compact"
+                variant="outlined"
+                hide-details
+                :disabled="isCommandDisabled(item.commandId)"
+                aria-label="本文の書体"
+                @update:model-value="updateToolbarFontFamily"
+              />
+              <ToolbarTypographyNumber
+                v-else-if="item.commandId === 'toolbar.typography.fontSize'"
+                :model-value="editorSettings.fontSize"
+                field="fontSize"
+                label="サイズ"
+                suffix="px"
+                :disabled="isCommandDisabled(item.commandId)"
+                @update:model-value="updateToolbarTypographyNumber('fontSize', $event)"
+              />
+              <div v-else-if="item.commandId === 'toolbar.typography.fontSizeAdjust'" class="toolbar-font-size-adjust" role="group" aria-label="文字サイズを1pxずつ変更">
+                <VBtn
+                  icon="mdi-minus"
+                  size="small"
+                  variant="text"
+                  :disabled="isCommandDisabled(item.commandId) || editorSettings.fontSize <= 12"
+                  aria-label="文字サイズを1px小さくする"
+                  title="文字サイズを1px小さくする"
+                  @click="adjustToolbarFontSize(-1)"
+                />
+                <VBtn
+                  icon="mdi-plus"
+                  size="small"
+                  variant="text"
+                  :disabled="isCommandDisabled(item.commandId) || editorSettings.fontSize >= 48"
+                  aria-label="文字サイズを1px大きくする"
+                  title="文字サイズを1px大きくする"
+                  @click="adjustToolbarFontSize(1)"
+                />
+              </div>
+              <ToolbarTypographyNumber
+                v-else-if="item.commandId === 'toolbar.typography.lineHeight'"
+                :model-value="editorSettings.lineHeight"
+                field="lineHeight"
+                label="行間"
+                suffix="倍"
+                :disabled="isCommandDisabled(item.commandId)"
+                @update:model-value="updateToolbarTypographyNumber('lineHeight', $event)"
+              />
               <VTooltip v-else :text="getCommandLabel(item.commandId)" location="bottom">
                 <template #activator="{ props: tooltipProps }">
                   <VBtn

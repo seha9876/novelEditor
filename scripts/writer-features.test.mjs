@@ -65,6 +65,59 @@ test('旧保存先の片付け放棄は引数なしの明示コマンドとし�
   assert.deepEqual(invocation, { command: 'storage_abandon_cleanup', args: undefined })
 })
 
+test('ツリー内のポインター位置は既存の前後・フォルダ内配置を保つ', () => {
+  const tree = loadSourceModule('src/projectTree.ts')
+  assert.equal(tree.projectTreeRowPlacement('folder', 5, 0, 40), 'before')
+  assert.equal(tree.projectTreeRowPlacement('folder', 20, 0, 40), 'inside')
+  assert.equal(tree.projectTreeRowPlacement('folder', 35, 0, 40), 'after')
+  assert.equal(tree.projectTreeRowPlacement('file', 20, 0, 40), 'after')
+  assert.equal(tree.projectTreeRowPlacement('file', 0, 0, 0), 'before')
+})
+
+test('ツリー外や境界の許容範囲外では自動スクロールせず、上下端だけ移動量を返す', () => {
+  const tree = loadSourceModule('src/projectTree.ts')
+  const bounds = { left: 100, right: 300, top: 50, bottom: 350 }
+  assert.equal(tree.projectTreeAutoScrollStep({ x: 301, y: 349 }, bounds), 0)
+  assert.equal(tree.projectTreeAutoScrollStep({ x: 99, y: 51 }, bounds), 0)
+  assert.equal(tree.projectTreeAutoScrollStep({ x: 200, y: 9 }, bounds), 0)
+  assert.equal(tree.projectTreeAutoScrollStep({ x: 200, y: 391 }, bounds), 0)
+  assert.equal(tree.projectTreeAutoScrollStep({ x: 200, y: 70 }, bounds), -10)
+  assert.equal(tree.projectTreeAutoScrollStep({ x: 200, y: 330 }, bounds), 10)
+  assert.equal(tree.projectTreeAutoScrollStep({ x: 200, y: 10 }, bounds), -18)
+})
+
+test('ネイティブドロップの座標・領域・追加先とポインター操作の区別を保つ', () => {
+  const tree = loadSourceModule('src/projectTree.ts')
+  assert.deepEqual(tree.projectTreePhysicalToViewport({ x: 800, y: 500 }, 2), { x: 400, y: 250 })
+  assert.deepEqual(tree.projectTreeExternalDropDestination(false, null), { accepted: false, parentId: null })
+  assert.deepEqual(tree.projectTreeExternalDropDestination(true, null), { accepted: true, parentId: null })
+  assert.deepEqual(tree.projectTreeExternalDropDestination(true, { id: 9, kind: 'file' }), { accepted: true, parentId: null })
+  assert.deepEqual(tree.projectTreeExternalDropDestination(true, { id: 12, kind: 'folder' }), { accepted: true, parentId: 12 })
+  assert.equal(tree.hasProjectTreePointerDragStarted({ x: 10, y: 10 }, { x: 13, y: 13 }), false)
+  assert.equal(tree.hasProjectTreePointerDragStarted({ x: 10, y: 10 }, { x: 13, y: 14 }), true)
+  assert.equal(tree.shouldSuppressProjectTreeClick(true, 1), true)
+  assert.equal(tree.shouldSuppressProjectTreeClick(true, 0), false)
+  assert.equal(tree.shouldSuppressProjectTreeClick(false, 1), false)
+})
+
+test('複数TXTのドロップ登録は一部が失敗しても残りを続行する', async () => {
+  const invocations = []
+  const tree = loadSourceModule('src/projectTree.ts', {
+    '@tauri-apps/api/core': { invoke: async (command, args) => {
+      invocations.push({ command, args })
+      if (args.path.endsWith('壊れた.txt')) throw new Error('参照先を確認できません')
+    } },
+  })
+  const result = await tree.registerDroppedProjectFiles(7, 12, [
+    'C:\\drafts\\一.txt', 'C:\\drafts\\壊れた.txt', 'C:\\drafts\\二.txt',
+  ])
+  assert.equal(result.registeredCount, 2)
+  assert.deepEqual(result.failures, [{ path: 'C:\\drafts\\壊れた.txt', error: 'Error: 参照先を確認できません' }])
+  assert.equal(invocations.length, 3)
+  assert.ok(invocations.every(({ command, args }) => command === 'project_file_register'
+    && args.projectId === 7 && args.parentId === 12))
+})
+
 test('通常保存と別名保存でUTF-8・BOM・全改行形式と保存後の基準を維持する', async () => {
   const writes = []
   const files = loadSourceModule('src/textFile.ts', {
@@ -605,7 +658,7 @@ test('集計失敗後の文書切替は旧確定値を消し、画面破棄後�
 })
 
 test('旧設定の補完は既存項目を保ち、任意の書体名と数値の境界を扱う', () => {
-  const { defaultEditorSettings, normalizeEditorSettings, editorFontCss, isValidTypographyNumber } = loadSourceModule('src/editorSettings.ts')
+  const { defaultEditorSettings, normalizeEditorSettings, editorFontCss, isValidTypographyNumber, getTypographyNumberOptions } = loadSourceModule('src/editorSettings.ts')
   const old = normalizeEditorSettings({ wrapMode: 'columns', wrapColumns: 120, narrowWrapBehavior: 'fit' })
   assert.deepEqual(old, { ...defaultEditorSettings, wrapMode: 'columns', wrapColumns: 120, narrowWrapBehavior: 'fit' })
   const custom = normalizeEditorSettings({ ...old, fontFamily: '小説専用書体', fontFallback: 'sans-serif', fontSize: 48, lineHeight: 3 })
@@ -616,7 +669,23 @@ test('旧設定の補完は既存項目を保ち、任意の書体名と数値�
   for (const fontSize of [11, 49, 18.5, NaN]) assert.equal(normalizeEditorSettings({ fontSize }).fontSize, 18)
   for (const lineHeight of [1, 1.1, 1.9, 3]) assert.equal(isValidTypographyNumber('lineHeight', lineHeight), true)
   for (const lineHeight of [0.9, 3.1, 1.95, Infinity]) assert.equal(normalizeEditorSettings({ lineHeight }).lineHeight, 1.9)
+  const fontSizeOptions = getTypographyNumberOptions('fontSize')
+  assert.equal(fontSizeOptions.length, 37)
+  assert.deepEqual([fontSizeOptions[0], fontSizeOptions.at(-1)], [12, 48])
+  assert.ok(fontSizeOptions.every((value) => isValidTypographyNumber('fontSize', value)))
+  const lineHeightOptions = getTypographyNumberOptions('lineHeight')
+  assert.equal(lineHeightOptions.length, 21)
+  assert.deepEqual([lineHeightOptions[0], lineHeightOptions.at(-1)], [1, 3])
+  assert.ok(lineHeightOptions.every((value) => isValidTypographyNumber('lineHeight', value)))
   assert.equal(normalizeEditorSettings({ fontFamily: 'bad\nfont', fontFallback: 'other' }).fontFamily, defaultEditorSettings.fontFamily)
+})
+
+test('ツールバー数値入力はIME変換中のEnterを確定キーと誤認しない', () => {
+  const { shouldCommitTypographyInput } = loadSourceModule('src/editorSettings.ts')
+  assert.equal(shouldCommitTypographyInput({ key: 'Enter', isComposing: false, keyCode: 13 }), true)
+  assert.equal(shouldCommitTypographyInput({ key: 'Enter', isComposing: true, keyCode: 13 }), false)
+  assert.equal(shouldCommitTypographyInput({ key: 'Enter', isComposing: false, keyCode: 229 }), false)
+  assert.equal(shouldCommitTypographyInput({ key: 'Escape', isComposing: false, keyCode: 27 }), false)
 })
 
 test('プロジェクトツリー設定は旧データを補完し、保存幅を220～480pxに制限する', () => {
@@ -632,6 +701,33 @@ test('プロジェクトツリー設定は旧データを補完し、保存幅�
   assert.equal(preferences.normalizeApplicationPreferences({ ui: { projectTree: { width: 200, detached: true } } }).ui.projectTree.width, 220)
   assert.equal(preferences.normalizeApplicationPreferences({ ui: { projectTree: { width: 700, detached: true } } }).ui.projectTree.width, 480)
   assert.deepEqual(preferences.normalizeApplicationPreferences({ ui: { projectTree: { width: 'wide', detached: 'yes' } } }).ui.projectTree, { width: 280, detached: false })
+})
+
+test('本文書式コントロールをツールバーへ一度ずつ登録でき、既定構成は維持する', () => {
+  const commands = loadSourceModule('src/appCommands.ts')
+  const preferences = loadSourceModule('src/appPreferences.ts', {
+    '@tauri-apps/plugin-store': { load: async () => { throw new Error('このテストではStoreを使いません。') } },
+  })
+  const typographyCommandIds = [
+    'toolbar.typography.fontFamily',
+    'toolbar.typography.fontSize',
+    'toolbar.typography.fontSizeAdjust',
+    'toolbar.typography.lineHeight',
+  ]
+  const defaults = preferences.createDefaultToolbarItems()
+  assert.deepEqual(defaults.map((item) => item.commandId ?? item.id), [
+    'wrap.window', 'wrap.columns', 'wrap.none', 'separator-1', 'settings.open',
+  ])
+  assert.deepEqual(
+    commands.getToolbarCommandDefinitions().filter((command) => typographyCommandIds.includes(command.id)).map((command) => command.id),
+    typographyCommandIds,
+  )
+
+  const normalized = preferences.normalizeToolbarItems([
+    ...typographyCommandIds.map((commandId) => ({ type: 'command', commandId })),
+    { type: 'command', commandId: 'toolbar.typography.fontSize' },
+  ])
+  assert.deepEqual(normalized.map((item) => item.commandId), typographyCommandIds)
 })
 
 test('分離ツリーは開く結果を反映してからドックし、復帰時に展開状態を引き継ぐ', () => {

@@ -406,14 +406,14 @@ fn reindex_destination(
     Ok(())
 }
 
-/// ツリー登録用の TXT パスを、ダイアログ許可・実在・通常ファイルの条件で検証する。
+/// ツリー登録用 TXT パスがアプリ管理の FS Scope に含まれ、実在する通常ファイルか検証する。
 fn validated_file_path(window: &Window, path: String) -> Result<(PathBuf, String), String> {
     let path = PathBuf::from(path);
     if !path.is_absolute() {
         return Err("絶対パスのファイルを指定してください".to_string());
     }
     if !window.fs_scope().is_allowed(&path) {
-        return Err("ファイル選択ダイアログから登録するファイルを選択してください".to_string());
+        return Err("このファイルはアプリの許可範囲にありません。選択またはドロップしてから再試行してください".to_string());
     }
     let metadata = std::fs::metadata(&path)
         .map_err(|error| format!("参照先ファイルを確認できません: {error}"))?;
@@ -706,7 +706,7 @@ fn validate_project(transaction: &Transaction<'_>, project_id: i64) -> Result<()
     }
 }
 
-/// ダイアログで選択した TXT をツリーへ独立した参照として登録する。
+/// ダイアログまたはOSからのドロップで受け取った TXT をツリーへ独立した参照として登録する。
 #[tauri::command]
 pub fn project_file_register(
     state: State<'_, ProjectTreeState>,
@@ -936,7 +936,7 @@ pub fn project_node_move(
         .map_err(|error| database_error("ノード移動を確定できません", error))
 }
 
-/// 保存済みのノードを開くため、参照先を検証して呼び出し元ウィンドウにだけ許可する。
+/// 保存済みノードの参照先を検証し、アプリ管理の FS Scope へ追加する。
 #[tauri::command]
 pub fn project_file_authorize(
     state: State<'_, ProjectTreeState>,

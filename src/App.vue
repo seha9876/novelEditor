@@ -1,17 +1,26 @@
 <script setup lang="ts">
 // 文書操作と画面表示をまとめ、本文そのものは EditorPane の CodeMirror に保持する。
-import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { ask, message } from '@tauri-apps/plugin-dialog'
 import { currentMonitor, getCurrentWindow, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/window'
 import { emitTo, listen } from '@tauri-apps/api/event'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import EditorPane from './EditorPane.vue'
+import ProjectTreeSidebar from './ProjectTreeSidebar.vue'
+import StatisticsStatus from './StatisticsStatus.vue'
+import { createEmptyStatistics } from './editorStatistics'
 import {
   normalizeEditorSettings,
   type EditorSettings,
   type WrapMode,
 } from './editorSettings'
-import { appCommandDefinitions, type AppCommand, type CommandId } from './appCommands'
+import { appCommandDefinitions, findShortcutCommand, type AppCommand, type CommandId } from './appCommands'
+import { loadRecoverySnapshot, saveRecoverySnapshot } from './recoveryStore'
+import { confirmStorageStartup } from './storageLocation'
+import {
+  SEARCH_COMMAND_EVENT, SEARCH_STATE_EVENT, SearchSession,
+  type SearchAction, type SearchCommand, type SearchConditions, type SearchField, type SearchSnapshot, type SearchStatus,
+} from './searchSession'
 import {
   saveSettingsPreferences,
   normalizeToolbarItems,
@@ -40,16 +49,21 @@ import {
 type EditorHandle = {
   /** CodeMirror が保持する現在の本文を返す。 */
   getText: () => string
-  /** 本文と改行形式を切り替え、編集履歴を初期化する。 */
-  setDocument: (text: string, lineEnding?: LineEnding) => void
+  /** 本文を切り替え、編集履歴を初期化する。 */
+  setDocument: (text: string) => void
   /** 本文領域へ入力フォーカスを移す。 */
   focus: () => void
+  /** 検索条件とハイライトの有効状態を本文へ反映する。 */
+  setSearch: (conditions: SearchConditions, active: boolean) => void
+  /** 本文の選択とUndo履歴を使って検索・置換を実行する。 */
+  runSearch: (action: SearchAction) => void
 }
 
 const props = defineProps<{
   initialPreferences: ApplicationPreferencesV1
   persistenceState: PreferencesPersistenceState
   persistenceError?: string
+  storageInitializationReady: boolean
 }>()
 
 type SettingsValues = {
@@ -60,14 +74,19 @@ type SettingsValues = {
 // 本文は CodeMirror、設定はVueの現在値を正本とし、設定更新は明示保存経路へ集約する。
 const editor = ref<EditorHandle | null>(null)
 const path = ref<string | null>(null)
+const documentOrigin = ref<{ nodeId: number; projectId: number } | null>(null)
 const savedText = ref('')
 const dirty = ref(false)
-const charCount = ref(0)
-const busy = ref(false)
+const statistics = ref(createEmptyStatistics())
+const busy = ref(true)
+const documentLocked = ref(true)
 const currentFile = ref<TextFile | null>(null)
+const documentFormat = ref<{ lineEnding: LineEnding; hasBom: boolean }>({ lineEnding: '\n', hasBom: false })
+const suggestedFileName = ref('無題.txt')
+const restoredUnsaved = ref(false)
 const maximized = ref(false)
 const alwaysOnTop = ref(false)
-const openMenu = ref<'file' | 'settings' | 'display' | 'window' | null>(null)
+const openMenu = ref<'file' | 'edit' | 'settings' | 'display' | 'window' | null>(null)
 const settingsSubmenuOpen = ref(false)
 const appWindow = getCurrentWindow()
 const editorSettings = ref<EditorSettings>({ ...props.initialPreferences.editor })
@@ -95,6 +114,12 @@ const fileMenuOpen = computed({
     openMenu.value = value ? 'file' : (openMenu.value === 'file' ? null : openMenu.value)
   },
 })
+const editMenuOpen = computed({
+  get: (): boolean => openMenu.value === 'edit',
+  set: (value: boolean): void => {
+    openMenu.value = value ? 'edit' : (openMenu.value === 'edit' ? null : openMenu.value)
+  },
+})
 const settingsMenuOpen = computed({
   get: (): boolean => openMenu.value === 'settings',
   set: (value: boolean): void => {
@@ -109,7 +134,10 @@ const windowMenuOpen = computed({
   },
 })
 // 保存先が未定なら、上部には新規文書の名前を表示する。
-const displayName = computed(() => path.value ? fileName(path.value) : '無題')
+const displayName = computed(() => path.value ? fileName(path.value) : restoredUnsaved.value ? suggestedFileName.value : '無題')
+let recoveryReady = false
+let recoveryTimer: ReturnType<typeof setTimeout> | undefined
+let recoveryErrorReported = false
 let unlistenClose: (() => void) | undefined
 let unlistenResize: (() => void) | undefined
 let unlistenSettingsCommand: (() => void) | undefined
@@ -128,11 +156,29 @@ const settingsUndoHistory: SettingsValues[] = []
 const settingsRedoHistory: SettingsValues[] = []
 const settingsHistoryLimit = 100
 let mainCloseInProgress = false
+const searchSession = new SearchSession()
+let searchWindow: WebviewWindow | null = null
+let searchWindowOpening = false
+let searchWindowReady = false
+let searchWindowClosing = false
+let searchStatus: SearchStatus = 'empty'
+let searchStateRevision = 0
+let searchWindowError = ''
+let searchFocus = { field: 'search' as SearchField, revision: 0 }
+let unlistenSearchCommand: (() => void) | undefined
+
+watch(documentLocked, (locked) => {
+  searchSession.setLocked(locked)
+  void publishSearchState()
+}, { flush: 'sync' })
 
 const commandActions: Record<CommandId, () => Promise<void>> = {
   'document.new': newDocument,
   'document.open': openDocument,
   'document.save': saveDocument,
+  'document.saveAs': saveDocumentAs,
+  'edit.find': () => openSearchWindow('search'),
+  'edit.replace': () => openSearchWindow('replace'),
   'settings.open': openSettingsWindow,
   'wrap.window': () => chooseWrapMode('window'),
   'wrap.columns': () => chooseWrapMode('columns'),
@@ -153,10 +199,89 @@ const appCommands = Object.fromEntries(appCommandDefinitions.map((definition) =>
   isChecked: () => isCommandChecked(definition.id),
 }])) as Record<CommandId, AppCommand>
 
-/** CodeMirror から受けた本文と文字数で表示を更新し、保存済み本文との差から未保存状態を判定する。 */
-function onChange(text: string, count: number): void {
-  charCount.value = count
-  dirty.value = text !== savedText.value
+/** CodeMirrorの本文変更だけから未保存状態を判定する。統計・選択の通知は関与しない。 */
+function onChange(text: string): void {
+  dirty.value = restoredUnsaved.value || text !== savedText.value
+  scheduleRecoverySave()
+}
+
+/** 古い本文に対する遅延処理を取り消し、文書切り替え後に復元候補が復活しないようにする。 */
+function cancelRecoveryTimer(): void {
+  if (recoveryTimer) clearTimeout(recoveryTimer)
+  recoveryTimer = undefined
+}
+
+/** 入力が1秒止まった時点で最新本文を保護し、Undo等で保存済みに戻った場合は候補を削除する。 */
+function scheduleRecoverySave(): void {
+  if (!recoveryReady) return
+  cancelRecoveryTimer()
+  if (!dirty.value) {
+    void syncRecoverySnapshot()
+    return
+  }
+  recoveryTimer = setTimeout(() => {
+    recoveryTimer = undefined
+    void syncRecoverySnapshot()
+  }, 1000)
+}
+
+/** 現在の未保存本文、または候補の削除を直列Storeへ渡す。失敗は編集を妨げず通知する。 */
+async function syncRecoverySnapshot(): Promise<void> {
+  if (!recoveryReady) return
+  cancelRecoveryTimer()
+  try {
+    await saveRecoverySnapshot(dirty.value ? {
+      schemaVersion: 1,
+      text: editor.value?.getText() ?? '',
+      fileName: path.value ? fileName(path.value) : suggestedFileName.value,
+      ...documentFormat.value,
+      updatedAt: new Date().toISOString(),
+    } : null)
+    recoveryErrorReported = false
+  } catch (error) {
+    if (!recoveryErrorReported) {
+      showPersistenceNotice(`復元データを更新できません。本文を通常の保存で保護してください。${String(error)}`)
+      recoveryErrorReported = true
+    }
+  }
+}
+
+/** 復元候補を確認し、保存先を持たない未保存文書として開く。空の本文でも明示保存までは未保存を維持する。 */
+async function initializeRecovery(): Promise<boolean> {
+  let unresolvedSnapshot = false
+  let recoveryLoaded = false
+  try {
+    const snapshot = await loadRecoverySnapshot()
+    recoveryLoaded = true
+    if (snapshot) {
+      unresolvedSnapshot = true
+      const restore = await ask(`前回の未保存の本文があります。復元しますか？\n${snapshot.fileName}\n${new Date(snapshot.updatedAt).toLocaleString('ja-JP')}`, {
+        title: '本文の復元',
+        kind: 'warning',
+        okLabel: '復元',
+        cancelLabel: '破棄',
+      })
+      unresolvedSnapshot = false
+      if (restore) {
+        suggestedFileName.value = snapshot.fileName
+        documentFormat.value = { lineEnding: snapshot.lineEnding, hasBom: snapshot.hasBom }
+        restoredUnsaved.value = true
+        editor.value?.setDocument(snapshot.text)
+      } else {
+        await saveRecoverySnapshot(null)
+      }
+    }
+  } catch (error) {
+    showPersistenceNotice(unresolvedSnapshot
+      ? `復元の確認ができませんでした。前回の候補を保護するため、今回は復元データの自動保存を停止します。${String(error)}`
+      : `復元データを読み込めませんでした。${String(error)}`)
+  } finally {
+    recoveryReady = !unresolvedSnapshot
+    busy.value = false
+    documentLocked.value = false
+    editor.value?.focus()
+  }
+  return recoveryLoaded
 }
 
 /** 未保存の変更を破棄してよいか確認し、続行できる場合に true を返す。確認ダイアログを開く。 */
@@ -194,52 +319,126 @@ async function publishSettingsError(detail: string): Promise<void> {
 
 /** 必要なら破棄を確認して新規文書へ切り替え、保存先と編集履歴を初期化する。 */
 async function newDocument(): Promise<void> {
-  if (busy.value || !(await confirmDiscard())) return
-  path.value = null
-  currentFile.value = null
-  savedText.value = ''
-  editor.value?.setDocument('')
-  editor.value?.focus()
+  if (busy.value || mainCloseInProgress) return
+  busy.value = true
+  documentLocked.value = true
+  try {
+    if (!(await confirmDiscard())) return
+    cancelRecoveryTimer()
+    path.value = null
+    documentOrigin.value = null
+    currentFile.value = null
+    documentFormat.value = { lineEnding: '\n', hasBom: false }
+    suggestedFileName.value = '無題.txt'
+    restoredUnsaved.value = false
+    savedText.value = ''
+    editor.value?.setDocument('')
+    await syncRecoverySnapshot()
+    editor.value?.focus()
+  } catch (error) {
+    await showError('新規作成', error)
+  } finally {
+    busy.value = false
+    documentLocked.value = false
+  }
 }
 
 /** 選択した TXT を読み込み、本文・保存先・未保存判定の基準を更新する。選択取消時は現状を保つ。 */
 async function openDocument(): Promise<void> {
-  if (busy.value || !(await confirmDiscard())) return
+  if (busy.value || mainCloseInProgress) return
   busy.value = true
+  documentLocked.value = true
   try {
     const selected = await chooseTextFile()
     if (!selected) return
     const file = await loadTextFile(selected)
+    if (!(await confirmDiscard())) return
+    cancelRecoveryTimer()
+    documentOrigin.value = null
     currentFile.value = file
     path.value = file.path
-    editor.value?.setDocument(file.text, file.lineEnding)
+    documentFormat.value = { lineEnding: file.lineEnding, hasBom: file.hasBom }
+    suggestedFileName.value = fileName(file.path)
+    restoredUnsaved.value = false
+    editor.value?.setDocument(file.text)
     // CodeMirror は改行を内部表現へ揃えるため、未保存判定の基準も読み込み後の本文に合わせる。
     file.editorText = editor.value?.getText() ?? file.text
     savedText.value = file.editorText
     dirty.value = false
+    await syncRecoverySnapshot()
     editor.value?.focus()
   } catch (error) {
     await showError('ファイルを開く操作', error)
   } finally {
     busy.value = false
+    documentLocked.value = false
   }
+}
+
+/** プロジェクトツリーの登録ファイルを読み込み、出自ノードとともに本文を切り替える。 */
+async function openProjectTreeFile(reference: { nodeId: number; projectId: number; path: string }): Promise<void> {
+  if (busy.value || mainCloseInProgress) return
+  busy.value = true
+  documentLocked.value = true
+  try {
+    const file = await loadTextFile(reference.path)
+    if (!(await confirmDiscard())) return
+    cancelRecoveryTimer()
+    currentFile.value = file
+    path.value = file.path
+    documentOrigin.value = { nodeId: reference.nodeId, projectId: reference.projectId }
+    documentFormat.value = { lineEnding: file.lineEnding, hasBom: file.hasBom }
+    suggestedFileName.value = fileName(file.path)
+    restoredUnsaved.value = false
+    editor.value?.setDocument(file.text)
+    file.editorText = editor.value?.getText() ?? file.text
+    savedText.value = file.editorText
+    dirty.value = false
+    await syncRecoverySnapshot()
+    editor.value?.focus()
+  } catch (error) {
+    await showError('プロジェクトツリーからファイルを開く操作', error)
+  } finally {
+    busy.value = false
+    documentLocked.value = false
+  }
+}
+
+/** 登録解除や参照先変更後も、開いている本文を維持してノード出自だけを解除する。 */
+function detachDocumentOrigin(nodeId: number): void {
+  if (documentOrigin.value?.nodeId === nodeId) documentOrigin.value = null
 }
 
 /** 現在の本文を TXT に書き込み、成功した内容を保存済みの基準にする。保存先がなければ選択を求める。 */
 async function saveDocument(): Promise<void> {
-  if (busy.value) return
+  await saveCurrentDocument(false)
+}
+
+/** 常に保存先を確認し、成功後は別名のファイルを現在の保存先として扱う。 */
+async function saveDocumentAs(): Promise<void> {
+  await saveCurrentDocument(true)
+}
+
+/** 保存開始時の本文を記録し、書き込み中に増えた編集は未保存と復元候補に残す。 */
+async function saveCurrentDocument(saveAs: boolean): Promise<void> {
+  if (busy.value || mainCloseInProgress) return
   busy.value = true
   try {
-    const target = path.value ?? await chooseSavePath('無題.txt')
+    const target = !saveAs && path.value ? path.value : await chooseSavePath(path.value ?? suggestedFileName.value)
     if (!target) return
+    const previousPath = path.value
     const text = editor.value?.getText() ?? ''
-    const lineEnding = currentFile.value?.lineEnding ?? '\n'
-    const hasBom = currentFile.value?.hasBom ?? false
-    await saveTextFile(target, text, lineEnding, hasBom, currentFile.value ?? undefined)
+    const { lineEnding, hasBom } = documentFormat.value
+    const savedFile = await saveTextFile(target, text, lineEnding, hasBom, currentFile.value ?? undefined)
     path.value = target
+    if (previousPath !== target) documentOrigin.value = null
+    currentFile.value = savedFile
+    suggestedFileName.value = fileName(target)
+    restoredUnsaved.value = false
     savedText.value = text
     // 書き込み中にも編集できるので、保存開始時の本文と現在の本文を改めて比較する。
     dirty.value = (editor.value?.getText() ?? '') !== text
+    await syncRecoverySnapshot()
   } catch (error) {
     await showError('保存', error)
   } finally {
@@ -268,7 +467,9 @@ function executeCommand(commandId: CommandId): void {
 
 /** 文書処理中に利用できないコマンドを判定する。 */
 function isCommandDisabled(commandId: CommandId): boolean {
-  return busy.value && (commandId === 'document.new' || commandId === 'document.open' || commandId === 'document.save')
+  if (mainCloseInProgress) return true
+  if (commandId === 'edit.find' || commandId === 'edit.replace') return documentLocked.value
+  return busy.value && commandId.startsWith('document.')
 }
 
 /** 現在選択されている状態付きコマンドかを判定する。 */
@@ -610,6 +811,143 @@ async function openSettingsWindow(page: SettingsPageId = 'editor.wrapping'): Pro
   }
 }
 
+/** 本文の検索結果と操作可否を配信する。revisionで古い配信の到着を区別する。 */
+async function publishSearchState(): Promise<void> {
+  if (!searchWindowReady || !searchSession.sessionId) return
+  const snapshot: SearchSnapshot = {
+    sessionId: searchSession.sessionId,
+    conditions: { ...searchSession.conditions },
+    status: searchStatus,
+    locked: documentLocked.value,
+    documentRevision: searchSession.documentRevision,
+    acknowledgedSequence: searchSession.sequence,
+    revision: ++searchStateRevision,
+    focus: { ...searchFocus },
+    error: searchWindowError,
+  }
+  try {
+    await emitTo('search', SEARCH_STATE_EVENT, snapshot)
+  } catch (error) {
+    if (searchWindowReady) showPersistenceNotice(`検索画面へ結果を送れません。${String(error)}`)
+  }
+}
+
+/** 本文が変わった場合も検索結果を更新し、開いている検索画面へ通知する。 */
+function onSearchStatus(status: SearchStatus): void {
+  searchStatus = status
+  void publishSearchState()
+}
+
+/** 本文側のF3は条件があればそのまま検索し、未指定なら検索画面を開く。 */
+function onSearchNavigate(action: SearchAction): void {
+  if (documentLocked.value || mainCloseInProgress) return
+  if (!searchSession.conditions.search) {
+    void openSearchWindow('search')
+    return
+  }
+  editor.value?.runSearch(action)
+}
+
+/** 入力と操作を同じ要求として処理し、操作時の条件を非同期の到着順へ依存させない。 */
+function handleSearchCommand(command: SearchCommand): void {
+  if (!searchWindow || searchWindowClosing || command.sessionId !== searchSession.sessionId) return
+  searchWindowError = ''
+  if (command.type === 'ready') {
+    searchWindowReady = true
+    editor.value?.setSearch(searchSession.conditions, true)
+  } else {
+    const result = searchSession.receive(command)
+    if (!result.accepted) return
+    editor.value?.setSearch(searchSession.conditions, true)
+    if (result.action) editor.value?.runSearch(result.action)
+    if (command.type === 'close') {
+      void closeSearchWindow().catch((error: unknown) => showError('検索画面を閉じる操作', error))
+      return
+    }
+  }
+  void publishSearchState()
+}
+
+/** 検索窓の破棄を反映する。条件は残し、通常の終了時だけ本文へフォーカスを戻す。 */
+function handleSearchWindowDestroyed(destroyedWindow: WebviewWindow): void {
+  if (searchWindow !== destroyedWindow) return
+  searchWindow = null
+  searchWindowOpening = false
+  searchWindowClosing = false
+  searchWindowReady = false
+  searchSession.stop()
+  editor.value?.setSearch(searchSession.conditions, false)
+  if (!mainCloseInProgress) {
+    void appWindow.setFocus().then(() => editor.value?.focus()).catch((error: unknown) => {
+      showPersistenceNotice(`本文へフォーカスを戻せません。${String(error)}`)
+    })
+  }
+}
+
+/** メイン側で破棄することで、閉じる直前の入力を確定してから検索窓を終了する。 */
+async function closeSearchWindow(): Promise<void> {
+  if (!searchWindow) return
+  const closingWindow = searchWindow
+  searchWindowClosing = true
+  try {
+    await closingWindow.destroy()
+    handleSearchWindowDestroyed(closingWindow)
+  } catch (error) {
+    searchWindowError = `検索画面を閉じられません。もう一度操作してください。${String(error)}`
+    await publishSearchState()
+    throw error
+  } finally {
+    searchWindowClosing = false
+  }
+}
+
+/** 独立した非モーダル検索窓を1つだけ開き、既存の窓では指定入力へフォーカスする。 */
+async function openSearchWindow(field: SearchField): Promise<void> {
+  if (documentLocked.value || mainCloseInProgress || searchWindowClosing) return
+  searchFocus = { field, revision: searchFocus.revision + 1 }
+  if (searchWindowOpening) return
+  if (searchWindow) {
+    try {
+      await searchWindow.unminimize()
+      await searchWindow.setFocus()
+      await publishSearchState()
+    } catch (error) {
+      await showError('検索画面を開く操作', error)
+    }
+    return
+  }
+  searchWindowOpening = true
+  searchWindowError = ''
+  const sessionId = crypto.randomUUID()
+  searchSession.start(sessionId)
+  try {
+    const createdWindow = new WebviewWindow('search', {
+      url: `search.html?session=${encodeURIComponent(sessionId)}`,
+      title: '検索・置換',
+      parent: 'main',
+      center: true,
+      width: 640,
+      height: 380,
+      minWidth: 480,
+      minHeight: 340,
+      resizable: true,
+      decorations: true,
+      dragDropEnabled: false,
+    })
+    searchWindow = createdWindow
+    void createdWindow.once('tauri://destroyed', () => handleSearchWindowDestroyed(createdWindow))
+    void createdWindow.once('tauri://created', () => { searchWindowOpening = false })
+    void createdWindow.once('tauri://error', (event) => {
+      handleSearchWindowDestroyed(createdWindow)
+      void showError('検索画面を開く操作', event.payload)
+    })
+  } catch (error) {
+    searchWindowOpening = false
+    searchSession.stop()
+    await showError('検索画面を開く操作', error)
+  }
+}
+
 /** ウィンドウを最小化する。 */
 async function minimizeWindow(): Promise<void> {
   try {
@@ -695,7 +1033,7 @@ async function flushAllSettingsChanges(): Promise<void> {
   }
 }
 
-/** Esc でメニューを閉じ、ファイル操作の Ctrl ショートカットを処理する。 */
+/** Esc でメニューを閉じ、修飾キーを含む共通ショートカットを処理する。 */
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape' && settingsSubmenuOpen.value) {
     event.preventDefault()
@@ -707,19 +1045,16 @@ function onKeydown(event: KeyboardEvent): void {
     openMenu.value = null
     return
   }
-  if (event.ctrlKey && !event.altKey && !event.shiftKey) {
-    const shortcut = `ctrl+${event.key.toLowerCase()}`
-    const command = appCommandDefinitions.find((definition) => definition.shortcut?.toLowerCase() === shortcut)
-    if (command) {
-      event.preventDefault()
-      executeCommand(command.id)
-    }
+  const command = findShortcutCommand(event)
+  if (command) {
+    event.preventDefault()
+    executeCommand(command.id)
   }
 }
 
 // 画面のマウント時にショートカットと Tauri のウィンドウ終了要求を購読する。
 onMounted(async () => {
-  window.addEventListener('keydown', onKeydown)
+  window.addEventListener('keydown', onKeydown, true)
   if (props.persistenceState !== 'ready') {
     const detail = props.persistenceError ? ` ${props.persistenceError}` : ''
     showPersistenceNotice(props.persistenceState === 'recovered'
@@ -728,39 +1063,66 @@ onMounted(async () => {
   }
   // 設定保存と文書終了確認を終えてから、メインウィンドウを閉じる。
   unlistenClose = await appWindow.onCloseRequested(async (event) => {
-    if (busy.value) {
-      event.preventDefault()
-      return
-    }
-    const settingsNeedFlush = !!settingsSaveTimer || !!settingsSavePromise || settingsChangeRevision > persistedSettingsRevision
-    if (!dirty.value && !settingsNeedFlush) return
     event.preventDefault()
-    if (mainCloseInProgress) return
+    if (busy.value || mainCloseInProgress) return
     mainCloseInProgress = true
+    documentLocked.value = true
+    let destroyed = false
     try {
       if (dirty.value && !(await confirmDiscard())) return
       await flushAllSettingsChanges()
+      cancelRecoveryTimer()
+      if (recoveryReady) {
+        try {
+          // 実行中の自動保存の後に削除を並べ、明示破棄した本文を復活させない。
+          await saveRecoverySnapshot(null)
+        } catch (error) {
+          await showError('復元候補の削除', error)
+        }
+      }
+      await closeSearchWindow()
       await appWindow.destroy()
+      destroyed = true
     } catch (error) {
-      await showError('設定の保存', error)
+      await showError('終了処理', error)
     } finally {
       mainCloseInProgress = false
+      if (!destroyed) {
+        documentLocked.value = false
+        scheduleRecoverySave()
+      }
     }
   })
   unlistenResize = await appWindow.onResized(() => { void updateMaximized() })
   unlistenSettingsCommand = await listen<SettingsCommand>(SETTINGS_COMMAND_EVENT, (event) => {
     void handleSettingsCommand(event.payload)
   })
+  unlistenSearchCommand = await listen<SearchCommand>(SEARCH_COMMAND_EVENT, (event) => {
+    handleSearchCommand(event.payload)
+  })
   await updateMaximized()
   alwaysOnTop.value = await appWindow.isAlwaysOnTop()
+  const recoveryLoaded = await initializeRecovery()
+  if (props.storageInitializationReady && recoveryLoaded) {
+    try {
+      await confirmStorageStartup()
+    } catch (error) {
+      showPersistenceNotice(`移行元データを片付けられませんでした。次回起動時に再試行します。${String(error)}`)
+    }
+  }
 })
 
 // 画面の破棄時に購読を解除し、同じ操作が重複して処理されることを防ぐ。
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('keydown', onKeydown, true)
+  cancelRecoveryTimer()
+  recoveryReady = false
   unlistenClose?.()
   unlistenResize?.()
   unlistenSettingsCommand?.()
+  unlistenSearchCommand?.()
+  searchWindowReady = false
+  void searchWindow?.destroy()
   void settingsWindow?.destroy()
 })
 </script>
@@ -788,6 +1150,22 @@ onBeforeUnmount(() => {
             </VListItem>
             <VListItem role="menuitem" :disabled="isCommandDisabled('document.save')" title="保存" @click="runMenuCommand('document.save')">
               <template #append><span class="menu-shortcut">{{ getCommandShortcut('document.save') }}</span></template>
+            </VListItem>
+            <VListItem role="menuitem" :disabled="isCommandDisabled('document.saveAs')" title="名前を付けて保存" @click="runMenuCommand('document.saveAs')">
+              <template #append><span class="menu-shortcut">{{ getCommandShortcut('document.saveAs') }}</span></template>
+            </VListItem>
+          </VList>
+        </VMenu>
+        <VMenu v-model="editMenuOpen" :close-on-content-click="false" :transition="false">
+          <template #activator="{ props: editMenuProps }">
+            <VBtn v-bind="editMenuProps" class="menu-heading" size="small" variant="text">編集</VBtn>
+          </template>
+          <VList density="compact" min-width="220" role="menu" aria-label="編集">
+            <VListItem role="menuitem" :disabled="isCommandDisabled('edit.find')" title="検索" @click="runMenuCommand('edit.find')">
+              <template #append><span class="menu-shortcut">{{ getCommandShortcut('edit.find') }}</span></template>
+            </VListItem>
+            <VListItem role="menuitem" :disabled="isCommandDisabled('edit.replace')" title="置換" @click="runMenuCommand('edit.replace')">
+              <template #append><span class="menu-shortcut">{{ getCommandShortcut('edit.replace') }}</span></template>
             </VListItem>
           </VList>
         </VMenu>
@@ -894,9 +1272,17 @@ onBeforeUnmount(() => {
     <VSnackbar v-model="persistenceNoticeOpen" timeout="9000" location="bottom">
       {{ persistenceNotice }}
     </VSnackbar>
+    <VNavigationDrawer class="project-navigation" app permanent width="280" aria-label="プロジェクトツリー">
+      <ProjectTreeSidebar
+        :disabled="busy || mainCloseInProgress"
+        :document-origin="documentOrigin"
+        @open-file="openProjectTreeFile"
+        @origin-detached="detachDocumentOrigin"
+      />
+    </VNavigationDrawer>
     <VMain class="writing-area" aria-label="本文編集領域">
-      <EditorPane ref="editor" :settings="editorSettings" @change="onChange" />
+      <EditorPane ref="editor" :settings="editorSettings" :read-only="documentLocked" @change="onChange" @statistics="statistics = $event" @search-status="onSearchStatus" @search-navigate="onSearchNavigate" />
     </VMain>
-    <VFooter app class="status-bar" height="36">{{ charCount.toLocaleString('ja-JP') }} 文字</VFooter>
+    <VFooter app class="status-bar" height="36"><StatisticsStatus :statistics="statistics" /></VFooter>
   </VApp>
 </template>

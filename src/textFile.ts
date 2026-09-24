@@ -46,7 +46,8 @@ export function decodeTextFile(path: string, bytes: Uint8Array): TextFile {
 
 /**
  * 本文を指定パスへ保存する。改行形式と BOM は読み込み元に合わせる。
- * original が同じパスの未編集文書なら元のバイト列を使い、混在改行も維持する。
+ * 未編集文書なら別名保存でも元のバイト列を使い、混在改行も維持する。
+ * 成功したバイト列を返すので、以降の保存はこの結果を新しい基準にする。
  */
 export async function saveTextFile(
   path: string,
@@ -54,14 +55,13 @@ export async function saveTextFile(
   lineEnding: LineEnding,
   hasBom: boolean,
   original?: TextFile,
-): Promise<void> {
+): Promise<TextFile> {
   // CodeMirror は混在した改行を保持できないため、未編集なら元のバイト列をそのまま保存する。
-  if (original?.path === path && original.editorText === text) {
-    await writeFile(path, original.originalBytes)
-    return
-  }
-
-  await writeFile(path, encodeTextFile(text, lineEnding, hasBom))
+  const bytes = original?.editorText === text
+    ? original.originalBytes
+    : encodeTextFile(text, lineEnding, hasBom)
+  await writeFile(path, bytes)
+  return { path, text, lineEnding, hasBom, originalBytes: bytes, editorText: text }
 }
 
 /** 本文を指定の改行形式と BOM を持つ UTF-8 バイト列へ変換する。ファイルへの書き込みは行わない。 */

@@ -8,6 +8,7 @@ import {
   type EditorSettings,
 } from './editorSettings'
 import { isCommandId, getToolbarCommandDefinitions } from './appCommands'
+import { getStorageFilePath } from './storageLocation'
 
 export type ToolbarItem =
   | { type: 'command'; commandId: CommandId }
@@ -34,7 +35,7 @@ export type PreferencesInitialization = {
   error?: string
 }
 
-const preferencesFile = 'preferences.json'
+const preferencesFileName = 'preferences.json'
 const preferencesKey = 'applicationPreferences'
 const defaultToolbarItems: ToolbarItem[] = [
   { type: 'command', commandId: 'wrap.window' },
@@ -146,7 +147,7 @@ function removeLegacyEditorSettings(): void {
 export async function initializeApplicationPreferences(): Promise<PreferencesInitialization> {
   let stored: unknown
   try {
-    store = await load(preferencesFile, { autoSave: false })
+    store = await load(getStorageFilePath(preferencesFileName), { autoSave: false })
     stored = await store.get<unknown>(preferencesKey)
   } catch (error) {
     return recoverPreferences(String(error))
@@ -186,7 +187,7 @@ function createInitialPreferences(): ApplicationPreferencesV1 {
 async function recoverPreferences(loadError: string): Promise<PreferencesInitialization> {
   latestPreferences = createDefaultApplicationPreferences()
   try {
-    store = await load(preferencesFile, {
+    store = await load(getStorageFilePath(preferencesFileName), {
       autoSave: false,
       createNew: true,
       defaults: { [preferencesKey]: latestPreferences },
@@ -234,9 +235,9 @@ function savePreferenceUpdate(update: (current: ApplicationPreferencesV1) => App
       let targetStore = store
       if (!targetStore) {
         try {
-          targetStore = await load(preferencesFile, { autoSave: false })
+          targetStore = await load(getStorageFilePath(preferencesFileName), { autoSave: false })
         } catch {
-          targetStore = await load(preferencesFile, {
+          targetStore = await load(getStorageFilePath(preferencesFileName), {
             autoSave: false,
             createNew: true,
             defaults: { [preferencesKey]: candidate },

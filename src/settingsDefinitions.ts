@@ -1,14 +1,14 @@
 /** 設定画面で編集できる具体的なページを識別する。 */
-export type SettingsPageId = 'editor.wrapping' | 'appearance.toolbar'
+export type SettingsPageId = 'editor.wrapping' | 'editor.typography' | 'appearance.toolbar' | 'application.storage'
 
 /** 左ナビと本文が表示する対象を識別する。 */
 export type SettingsViewId = 'all' | SettingsPageId
 
 /** 設定画面内のカテゴリを識別する。 */
-export type SettingsCategoryId = 'editor' | 'appearance'
+export type SettingsCategoryId = 'editor' | 'appearance' | 'application'
 
 /** 設定アコーディオンを識別する。ページIDとは分け、同一ページ内で増やせるようにする。 */
-export type SettingsSectionId = 'editor.wrapping.behavior' | 'appearance.toolbar.configuration'
+export type SettingsSectionId = 'editor.wrapping.behavior' | 'editor.typography.text' | 'appearance.toolbar.configuration' | 'application.storage.location'
 
 /** 設定一覧モードのナビゲーション表示情報。 */
 export const settingsAllViewDefinition = {
@@ -27,6 +27,11 @@ export type SettingsPageDefinition = {
 /** 1つ以上のページ内に置く意味的な設定グループを定義する。 */
 export type SettingsSectionDefinition =
   | {
+      id: 'editor.typography.text'
+      pageId: 'editor.typography'
+      label: string
+    }
+  | {
       id: 'editor.wrapping.behavior'
       pageId: 'editor.wrapping'
       label: string
@@ -34,6 +39,11 @@ export type SettingsSectionDefinition =
   | {
       id: 'appearance.toolbar.configuration'
       pageId: 'appearance.toolbar'
+      label: string
+    }
+  | {
+      id: 'application.storage.location'
+      pageId: 'application.storage'
       label: string
     }
 
@@ -48,11 +58,17 @@ export type SettingsCategoryDefinition = {
 const settingsCategoryDefinitionById: Record<SettingsCategoryId, SettingsCategoryDefinition> = {
   editor: { id: 'editor', label: 'エディター', icon: 'mdi-text-box-edit-outline' },
   appearance: { id: 'appearance', label: '外観', icon: 'mdi-palette-outline' },
+  application: { id: 'application', label: 'アプリ', icon: 'mdi-application-cog-outline' },
 }
 export const settingsCategoryDefinitions: ReadonlyArray<SettingsCategoryDefinition> = Object.values(settingsCategoryDefinitionById)
 
 /** ページIDの追加時に表示定義の不足を型検査で検出する。 */
 const settingsPageDefinitionById: Record<SettingsPageId, SettingsPageDefinition> = {
+  'editor.typography': {
+    id: 'editor.typography',
+    categoryId: 'editor',
+    label: '本文表示',
+  },
   'editor.wrapping': {
     id: 'editor.wrapping',
     categoryId: 'editor',
@@ -63,13 +79,20 @@ const settingsPageDefinitionById: Record<SettingsPageId, SettingsPageDefinition>
     categoryId: 'appearance',
     label: 'ツールバー',
   },
+  'application.storage': {
+    id: 'application.storage',
+    categoryId: 'application',
+    label: 'データ保存先',
+  },
 }
 export const settingsPageDefinitions: ReadonlyArray<SettingsPageDefinition> = Object.values(settingsPageDefinitionById)
 
 /** セクションIDの追加時に表示定義の不足を型検査で検出する。 */
 const settingsSectionDefinitionById: Record<SettingsSectionId, SettingsSectionDefinition> = {
+  'editor.typography.text': { id: 'editor.typography.text', pageId: 'editor.typography', label: '書体・文字サイズ・行間' },
   'editor.wrapping.behavior': { id: 'editor.wrapping.behavior', pageId: 'editor.wrapping', label: '折り返し方法' },
   'appearance.toolbar.configuration': { id: 'appearance.toolbar.configuration', pageId: 'appearance.toolbar', label: 'ツールバーの表示と構成' },
+  'application.storage.location': { id: 'application.storage.location', pageId: 'application.storage', label: 'アプリデータの保存先' },
 }
 export const settingsSectionDefinitions: ReadonlyArray<SettingsSectionDefinition> = Object.values(settingsSectionDefinitionById)
 

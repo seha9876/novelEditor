@@ -9,6 +9,7 @@
     "typecheck": "vue-tsc --noEmit",
     "lint": "eslint .",
     "check": "pnpm run typecheck && pnpm run lint",
+    "test": "node --test scripts/writer-features.test.mjs",
     "build": "pnpm run typecheck && vite build",
     "notices:js": "node scripts/generate-js-notices.mjs",
     "notices:rust": "set CARGO_NET_OFFLINE=false&& cargo about generate --locked --fail --target x86_64-pc-windows-msvc --manifest-path src-tauri/Cargo.toml src-tauri/about.hbs --output-file src-tauri/THIRD_PARTY_NOTICES_RUST.html",
@@ -17,6 +18,7 @@
   },
   "dependencies": {
     "@codemirror/commands": "^6.0.0",
+    "@codemirror/search": "^6.0.0",
     "@codemirror/state": "^6.0.0",
     "@codemirror/view": "^6.0.0",
     "@fontsource/roboto": "^5.3.0",

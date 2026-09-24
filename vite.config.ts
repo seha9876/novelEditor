@@ -11,7 +11,7 @@ export default defineConfig({
   ],
   build: {
     rollupOptions: {
-      input: ['index.html', 'settings.html'],
+      input: ['index.html', 'settings.html', 'search.html'],
     },
   },
   clearScreen: false,

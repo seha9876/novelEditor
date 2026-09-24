@@ -3,6 +3,9 @@ export type CommandId =
   | 'document.new'
   | 'document.open'
   | 'document.save'
+  | 'document.saveAs'
+  | 'edit.find'
+  | 'edit.replace'
   | 'settings.open'
   | 'wrap.window'
   | 'wrap.columns'
@@ -37,6 +40,9 @@ export const appCommandDefinitions: readonly AppCommandDefinition[] = [
   { id: 'document.new', label: '新規', icon: 'mdi-file-plus-outline', shortcut: 'Ctrl+N', toolbarEligible: true },
   { id: 'document.open', label: '開く', icon: 'mdi-folder-open-outline', shortcut: 'Ctrl+O', toolbarEligible: true },
   { id: 'document.save', label: '保存', icon: 'mdi-content-save-outline', shortcut: 'Ctrl+S', toolbarEligible: true },
+  { id: 'document.saveAs', label: '名前を付けて保存', icon: 'mdi-content-save-edit-outline', shortcut: 'Ctrl+Shift+S', toolbarEligible: true },
+  { id: 'edit.find', label: '検索', icon: 'mdi-magnify', shortcut: 'Ctrl+F', toolbarEligible: true },
+  { id: 'edit.replace', label: '置換', icon: 'mdi-find-replace', shortcut: 'Ctrl+H', toolbarEligible: true },
   { id: 'settings.open', label: '設定画面を開く', icon: 'mdi-cog-outline', toolbarEligible: true },
   { id: 'wrap.window', label: '右端で折り返し', icon: 'mdi-wrap', toolbarEligible: true },
   { id: 'wrap.columns', label: '指定桁数で折り返し', icon: 'mdi-format-columns', toolbarEligible: true },
@@ -59,4 +65,17 @@ export function getToolbarCommandDefinitions(): readonly AppCommandDefinition[] 
 /** 文字列が既知のコマンドIDか判定する。 */
 export function isCommandId(value: unknown): value is CommandId {
   return typeof value === 'string' && appCommandDefinitions.some((command) => command.id === value)
+}
+
+/** 押された修飾キーを正確に照合し、IME変換中や余分な修飾キーではコマンドを実行しない。 */
+export function findShortcutCommand(event: KeyboardEvent): AppCommandDefinition | undefined {
+  if (event.isComposing || event.keyCode === 229) return undefined
+  const shortcut = [
+    ...(event.ctrlKey ? ['ctrl'] : []),
+    ...(event.altKey ? ['alt'] : []),
+    ...(event.shiftKey ? ['shift'] : []),
+    ...(event.metaKey ? ['meta'] : []),
+    event.key.toLowerCase(),
+  ].join('+')
+  return appCommandDefinitions.find((command) => command.shortcut?.toLowerCase() === shortcut)
 }

@@ -23,11 +23,21 @@ import {
 } from './searchSession'
 import {
   saveSettingsPreferences,
+  saveProjectTreePreferences,
   normalizeToolbarItems,
   type ApplicationPreferencesV1,
   type PreferencesPersistenceState,
   type ToolbarPreferences,
 } from './appPreferences'
+import { authorizeProjectFile, loadProjectTreeSnapshot } from './projectTree'
+import {
+  PROJECT_TREE_WINDOW_COMMAND_EVENT,
+  PROJECT_TREE_WINDOW_STATE_EVENT,
+  type ProjectTreeOpenRequest,
+  type ProjectTreeOpenResult,
+  type ProjectTreeWindowCommand,
+  type ProjectTreeWindowState,
+} from './projectTreeWindow'
 import {
   SETTINGS_COMMAND_EVENT,
   SETTINGS_ERROR_EVENT,
@@ -94,6 +104,15 @@ const toolbarPreferences = ref<ToolbarPreferences>({
   visible: props.initialPreferences.ui.toolbar.visible,
   items: props.initialPreferences.ui.toolbar.items.map((item) => ({ ...item })),
 })
+const projectTreeWidth = ref(props.initialPreferences.ui.projectTree.width)
+const projectTreeDetached = ref(props.initialPreferences.ui.projectTree.detached)
+const mainViewportWidth = ref(window.innerWidth)
+const expandedProjectTreeFolderIds = ref<number[]>([])
+const projectTreeUnavailableNodeIds = ref<number[]>([])
+const projectTreeOpenResult = ref<ProjectTreeOpenResult | null>(null)
+const projectTreeWindowDisabled = computed(() => busy.value || mainCloseInProgress.value)
+const projectTreeMaximumWidth = computed(() => Math.max(220, Math.min(480, mainViewportWidth.value - 320)))
+const projectTreeDisplayWidth = computed(() => Math.min(projectTreeWidth.value, projectTreeMaximumWidth.value))
 const displayedToolbarItems = computed(() => toolbarPreferences.value.items)
 const displayedToolbarVisible = computed(() => toolbarPreferences.value.visible)
 const displayMenuOpen = computed({
@@ -155,7 +174,7 @@ let settingsHistoryActive = false
 const settingsUndoHistory: SettingsValues[] = []
 const settingsRedoHistory: SettingsValues[] = []
 const settingsHistoryLimit = 100
-let mainCloseInProgress = false
+const mainCloseInProgress = ref(false)
 const searchSession = new SearchSession()
 let searchWindow: WebviewWindow | null = null
 let searchWindowOpening = false
@@ -166,11 +185,27 @@ let searchStateRevision = 0
 let searchWindowError = ''
 let searchFocus = { field: 'search' as SearchField, revision: 0 }
 let unlistenSearchCommand: (() => void) | undefined
+let unlistenProjectTreeCommand: (() => void) | undefined
+let unlistenViewportResize: (() => void) | undefined
+let projectTreeWindow: WebviewWindow | null = null
+let projectTreeWindowId = ''
+let projectTreeWindowOpeningPromise: Promise<boolean> | null = null
+let projectTreeWindowClosePromise: Promise<void> | null = null
+let projectTreeWindowClosingForDock = false
+let projectTreeWindowClosingForExit = false
+let projectTreeWindowStateRevision = 0
+let projectTreeSaveTimer: ReturnType<typeof setTimeout> | undefined
+let projectTreeSavePromise = Promise.resolve()
+let projectTreeResizeStart: { pointerId: number; startX: number; startWidth: number } | null = null
 
 watch(documentLocked, (locked) => {
   searchSession.setLocked(locked)
   void publishSearchState()
 }, { flush: 'sync' })
+
+watch([busy, documentLocked, documentOrigin, mainCloseInProgress], () => {
+  void publishProjectTreeWindowState()
+}, { deep: true })
 
 const commandActions: Record<CommandId, () => Promise<void>> = {
   'document.new': newDocument,
@@ -319,7 +354,7 @@ async function publishSettingsError(detail: string): Promise<void> {
 
 /** 必要なら破棄を確認して新規文書へ切り替え、保存先と編集履歴を初期化する。 */
 async function newDocument(): Promise<void> {
-  if (busy.value || mainCloseInProgress) return
+  if (busy.value || mainCloseInProgress.value) return
   busy.value = true
   documentLocked.value = true
   try {
@@ -345,7 +380,7 @@ async function newDocument(): Promise<void> {
 
 /** 選択した TXT を読み込み、本文・保存先・未保存判定の基準を更新する。選択取消時は現状を保つ。 */
 async function openDocument(): Promise<void> {
-  if (busy.value || mainCloseInProgress) return
+  if (busy.value || mainCloseInProgress.value) return
   busy.value = true
   documentLocked.value = true
   try {
@@ -375,18 +410,38 @@ async function openDocument(): Promise<void> {
   }
 }
 
-/** プロジェクトツリーの登録ファイルを読み込み、出自ノードとともに本文を切り替える。 */
-async function openProjectTreeFile(reference: { nodeId: number; projectId: number; path: string }): Promise<void> {
-  if (busy.value || mainCloseInProgress) return
+/** ツリーの要求元を問わず、メイン画面で許可した登録ファイルを本文へ開く。 */
+async function openProjectTreeFile(request: ProjectTreeOpenRequest, sourceWindowId?: string): Promise<void> {
+  if (busy.value || mainCloseInProgress.value) {
+    reportProjectTreeOpenResult({ requestId: request.requestId, nodeId: request.nodeId, error: '別の操作中のため、ファイルを開けませんでした。' }, sourceWindowId)
+    return
+  }
   busy.value = true
   documentLocked.value = true
+  let unavailable = false
   try {
-    const file = await loadTextFile(reference.path)
-    if (!(await confirmDiscard())) return
+    const snapshot = await loadProjectTreeSnapshot()
+    const node = snapshot.nodes.find((item) => item.id === request.nodeId)
+    if (!node || node.kind !== 'file' || node.projectId !== request.projectId) {
+      unavailable = true
+      throw new Error('選択した登録ファイルは既に変更されています。')
+    }
+    let authorizedPath: string
+    try {
+      authorizedPath = await authorizeProjectFile(request.nodeId)
+    } catch (error) {
+      unavailable = true
+      throw error
+    }
+    const file = await loadTextFile(authorizedPath)
+    if (!(await confirmDiscard())) {
+      reportProjectTreeOpenResult({ requestId: request.requestId, nodeId: request.nodeId }, sourceWindowId)
+      return
+    }
     cancelRecoveryTimer()
     currentFile.value = file
     path.value = file.path
-    documentOrigin.value = { nodeId: reference.nodeId, projectId: reference.projectId }
+    documentOrigin.value = { nodeId: request.nodeId, projectId: request.projectId }
     documentFormat.value = { lineEnding: file.lineEnding, hasBom: file.hasBom }
     suggestedFileName.value = fileName(file.path)
     restoredUnsaved.value = false
@@ -396,12 +451,337 @@ async function openProjectTreeFile(reference: { nodeId: number; projectId: numbe
     dirty.value = false
     await syncRecoverySnapshot()
     editor.value?.focus()
+    reportProjectTreeOpenResult({ requestId: request.requestId, nodeId: request.nodeId }, sourceWindowId)
   } catch (error) {
-    await showError('プロジェクトツリーからファイルを開く操作', error)
+    reportProjectTreeOpenResult({
+      requestId: request.requestId,
+      nodeId: request.nodeId,
+      error: String(error),
+      unavailable,
+    }, sourceWindowId)
   } finally {
     busy.value = false
     documentLocked.value = false
   }
+}
+
+/** 開く操作の成否を元のツリーへ返し、参照切れ表示と既存エラー通知を維持する。 */
+function reportProjectTreeOpenResult(result: ProjectTreeOpenResult, sourceWindowId?: string): void {
+  const unavailable = new Set(projectTreeUnavailableNodeIds.value)
+  if (result.error && result.unavailable) unavailable.add(result.nodeId)
+  else if (!result.error) unavailable.delete(result.nodeId)
+  updateProjectTreeUnavailableNodeIds([...unavailable], false)
+  projectTreeOpenResult.value = result
+  if (sourceWindowId && sourceWindowId === projectTreeWindowId && projectTreeWindow) {
+    const requestWindowId = sourceWindowId
+    void publishProjectTreeWindowState(result).then((published) => {
+      if (published || requestWindowId !== projectTreeWindowId || !projectTreeWindow
+        || projectTreeWindowClosingForDock || projectTreeWindowClosingForExit) return
+      if (projectTreeOpenResult.value?.requestId === result.requestId) projectTreeOpenResult.value = null
+      const detail = result.error
+        ? `ファイル操作の結果を分離ツリーへ伝えられませんでした。${result.error}`
+        : 'ファイル操作の結果を分離ツリーへ伝えられませんでした。'
+      showPersistenceNotice(`${detail} メイン画面へ戻します。`)
+      void dockProjectTreeWindow()
+    })
+  }
+}
+
+/** 最新のツリー幅と分離状態を設定Storeへ直列保存する。 */
+function persistProjectTreePreferences(): Promise<void> {
+  projectTreeSavePromise = projectTreeSavePromise.catch(() => undefined).then(async () => {
+    try {
+      await saveProjectTreePreferences({ width: projectTreeWidth.value, detached: projectTreeDetached.value })
+    } catch (error) {
+      showPersistenceNotice(`プロジェクトツリーの表示設定を保存できません。${String(error)}`)
+    }
+  })
+  return projectTreeSavePromise
+}
+
+/** 連続した幅変更をまとめ、最後の位置だけを保存する。 */
+function scheduleProjectTreePreferencesSave(): void {
+  if (projectTreeSaveTimer) clearTimeout(projectTreeSaveTimer)
+  projectTreeSaveTimer = setTimeout(() => {
+    projectTreeSaveTimer = undefined
+    void persistProjectTreePreferences()
+  }, 250)
+}
+
+/** 終了前に遅延中の表示設定保存を完了させる。 */
+async function flushProjectTreePreferences(): Promise<void> {
+  if (projectTreeSaveTimer) {
+    clearTimeout(projectTreeSaveTimer)
+    projectTreeSaveTimer = undefined
+    await persistProjectTreePreferences()
+  } else {
+    await projectTreeSavePromise
+  }
+}
+
+/** 画面幅と本文の最低幅に合わせてツリー幅を更新し、設定保存を予約する。 */
+function setProjectTreeWidth(width: number): void {
+  projectTreeWidth.value = Math.max(220, Math.min(projectTreeMaximumWidth.value, Math.round(width)))
+  scheduleProjectTreePreferencesSave()
+}
+
+/** メインウィンドウの実幅を取り直し、本文の最小幅を保つ表示上限を更新する。 */
+function updateMainViewportWidth(): void {
+  mainViewportWidth.value = window.innerWidth
+}
+
+/** メインに表示中のツリーから受け取った展開状態を分離時の引き継ぎ値にする。 */
+function updateExpandedProjectTreeFolders(nodeIds: number[]): void {
+  expandedProjectTreeFolderIds.value = normalizeProjectTreeNodeIds(nodeIds)
+}
+
+/** 参照切れノードの状態を保持し、ドック後のツリーへ引き継ぐ。 */
+function updateProjectTreeUnavailableNodeIds(nodeIds: number[], publishChild = true): boolean {
+  const normalized = normalizeProjectTreeNodeIds(nodeIds)
+  const current = projectTreeUnavailableNodeIds.value
+  if (current.length === normalized.length && current.every((nodeId, index) => nodeId === normalized[index])) return false
+  projectTreeUnavailableNodeIds.value = normalized
+  if (publishChild && projectTreeDetached.value) void publishProjectTreeWindowState()
+  return true
+}
+
+/** 開く結果を一時イベントとして消費し、古い失敗状態の再適用を防ぐ。 */
+function consumeProjectTreeOpenResult(requestId: string): void {
+  if (projectTreeOpenResult.value?.requestId !== requestId) return
+  projectTreeOpenResult.value = null
+  if (projectTreeDetached.value) void publishProjectTreeWindowState()
+}
+
+/** マウスで境界をドラッグした開始幅と位置を記録する。 */
+function startProjectTreeResize(event: PointerEvent): void {
+  if (event.button !== 0) return
+  event.preventDefault()
+  projectTreeResizeStart = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startWidth: projectTreeDisplayWidth.value,
+  }
+  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+}
+
+/** ポインター移動量をドック幅へ反映する。 */
+function moveProjectTreeResize(event: PointerEvent): void {
+  if (projectTreeResizeStart?.pointerId !== event.pointerId) return
+  setProjectTreeWidth(projectTreeResizeStart.startWidth + event.clientX - projectTreeResizeStart.startX)
+}
+
+/** ドラッグを終了し、幅保存の遅延タイマーを確定する。 */
+function endProjectTreeResize(event: PointerEvent): void {
+  if (projectTreeResizeStart?.pointerId !== event.pointerId) return
+  projectTreeResizeStart = null
+  scheduleProjectTreePreferencesSave()
+}
+
+/** 左右キーと Home/End でツリー幅を調整する。 */
+function onProjectTreeResizeKeydown(event: KeyboardEvent): void {
+  if (event.key === 'ArrowLeft') setProjectTreeWidth(projectTreeDisplayWidth.value - 16)
+  else if (event.key === 'ArrowRight') setProjectTreeWidth(projectTreeDisplayWidth.value + 16)
+  else if (event.key === 'Home') setProjectTreeWidth(220)
+  else if (event.key === 'End') setProjectTreeWidth(projectTreeMaximumWidth.value)
+  else return
+  event.preventDefault()
+}
+
+/** メイン画面の状態とツリーの展開状態を、識別子付きで分離ウィンドウへ送る。 */
+async function publishProjectTreeWindowState(openResult = projectTreeOpenResult.value): Promise<boolean> {
+  const windowId = projectTreeWindowId
+  if (!windowId || !projectTreeWindow || projectTreeWindowClosingForDock || projectTreeWindowClosingForExit) return false
+  const state: ProjectTreeWindowState = {
+    windowId,
+    revision: ++projectTreeWindowStateRevision,
+    disabled: projectTreeWindowDisabled.value,
+    documentOrigin: documentOrigin.value ? { ...documentOrigin.value } : null,
+    expandedFolderIds: [...expandedProjectTreeFolderIds.value],
+    unavailableNodeIds: [...projectTreeUnavailableNodeIds.value],
+    ...(openResult ? { openResult } : {}),
+  }
+  try {
+    await emitTo('project-tree', PROJECT_TREE_WINDOW_STATE_EVENT, state)
+    return true
+  } catch (error) {
+    if (windowId === projectTreeWindowId) {
+      showPersistenceNotice(`分離したプロジェクトツリーへ状態を送れません。${String(error)}`)
+    }
+    return false
+  }
+}
+
+/** 分離中の操作をウィンドウIDで検査し、現在の子ウィンドウ要求だけを処理する。 */
+function handleProjectTreeWindowCommand(command: ProjectTreeWindowCommand): void {
+  if (!command || command.windowId !== projectTreeWindowId || !projectTreeWindow || !projectTreeDetached.value) return
+  if (command.type === 'ready') {
+    void publishProjectTreeWindowState()
+  } else if (command.type === 'dock') {
+    if (command.expandedFolderIds) expandedProjectTreeFolderIds.value = normalizeProjectTreeNodeIds(command.expandedFolderIds)
+    if (command.unavailableNodeIds) updateProjectTreeUnavailableNodeIds(command.unavailableNodeIds, false)
+    void dockProjectTreeWindow()
+  } else if (command.type === 'expanded-change') {
+    expandedProjectTreeFolderIds.value = normalizeProjectTreeNodeIds(command.nodeIds)
+    void publishProjectTreeWindowState()
+  } else if (command.type === 'unavailable-change') {
+    if (updateProjectTreeUnavailableNodeIds(command.nodeIds, false)) void publishProjectTreeWindowState()
+  } else if (command.type === 'origin-detached') {
+    detachDocumentOrigin(command.nodeId)
+  } else if (command.type === 'open-file') {
+    void openProjectTreeFile(command.request, command.windowId)
+  } else if (command.type === 'open-result-applied') {
+    consumeProjectTreeOpenResult(command.requestId)
+  }
+}
+
+/** 不正な値や重複 ID を除き、展開中フォルダーの同期値を正規化する。 */
+function normalizeProjectTreeNodeIds(nodeIds: number[]): number[] {
+  return [...new Set(nodeIds.filter((nodeId) => Number.isSafeInteger(nodeId) && nodeId > 0))]
+}
+
+/** 分離ウィンドウを一つだけ作成し、生成失敗時はメイン画面表示へ戻す。 */
+async function openProjectTreeWindow(): Promise<boolean> {
+  if (projectTreeWindowClosePromise) {
+    try {
+      await projectTreeWindowClosePromise
+    } catch {
+      // 破棄に失敗した場合は、残っている子ウィンドウを前面へ戻す。
+    }
+  }
+  if (projectTreeWindow) {
+    try {
+      await projectTreeWindow.setFocus()
+    } catch (error) {
+      showPersistenceNotice(`分離したプロジェクトツリーへ切り替えられません。${String(error)}`)
+    }
+    return true
+  }
+  if (projectTreeWindowOpeningPromise) return projectTreeWindowOpeningPromise
+
+  const opening = createProjectTreeWindow()
+  projectTreeWindowOpeningPromise = opening
+  try {
+    return await opening
+  } finally {
+    if (projectTreeWindowOpeningPromise === opening) projectTreeWindowOpeningPromise = null
+  }
+}
+
+/** 分離ウィンドウの生成イベントを登録し、成功・失敗を呼び出し元へ返す。 */
+function createProjectTreeWindow(): Promise<boolean> {
+  projectTreeWindowId = crypto.randomUUID()
+  projectTreeWindowStateRevision = 0
+  const windowId = projectTreeWindowId
+  return new Promise((resolve) => {
+    try {
+      const createdWindow = new WebviewWindow('project-tree', {
+        url: `project-tree.html?windowId=${encodeURIComponent(windowId)}`,
+        title: 'プロジェクトツリー',
+        parent: 'main',
+        width: Math.max(320, projectTreeDisplayWidth.value + 40),
+        height: 720,
+        minWidth: 260,
+        minHeight: 360,
+        resizable: true,
+        decorations: true,
+        dragDropEnabled: false,
+      })
+      projectTreeWindow = createdWindow
+      void createdWindow.once('tauri://created', () => {
+        if (projectTreeWindowId !== windowId) return
+        projectTreeDetached.value = true
+        scheduleProjectTreePreferencesSave()
+        void publishProjectTreeWindowState()
+        resolve(true)
+      })
+      void createdWindow.once('tauri://error', (event) => {
+        if (projectTreeWindowId === windowId) {
+          projectTreeWindow = null
+          projectTreeWindowId = ''
+          projectTreeDetached.value = false
+          scheduleProjectTreePreferencesSave()
+          showPersistenceNotice(`分離ウィンドウを作成できないため、ツリーをメイン画面に表示します。${String(event.payload)}`)
+        }
+        resolve(false)
+      })
+      void createdWindow.once('tauri://destroyed', () => handleProjectTreeWindowDestroyed(createdWindow))
+    } catch (error) {
+      projectTreeWindow = null
+      projectTreeWindowId = ''
+      projectTreeDetached.value = false
+      scheduleProjectTreePreferencesSave()
+      showPersistenceNotice(`分離ウィンドウを作成できないため、ツリーをメイン画面に表示します。${String(error)}`)
+      resolve(false)
+    }
+  })
+}
+
+/** ボタンまたは子ウィンドウの×から分離窓を閉じ、展開状態を保ってドックへ戻す。 */
+async function dockProjectTreeWindow(): Promise<void> {
+  if (!projectTreeDetached.value && !projectTreeWindow) return
+  projectTreeDetached.value = false
+  scheduleProjectTreePreferencesSave()
+  const closingWindow = projectTreeWindow
+  if (!closingWindow) return
+
+  projectTreeWindowClosingForDock = true
+  const closing = closingWindow.destroy().then(() => undefined)
+  projectTreeWindowClosePromise = closing
+  try {
+    await closing
+  } catch (error) {
+    projectTreeDetached.value = projectTreeWindow === closingWindow
+    projectTreeWindowClosingForDock = false
+    scheduleProjectTreePreferencesSave()
+    await showError('プロジェクトツリーを戻す操作', error)
+  } finally {
+    if (projectTreeWindow === closingWindow && !projectTreeDetached.value) {
+      projectTreeWindow = null
+      projectTreeWindowId = ''
+      projectTreeWindowClosingForDock = false
+    }
+    projectTreeWindowClosePromise = null
+  }
+}
+
+/** 予期しない子ウィンドウ終了をドッキング扱いにし、終了処理中は設定を維持する。 */
+function handleProjectTreeWindowDestroyed(destroyedWindow: WebviewWindow): void {
+  if (projectTreeWindow !== destroyedWindow) return
+  projectTreeWindow = null
+  projectTreeWindowId = ''
+  if (projectTreeWindowClosingForDock) {
+    projectTreeWindowClosingForDock = false
+    return
+  }
+  if (projectTreeWindowClosingForExit) return
+  if (projectTreeDetached.value) {
+    projectTreeDetached.value = false
+    scheduleProjectTreePreferencesSave()
+    showPersistenceNotice('分離したプロジェクトツリーが閉じたため、メイン画面へ戻しました。')
+  }
+}
+
+/** メイン画面の終了時に子窓も閉じ、分離設定は次回起動用に保持する。 */
+async function closeProjectTreeWindowForExit(): Promise<void> {
+  if (projectTreeWindowOpeningPromise) await projectTreeWindowOpeningPromise
+  const closingWindow = projectTreeWindow
+  if (!closingWindow) return
+  projectTreeWindowClosingForExit = true
+  try {
+    await closingWindow.destroy()
+    if (projectTreeWindow === closingWindow) {
+      projectTreeWindow = null
+      projectTreeWindowId = ''
+    }
+  } catch (error) {
+    projectTreeWindowClosingForExit = false
+    throw error
+  }
+}
+
+/** 分離設定を復元する起動時とボタン操作の両方で、作成失敗を画面内通知する。 */
+async function requestProjectTreeDetach(): Promise<void> {
+  await openProjectTreeWindow()
 }
 
 /** 登録解除や参照先変更後も、開いている本文を維持してノード出自だけを解除する。 */
@@ -421,7 +801,7 @@ async function saveDocumentAs(): Promise<void> {
 
 /** 保存開始時の本文を記録し、書き込み中に増えた編集は未保存と復元候補に残す。 */
 async function saveCurrentDocument(saveAs: boolean): Promise<void> {
-  if (busy.value || mainCloseInProgress) return
+  if (busy.value || mainCloseInProgress.value) return
   busy.value = true
   try {
     const target = !saveAs && path.value ? path.value : await chooseSavePath(path.value ?? suggestedFileName.value)
@@ -467,7 +847,7 @@ function executeCommand(commandId: CommandId): void {
 
 /** 文書処理中に利用できないコマンドを判定する。 */
 function isCommandDisabled(commandId: CommandId): boolean {
-  if (mainCloseInProgress) return true
+  if (mainCloseInProgress.value) return true
   if (commandId === 'edit.find' || commandId === 'edit.replace') return documentLocked.value
   return busy.value && commandId.startsWith('document.')
 }
@@ -840,7 +1220,7 @@ function onSearchStatus(status: SearchStatus): void {
 
 /** 本文側のF3は条件があればそのまま検索し、未指定なら検索画面を開く。 */
 function onSearchNavigate(action: SearchAction): void {
-  if (documentLocked.value || mainCloseInProgress) return
+  if (documentLocked.value || mainCloseInProgress.value) return
   if (!searchSession.conditions.search) {
     void openSearchWindow('search')
     return
@@ -877,7 +1257,7 @@ function handleSearchWindowDestroyed(destroyedWindow: WebviewWindow): void {
   searchWindowReady = false
   searchSession.stop()
   editor.value?.setSearch(searchSession.conditions, false)
-  if (!mainCloseInProgress) {
+  if (!mainCloseInProgress.value) {
     void appWindow.setFocus().then(() => editor.value?.focus()).catch((error: unknown) => {
       showPersistenceNotice(`本文へフォーカスを戻せません。${String(error)}`)
     })
@@ -903,7 +1283,7 @@ async function closeSearchWindow(): Promise<void> {
 
 /** 独立した非モーダル検索窓を1つだけ開き、既存の窓では指定入力へフォーカスする。 */
 async function openSearchWindow(field: SearchField): Promise<void> {
-  if (documentLocked.value || mainCloseInProgress || searchWindowClosing) return
+  if (documentLocked.value || mainCloseInProgress.value || searchWindowClosing) return
   searchFocus = { field, revision: searchFocus.revision + 1 }
   if (searchWindowOpening) return
   if (searchWindow) {
@@ -1061,16 +1441,20 @@ onMounted(async () => {
       ? `設定データを読み込めなかったため、初期値で再作成しました。${detail}`
       : `設定を保存できません。今回の変更はアプリ終了後に失われます。${detail}`)
   }
+  window.addEventListener('resize', updateMainViewportWidth)
+  unlistenViewportResize = () => window.removeEventListener('resize', updateMainViewportWidth)
   // 設定保存と文書終了確認を終えてから、メインウィンドウを閉じる。
   unlistenClose = await appWindow.onCloseRequested(async (event) => {
     event.preventDefault()
-    if (busy.value || mainCloseInProgress) return
-    mainCloseInProgress = true
+    if (busy.value || mainCloseInProgress.value) return
+    mainCloseInProgress.value = true
+    void publishProjectTreeWindowState()
     documentLocked.value = true
     let destroyed = false
     try {
       if (dirty.value && !(await confirmDiscard())) return
       await flushAllSettingsChanges()
+      await flushProjectTreePreferences()
       cancelRecoveryTimer()
       if (recoveryReady) {
         try {
@@ -1081,15 +1465,19 @@ onMounted(async () => {
         }
       }
       await closeSearchWindow()
+      await closeProjectTreeWindowForExit()
       await appWindow.destroy()
       destroyed = true
     } catch (error) {
       await showError('終了処理', error)
     } finally {
-      mainCloseInProgress = false
+      mainCloseInProgress.value = false
       if (!destroyed) {
         documentLocked.value = false
+        projectTreeWindowClosingForExit = false
+        void publishProjectTreeWindowState()
         scheduleRecoverySave()
+        if (projectTreeDetached.value && !projectTreeWindow) await openProjectTreeWindow()
       }
     }
   })
@@ -1099,6 +1487,9 @@ onMounted(async () => {
   })
   unlistenSearchCommand = await listen<SearchCommand>(SEARCH_COMMAND_EVENT, (event) => {
     handleSearchCommand(event.payload)
+  })
+  unlistenProjectTreeCommand = await listen<ProjectTreeWindowCommand>(PROJECT_TREE_WINDOW_COMMAND_EVENT, (event) => {
+    handleProjectTreeWindowCommand(event.payload)
   })
   await updateMaximized()
   alwaysOnTop.value = await appWindow.isAlwaysOnTop()
@@ -1110,6 +1501,7 @@ onMounted(async () => {
       showPersistenceNotice(`移行元データを片付けられませんでした。次回起動時に再試行します。${String(error)}`)
     }
   }
+  if (projectTreeDetached.value) await openProjectTreeWindow()
 })
 
 // 画面の破棄時に購読を解除し、同じ操作が重複して処理されることを防ぐ。
@@ -1121,9 +1513,13 @@ onBeforeUnmount(() => {
   unlistenResize?.()
   unlistenSettingsCommand?.()
   unlistenSearchCommand?.()
+  unlistenProjectTreeCommand?.()
+  unlistenViewportResize?.()
   searchWindowReady = false
   void searchWindow?.destroy()
   void settingsWindow?.destroy()
+  if (projectTreeWindow) projectTreeWindowClosingForExit = true
+  void projectTreeWindow?.destroy()
 })
 </script>
 
@@ -1272,12 +1668,41 @@ onBeforeUnmount(() => {
     <VSnackbar v-model="persistenceNoticeOpen" timeout="9000" location="bottom">
       {{ persistenceNotice }}
     </VSnackbar>
-    <VNavigationDrawer class="project-navigation" app permanent width="280" aria-label="プロジェクトツリー">
+    <VNavigationDrawer
+      v-if="!projectTreeDetached"
+      class="project-navigation"
+      app
+      permanent
+      :width="projectTreeDisplayWidth"
+      aria-label="プロジェクトツリー"
+    >
       <ProjectTreeSidebar
-        :disabled="busy || mainCloseInProgress"
+        :disabled="projectTreeWindowDisabled"
         :document-origin="documentOrigin"
+        :expanded-folder-ids="expandedProjectTreeFolderIds"
+        :unavailable-node-ids="projectTreeUnavailableNodeIds"
+        :open-result="projectTreeOpenResult"
+        @detach-request="requestProjectTreeDetach"
         @open-file="openProjectTreeFile"
+        @open-result-applied="consumeProjectTreeOpenResult"
         @origin-detached="detachDocumentOrigin"
+        @expanded-change="updateExpandedProjectTreeFolders"
+        @unavailable-change="updateProjectTreeUnavailableNodeIds"
+      />
+      <div
+        class="project-tree-resize-handle"
+        role="separator"
+        tabindex="0"
+        aria-label="プロジェクトツリーの幅"
+        aria-orientation="vertical"
+        :aria-valuemin="220"
+        :aria-valuemax="projectTreeMaximumWidth"
+        :aria-valuenow="projectTreeDisplayWidth"
+        @pointerdown="startProjectTreeResize"
+        @pointermove="moveProjectTreeResize"
+        @pointerup="endProjectTreeResize"
+        @pointercancel="endProjectTreeResize"
+        @keydown="onProjectTreeResizeKeydown"
       />
     </VNavigationDrawer>
     <VMain class="writing-area" aria-label="本文編集領域">

@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "project-tree",
+  "description": "Detached project tree with database operations and a return request to the main window",
+  "windows": ["project-tree"],
+  "permissions": [
+    "core:event:default",
+    "core:window:allow-destroy",
+    "dialog:allow-open",
+    "dialog:allow-ask",
+    "dialog:allow-message"
+  ]
+}

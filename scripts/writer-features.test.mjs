@@ -618,3 +618,41 @@ test('旧設定の補完は既存項目を保ち、任意の書体名と数値�
   for (const lineHeight of [0.9, 3.1, 1.95, Infinity]) assert.equal(normalizeEditorSettings({ lineHeight }).lineHeight, 1.9)
   assert.equal(normalizeEditorSettings({ fontFamily: 'bad\nfont', fontFallback: 'other' }).fontFamily, defaultEditorSettings.fontFamily)
 })
+
+test('プロジェクトツリー設定は旧データを補完し、保存幅を220～480pxに制限する', () => {
+  const preferences = loadSourceModule('src/appPreferences.ts', {
+    '@tauri-apps/plugin-store': { load: async () => { throw new Error('このテストではStoreを使いません。') } },
+  })
+  const defaults = preferences.createDefaultApplicationPreferences()
+  assert.deepEqual(defaults.ui.projectTree, { width: 280, detached: false })
+
+  const old = preferences.normalizeApplicationPreferences({ schemaVersion: 1, ui: { toolbar: { visible: false } } })
+  assert.deepEqual(old.ui.projectTree, { width: 280, detached: false })
+  assert.equal(old.ui.toolbar.visible, false)
+  assert.equal(preferences.normalizeApplicationPreferences({ ui: { projectTree: { width: 200, detached: true } } }).ui.projectTree.width, 220)
+  assert.equal(preferences.normalizeApplicationPreferences({ ui: { projectTree: { width: 700, detached: true } } }).ui.projectTree.width, 480)
+  assert.deepEqual(preferences.normalizeApplicationPreferences({ ui: { projectTree: { width: 'wide', detached: 'yes' } } }).ui.projectTree, { width: 280, detached: false })
+})
+
+test('分離ツリーは開く結果を反映してからドックし、復帰時に展開状態を引き継ぐ', () => {
+  const detachedWindow = readFileSync(resolve(projectRoot, 'src/ProjectTreeWindow.vue'), 'utf8')
+  const sidebar = readFileSync(resolve(projectRoot, 'src/ProjectTreeSidebar.vue'), 'utf8')
+  const main = readFileSync(resolve(projectRoot, 'src/App.vue'), 'utf8')
+
+  assert.match(detachedWindow, /if \(pendingOpenRequestId\) \{[\s\S]*?dockAfterOpenRequest = true/)
+  assert.match(detachedWindow, /@open-result-applied="handleOpenResultApplied"/)
+  assert.match(detachedWindow, /メイン画面へ接続できないため、ファイルを開けませんでした。/)
+  assert.match(detachedWindow, /@unavailable-change="publishUnavailableNodes"/)
+  assert.match(sidebar, /new Set<number>\(props\.expandedFolderIds\)/)
+  assert.match(sidebar, /\{ deep: true, immediate: true \}/)
+  assert.match(sidebar, /new Set<number>\(props\.unavailableNodeIds\)/)
+  assert.match(sidebar, /finally \{\s*emit\('open-result-applied', result\.requestId\)/)
+  assert.doesNotMatch(sidebar, /if \(result\?\.unavailable\) unavailableNodes\.value/)
+  assert.match(sidebar, /if \(result\.error\) \{\s*if \(result\.unavailable\) next\.add\(result\.nodeId\)\s*unavailableNodes\.value = next/)
+  assert.match(sidebar, /applyingUnavailableNodeProps = true[\s\S]*?applyingUnavailableNodeProps = false/)
+  assert.match(main, /const mainCloseInProgress = ref\(false\)/)
+  assert.match(main, /watch\(\[busy, documentLocked, documentOrigin, mainCloseInProgress\]/)
+  assert.match(main, /projectTreeOpenResult\.value = null/)
+  assert.match(main, /if \(result\.error && result\.unavailable\) unavailable\.add\(result\.nodeId\)\s*else if \(!result\.error\) unavailable\.delete\(result\.nodeId\)/)
+  assert.match(main, /ファイル操作の結果を分離ツリーへ伝えられませんでした/)
+})

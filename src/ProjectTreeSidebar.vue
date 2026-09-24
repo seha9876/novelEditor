@@ -1,10 +1,10 @@
 <!-- 保存先の異なる TXT と仮想フォルダを、実ファイルを動かさず管理する。 -->
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ask, message } from '@tauri-apps/plugin-dialog'
 import { chooseTextFile, fileName } from './textFile'
+import type { ProjectTreeOpenRequest, ProjectTreeOpenResult } from './projectTreeWindow'
 import {
-  authorizeProjectFile,
   createProject,
   createProjectFolder,
   deleteProject,
@@ -25,14 +25,27 @@ type DocumentOrigin = { nodeId: number; projectId: number }
 type DialogMode = 'project-create' | 'project-rename' | 'folder-create' | 'folder-rename'
 type VisibleTreeRow = { node: ProjectTreeNode; depth: number }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   disabled: boolean
   documentOrigin: DocumentOrigin | null
-}>()
+  expandedFolderIds?: number[]
+  unavailableNodeIds?: number[]
+  openResult?: ProjectTreeOpenResult | null
+  detached?: boolean
+}>(), {
+  expandedFolderIds: () => [],
+  unavailableNodeIds: () => [],
+  openResult: null,
+  detached: false,
+})
 
 const emit = defineEmits<{
-  'open-file': [file: { nodeId: number; projectId: number; path: string }]
+  'open-file': [request: ProjectTreeOpenRequest]
+  'open-result-applied': [requestId: string]
   'origin-detached': [nodeId: number]
+  'expanded-change': [nodeIds: number[]]
+  'unavailable-change': [nodeIds: number[]]
+  'detach-request': []
 }>()
 
 const snapshot = ref<ProjectTreeSnapshot>({ projects: [], nodes: [], activeProjectId: null })
@@ -40,8 +53,8 @@ const loading = ref(true)
 const mutationPending = ref(false)
 const delayedProgress = ref(false)
 const treeError = ref('')
-const expandedFolders = ref(new Set<number>())
-const unavailableNodes = ref(new Set<number>())
+const expandedFolders = ref(new Set<number>(props.expandedFolderIds))
+const unavailableNodes = ref(new Set<number>(props.unavailableNodeIds))
 const dragNodeId = ref<number | null>(null)
 const dropIndicator = ref<{ nodeId: number | null; placement: ProjectTreePlacement } | null>(null)
 const nodeMenuOpen = ref(false)
@@ -55,6 +68,8 @@ const dialogValue = ref('')
 const dialogProjectId = ref<number | null>(null)
 const dialogParentId = ref<number | null>(null)
 const dialogNodeId = ref<number | null>(null)
+const pendingOpenRequest = ref<ProjectTreeOpenRequest | null>(null)
+let applyingUnavailableNodeProps = false
 
 const activeProject = computed(() => snapshot.value.projects.find((project) => project.id === snapshot.value.activeProjectId) ?? null)
 const contextNode = computed(() => snapshot.value.nodes.find((node) => node.id === contextNodeId.value) ?? null)
@@ -64,7 +79,7 @@ const currentOriginProject = computed(() => props.documentOrigin
 const showOriginNotice = computed(() => Boolean(
   props.documentOrigin && currentOriginProject.value && currentOriginProject.value.id !== snapshot.value.activeProjectId,
 ))
-const isBusy = computed(() => props.disabled || loading.value || mutationPending.value || Boolean(treeError.value))
+const isBusy = computed(() => props.disabled || loading.value || mutationPending.value || Boolean(treeError.value) || Boolean(pendingOpenRequest.value))
 
 /** 保存順を保ったまま、選択中プロジェクトの展開済み行を階層順に並べる。 */
 const visibleRows = computed<VisibleTreeRow[]>(() => {
@@ -258,18 +273,32 @@ async function activateNode(node: ProjectTreeNode): Promise<void> {
   await openTreeFile(node)
 }
 
-/** 登録されたファイルの実在とアクセス許可を確認してからエディターへ渡す。 */
+/** 登録ファイルをメイン画面へ開くよう依頼し、許可と読み込みの結果を待つ。 */
 async function openTreeFile(node: ProjectTreeNode): Promise<void> {
   if (isBusy.value) return
+  const request = { requestId: crypto.randomUUID(), nodeId: node.id, projectId: node.projectId }
+  pendingOpenRequest.value = request
+  emit('open-file', request)
+}
+
+/** メイン画面から返された開く結果を反映し、失敗した行へ再指定の目印を付ける。 */
+async function applyOpenResult(result: ProjectTreeOpenResult | null | undefined): Promise<void> {
+  if (!result || result.requestId !== pendingOpenRequest.value?.requestId) return
+  pendingOpenRequest.value = null
   try {
-    const path = await authorizeProjectFile(node.id)
     const next = new Set(unavailableNodes.value)
-    next.delete(node.id)
-    unavailableNodes.value = next
-    emit('open-file', { nodeId: node.id, projectId: node.projectId, path })
+    if (result.error) {
+      if (result.unavailable) next.add(result.nodeId)
+      unavailableNodes.value = next
+      await showTreeError(result.error)
+    } else {
+      next.delete(result.nodeId)
+      unavailableNodes.value = next
+    }
   } catch (error) {
-    unavailableNodes.value = new Set(unavailableNodes.value).add(node.id)
-    await showTreeError(error)
+    console.error('プロジェクトツリーのエラー通知を表示できませんでした。', error)
+  } finally {
+    emit('open-result-applied', result.requestId)
   }
 }
 
@@ -278,7 +307,13 @@ function toggleFolder(nodeId: number): void {
   const next = new Set(expandedFolders.value)
   if (next.has(nodeId)) next.delete(nodeId)
   else next.add(nodeId)
-  expandedFolders.value = next
+  setExpandedFolders(next)
+}
+
+/** 展開状態を更新し、分離・復帰先へ渡す同期用スナップショットを送る。 */
+function setExpandedFolders(folderIds: Set<number>): void {
+  expandedFolders.value = folderIds
+  emit('expanded-change', [...folderIds].sort((left, right) => left - right))
 }
 
 /** 追加先のフォルダと全ての祖先を展開し、新規項目がツリー上で見えるようにする。 */
@@ -293,7 +328,7 @@ function expandFolderPath(folderId: number | null): void {
     next.add(folder.id)
     currentId = folder.parentId
   }
-  expandedFolders.value = next
+  setExpandedFolders(next)
 }
 
 /** 選択ファイルを再指定し、成功後にそのノードの出自紐付けを解除する。 */
@@ -398,12 +433,38 @@ async function returnToOriginProject(): Promise<void> {
 }
 
 onMounted(() => { void initializeTree() })
+watch(() => props.expandedFolderIds, (folderIds) => {
+  expandedFolders.value = new Set(folderIds)
+}, { deep: true, immediate: true })
+watch(() => props.unavailableNodeIds, (nodeIds) => {
+  applyingUnavailableNodeProps = true
+  unavailableNodes.value = new Set(nodeIds)
+  applyingUnavailableNodeProps = false
+}, { deep: true, immediate: true, flush: 'sync' })
+watch(unavailableNodes, (nodeIds) => {
+  if (applyingUnavailableNodeProps) return
+  emit('unavailable-change', [...nodeIds].sort((left, right) => left - right))
+}, { deep: true, flush: 'sync' })
+watch(() => props.openResult, (result) => { void applyOpenResult(result) })
 </script>
 
 <template>
   <aside class="project-tree-sidebar" aria-label="プロジェクトツリー">
     <header class="project-tree-header">
-      <div class="project-tree-heading">プロジェクト</div>
+      <div class="project-tree-heading-row">
+        <div class="project-tree-heading">プロジェクト</div>
+        <VBtn
+          class="project-tree-detach"
+          icon
+          size="x-small"
+          variant="text"
+          :aria-label="detached ? 'メイン画面へ戻す' : '別ウィンドウで表示'"
+          :title="detached ? 'メイン画面へ戻す' : '別ウィンドウで表示'"
+          @click="emit('detach-request')"
+        >
+          <VIcon :icon="detached ? 'mdi-dock-left' : 'mdi-dock-window'" aria-hidden="true" />
+        </VBtn>
+      </div>
       <div class="project-tree-project-row">
         <VSelect
           class="project-tree-select"

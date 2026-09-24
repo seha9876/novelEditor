@@ -19,11 +19,17 @@ export type ToolbarPreferences = {
   items: ToolbarItem[]
 }
 
+export type ProjectTreePreferences = {
+  width: number
+  detached: boolean
+}
+
 export type ApplicationPreferencesV1 = {
   schemaVersion: 1
   editor: EditorSettings
   ui: {
     toolbar: ToolbarPreferences
+    projectTree: ProjectTreePreferences
   }
 }
 
@@ -37,6 +43,7 @@ export type PreferencesInitialization = {
 
 const preferencesFileName = 'preferences.json'
 const preferencesKey = 'applicationPreferences'
+const defaultProjectTreeWidth = 280
 const defaultToolbarItems: ToolbarItem[] = [
   { type: 'command', commandId: 'wrap.window' },
   { type: 'command', commandId: 'wrap.columns' },
@@ -60,6 +67,7 @@ export function createDefaultApplicationPreferences(): ApplicationPreferencesV1 
         visible: true,
         items: createDefaultToolbarItems(),
       },
+      projectTree: { width: defaultProjectTreeWidth, detached: false },
     },
   }
 }
@@ -112,6 +120,12 @@ export function normalizeApplicationPreferences(value: unknown): ApplicationPref
   const rawToolbar = rawUi.toolbar && typeof rawUi.toolbar === 'object'
     ? rawUi.toolbar as Record<string, unknown>
     : {}
+  const rawProjectTree = rawUi.projectTree && typeof rawUi.projectTree === 'object'
+    ? rawUi.projectTree as Record<string, unknown>
+    : {}
+  const projectTreeWidth = typeof rawProjectTree.width === 'number' && Number.isFinite(rawProjectTree.width)
+    ? Math.round(rawProjectTree.width)
+    : defaultProjectTreeWidth
   return {
     schemaVersion: 1,
     editor: normalizeEditorSettings(raw.editor),
@@ -119,6 +133,10 @@ export function normalizeApplicationPreferences(value: unknown): ApplicationPref
       toolbar: {
         visible: typeof rawToolbar.visible === 'boolean' ? rawToolbar.visible : true,
         items: normalizeToolbarItems(rawToolbar.items),
+      },
+      projectTree: {
+        width: Math.max(220, Math.min(480, projectTreeWidth)),
+        detached: typeof rawProjectTree.detached === 'boolean' ? rawProjectTree.detached : false,
       },
     },
   }
@@ -227,6 +245,20 @@ export function saveSettingsPreferences(editor: EditorSettings, toolbar: Toolbar
   }))
 }
 
+/** ツリー幅とウィンドウ分離状態を既存の設定Storeへ保存する。 */
+export function saveProjectTreePreferences(projectTree: ProjectTreePreferences): Promise<void> {
+  return savePreferenceUpdate((current) => ({
+    ...current,
+    ui: {
+      ...current.ui,
+      projectTree: {
+        width: Math.max(220, Math.min(480, Math.round(projectTree.width))),
+        detached: projectTree.detached,
+      },
+    },
+  }))
+}
+
 /** 最新の保存済み設定へ部分更新を直列適用し、成功後にメモリ状態を確定する。 */
 function savePreferenceUpdate(update: (current: ApplicationPreferencesV1) => ApplicationPreferencesV1): Promise<void> {
   pendingSave = pendingSave.catch(() => undefined).then(async () => {
@@ -267,6 +299,7 @@ function clonePreferences(value: ApplicationPreferencesV1): ApplicationPreferenc
         visible: value.ui.toolbar.visible,
         items: value.ui.toolbar.items.map((item) => ({ ...item })),
       },
+      projectTree: { ...value.ui.projectTree },
     },
   }
 }

@@ -31,10 +31,15 @@ html, body, #app { width: 100%; height: 100%; margin: 0; }
 .toolbar-divider { height: 24px; margin-inline: 4px; }
 
 .project-navigation { border-inline-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
-.project-navigation .v-navigation-drawer__content { overflow: hidden; }
+.project-navigation .v-navigation-drawer__content { position: relative; overflow: hidden; }
+.project-tree-resize-handle { position: absolute; z-index: 3; inset-block: 0; inset-inline-end: 0; width: 7px; cursor: col-resize; touch-action: none; }
+.project-tree-resize-handle:hover, .project-tree-resize-handle:focus-visible { background: rgba(var(--v-theme-primary), 0.18); outline: none; }
+.project-tree-resize-handle:focus-visible { box-shadow: inset -2px 0 rgb(var(--v-theme-primary)); }
 .project-tree-sidebar { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .project-tree-header { flex: none; padding: 14px 10px 8px; border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
-.project-tree-heading { margin: 0 4px 8px; font-size: 0.8rem; font-weight: 600; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); }
+.project-tree-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin: 0 0 4px 4px; }
+.project-tree-heading { margin: 0; font-size: 0.8rem; font-weight: 600; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); }
+.project-tree-detach { flex: none; }
 .project-tree-project-row { display: flex; align-items: center; gap: 2px; }
 .project-tree-select { min-width: 0; flex: 1 1 auto; }
 .project-tree-select .v-field__input { min-height: 36px; padding-block: 5px; font-size: 0.875rem; }
@@ -67,6 +72,9 @@ html, body, #app { width: 100%; height: 100%; margin: 0; }
 .project-tree-row.drop-inside { outline: 2px solid rgb(var(--v-theme-primary)); outline-offset: -2px; }
 .project-tree-root-drop { min-height: 34px; display: flex; align-items: center; justify-content: center; margin: 6px 8px 2px; border: 1px dashed rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 4px; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: 0.75rem; }
 .project-tree-root-drop.drop-root { border-color: rgb(var(--v-theme-primary)); color: rgb(var(--v-theme-primary)); background: rgba(var(--v-theme-primary), 0.08); }
+.project-tree-window-shell { width: 100%; height: 100%; }
+.project-tree-window-shell .v-application__wrap { height: 100%; min-height: 100%; }
+.project-tree-window-error { padding: 24px; color: rgb(var(--v-theme-error)); }
 
 .writing-area { min-height: 0; overflow: hidden; }
 .editor-host { height: 100%; --editor-side-padding: 44px; }
@@ -120,7 +128,6 @@ html, body, #app { width: 100%; height: 100%; margin: 0; }
   .window-controls .v-btn { width: 40px; min-width: 40px; }
   .editor-host { --editor-side-padding: 22px; }
   .editor-host .cm-content { padding-top: 28px; padding-bottom: 50px; }
-  .project-navigation { width: 240px !important; }
   .project-tree-header { padding-inline: 6px; }
   .project-tree-toolbar .v-btn { font-size: 0.68rem; }
 }

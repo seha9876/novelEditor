@@ -27,6 +27,7 @@
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "@tauri-apps/plugin-fs": "^2.0.0",
     "@tauri-apps/plugin-store": "^2.0.0",
+    "@types/google-apps-script": "^2.0.13",
     "vue": "^3.0.0",
     "vuetify": "^4"
   },

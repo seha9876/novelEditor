@@ -765,20 +765,67 @@ pub fn project_file_relink(
     Ok(())
 }
 
-/// ノード登録だけを削除し、実ファイルには触れない。
-#[tauri::command]
-pub fn project_node_remove(state: State<'_, ProjectTreeState>, node_id: i64) -> Result<(), String> {
-    let guard = lock_connection(&state)?;
-    let connection = guard
-        .as_ref()
-        .expect("lock_connection checked initialization");
-    let changed = connection
-        .execute("DELETE FROM project_nodes WHERE id = ?1", params![node_id])
-        .map_err(|error| database_error("ツリーノードを削除できません", error))?;
-    if changed == 0 {
-        return Err("ツリーノードが見つかりません".to_string());
+/// トランザクション内で、同一プロジェクトのノード登録だけを一括削除する。
+fn remove_project_nodes_in_transaction(
+    transaction: &Transaction<'_>,
+    node_ids: &[i64],
+) -> Result<(), String> {
+    if node_ids.is_empty() {
+        return Err("削除対象ノードがありません".to_string());
+    }
+
+    let mut unique_node_ids = Vec::with_capacity(node_ids.len());
+    for node_id in node_ids {
+        if !unique_node_ids.contains(node_id) {
+            unique_node_ids.push(*node_id);
+        }
+    }
+
+    let mut project_id = None;
+    for node_id in &unique_node_ids {
+        let node_project_id = transaction
+            .query_row(
+                "SELECT project_id FROM project_nodes WHERE id = ?1",
+                params![node_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| database_error("削除対象ノードを確認できません", error))?
+            .ok_or_else(|| "削除対象ノードが見つかりません".to_string())?;
+        if let Some(expected_project_id) = project_id {
+            if expected_project_id != node_project_id {
+                return Err("別のプロジェクトのノードを同時に削除できません".to_string());
+            }
+        } else {
+            project_id = Some(node_project_id);
+        }
+    }
+
+    for node_id in unique_node_ids {
+        transaction
+            .execute("DELETE FROM project_nodes WHERE id = ?1", params![node_id])
+            .map_err(|error| database_error("ツリーノードを削除できません", error))?;
     }
     Ok(())
+}
+
+/// ノード登録だけを一括削除し、実ファイルには触れない。
+#[tauri::command]
+pub fn project_nodes_remove(
+    state: State<'_, ProjectTreeState>,
+    node_ids: Vec<i64>,
+) -> Result<(), String> {
+    let mut guard = lock_connection(&state)?;
+    let connection = guard
+        .as_mut()
+        .expect("lock_connection checked initialization");
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| database_error("ツリーノード削除を開始できません", error))?;
+    remove_project_nodes_in_transaction(&transaction, &node_ids)?;
+    transaction
+        .commit()
+        .map_err(|error| database_error("ツリーノード削除を確定できません", error))
 }
 
 /// 移動するフォルダをその子孫配下へ入れないように検証する。
@@ -980,7 +1027,7 @@ mod tests {
 
     use super::{
         create_schema, insert_ordered_node, move_node_in_transaction, ordered_siblings,
-        validate_no_cycle, ProjectTreeState,
+        remove_project_nodes_in_transaction, validate_no_cycle, ProjectTreeState,
     };
     use crate::project_order::ORDER_GAP;
 
@@ -1308,5 +1355,95 @@ mod tests {
         .unwrap();
         assert!(move_node_in_transaction(&transaction, moving, Some(target), "before").is_err());
         transaction.rollback().unwrap();
+    }
+
+    /// 親子ノードを含む複数削除は一つのトランザクションで完了し、他プロジェクトには触れない。
+    #[test]
+    fn removing_multiple_nodes_cascades_selected_children() {
+        let mut connection = memory_database();
+        let project_id = create_project(&connection);
+        let other_project_id = create_project(&connection);
+        let transaction = connection.transaction().unwrap();
+        let parent =
+            insert_ordered_node(&transaction, project_id, None, "folder", "parent", None).unwrap();
+        let child = insert_ordered_node(
+            &transaction,
+            project_id,
+            Some(parent),
+            "file",
+            "child.txt",
+            Some("C:/child.txt"),
+        )
+        .unwrap();
+        let other = insert_ordered_node(
+            &transaction,
+            other_project_id,
+            None,
+            "file",
+            "other.txt",
+            Some("C:/other.txt"),
+        )
+        .unwrap();
+        remove_project_nodes_in_transaction(&transaction, &[parent, child]).unwrap();
+        transaction.commit().unwrap();
+
+        let remaining: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM project_nodes WHERE id IN (?1, ?2, ?3)",
+                params![parent, child, other],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 1);
+        assert!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM project_nodes WHERE id = ?1",
+                    params![other],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+                == 1
+        );
+    }
+
+    /// 存在しないIDや別プロジェクトの混在は削除前に拒否し、部分削除を起こさない。
+    #[test]
+    fn removing_nodes_rejects_missing_or_cross_project_ids() {
+        let mut connection = memory_database();
+        let first_project = create_project(&connection);
+        let second_project = create_project(&connection);
+        let transaction = connection.transaction().unwrap();
+        let first = insert_ordered_node(
+            &transaction,
+            first_project,
+            None,
+            "file",
+            "first.txt",
+            Some("C:/first.txt"),
+        )
+        .unwrap();
+        let second = insert_ordered_node(
+            &transaction,
+            second_project,
+            None,
+            "file",
+            "second.txt",
+            Some("C:/second.txt"),
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+
+        let transaction = connection.transaction().unwrap();
+        assert!(remove_project_nodes_in_transaction(&transaction, &[first, second]).is_err());
+        transaction.rollback().unwrap();
+        let transaction = connection.transaction().unwrap();
+        assert!(remove_project_nodes_in_transaction(&transaction, &[first, 999_999]).is_err());
+        transaction.rollback().unwrap();
+
+        let count: i64 = connection
+            .query_row("SELECT count(*) FROM project_nodes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
     }
 }

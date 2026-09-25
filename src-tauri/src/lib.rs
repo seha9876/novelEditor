@@ -46,7 +46,7 @@ pub fn run() {
             project_tree::project_folder_rename,
             project_tree::project_file_register,
             project_tree::project_file_relink,
-            project_tree::project_node_remove,
+            project_tree::project_nodes_remove,
             project_tree::project_node_move,
             project_tree::project_file_authorize,
             storage_location::storage_status,

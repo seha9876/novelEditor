@@ -30,6 +30,16 @@ export interface ProjectTreeFileRegistrationFailure {
   error: string
 }
 
+export interface ProjectTreeSelectionModifiers {
+  ctrlKey: boolean
+  shiftKey: boolean
+}
+
+export interface ProjectTreeSelectionChange {
+  selectedNodeIds: number[]
+  anchorNodeId: number | null
+}
+
 /** 保存済みのプロジェクトとノードを読み込む。 */
 export function loadProjectTreeSnapshot(): Promise<ProjectTreeSnapshot> {
   return invoke<ProjectTreeSnapshot>('project_tree_snapshot')
@@ -154,14 +164,81 @@ export function shouldSuppressProjectTreeClick(suppressGeneratedClick: boolean, 
   return suppressGeneratedClick && clickDetail > 0
 }
 
+/** 可視行の順序を保ったまま、クリックによるツリー選択を更新する。 */
+export function projectTreeSelectionAfterClick(
+  visibleNodeIds: number[],
+  selectedNodeIds: ReadonlySet<number>,
+  anchorNodeId: number | null,
+  nodeId: number,
+  modifiers: ProjectTreeSelectionModifiers,
+): ProjectTreeSelectionChange {
+  const targetIndex = visibleNodeIds.indexOf(nodeId)
+  if (targetIndex < 0) {
+    return {
+      selectedNodeIds: visibleNodeIds.filter((id) => selectedNodeIds.has(id)),
+      anchorNodeId,
+    }
+  }
+
+  const currentSelection = new Set(visibleNodeIds.filter((id) => selectedNodeIds.has(id)))
+  if (modifiers.shiftKey) {
+    const anchorIndex = anchorNodeId === null ? -1 : visibleNodeIds.indexOf(anchorNodeId)
+    const rangeStart = anchorIndex < 0 ? targetIndex : Math.min(anchorIndex, targetIndex)
+    const rangeEnd = anchorIndex < 0 ? targetIndex : Math.max(anchorIndex, targetIndex)
+    const range = visibleNodeIds.slice(rangeStart, rangeEnd + 1)
+    const nextSelection = modifiers.ctrlKey ? currentSelection : new Set<number>()
+    for (const id of range) nextSelection.add(id)
+    return {
+      selectedNodeIds: visibleNodeIds.filter((id) => nextSelection.has(id)),
+      anchorNodeId: anchorIndex < 0 ? nodeId : anchorNodeId,
+    }
+  }
+
+  if (modifiers.ctrlKey) {
+    if (currentSelection.has(nodeId)) currentSelection.delete(nodeId)
+    else currentSelection.add(nodeId)
+    return {
+      selectedNodeIds: visibleNodeIds.filter((id) => currentSelection.has(id)),
+      anchorNodeId: nodeId,
+    }
+  }
+
+  return { selectedNodeIds: [nodeId], anchorNodeId: nodeId }
+}
+
+/** 右クリックや操作メニューの対象を選択状態へ反映する。 */
+export function projectTreeSelectionAfterContextMenu(
+  visibleNodeIds: number[],
+  selectedNodeIds: ReadonlySet<number>,
+  nodeId: number,
+): ProjectTreeSelectionChange {
+  const currentSelection = new Set(visibleNodeIds.filter((id) => selectedNodeIds.has(id)))
+  if (!currentSelection.has(nodeId)) return { selectedNodeIds: [nodeId], anchorNodeId: nodeId }
+  return {
+    selectedNodeIds: visibleNodeIds.filter((id) => currentSelection.has(id)),
+    anchorNodeId: nodeId,
+  }
+}
+
+/** 保存済みノードだけを残し、プロジェクト切替・再読込後の選択状態を整理する。 */
+export function projectTreeSelectionForNodes(
+  selectedNodeIds: ReadonlySet<number>,
+  nodes: readonly Pick<ProjectTreeNode, 'id' | 'projectId'>[],
+  projectId: number | null,
+): number[] {
+  if (projectId === null) return []
+  const validIds = new Set(nodes.filter((node) => node.projectId === projectId).map((node) => node.id))
+  return [...selectedNodeIds].filter((id) => validIds.has(id))
+}
+
 /** 既存のファイルノードが参照するパスを変更する。 */
 export function relinkProjectFile(nodeId: number, path: string): Promise<void> {
   return invoke('project_file_relink', { nodeId, path })
 }
 
-/** ノードと配下の登録情報を削除する。実ファイルは変更しない。 */
-export function removeProjectNode(nodeId: number): Promise<void> {
-  return invoke('project_node_remove', { nodeId })
+/** 複数ノードと配下の登録情報を一括削除する。実ファイルは変更しない。 */
+export function removeProjectNodes(nodeIds: number[]): Promise<void> {
+  return invoke('project_nodes_remove', { nodeIds })
 }
 
 /** ノードを指定した前後・フォルダ内・ルート末尾へ移動する。 */

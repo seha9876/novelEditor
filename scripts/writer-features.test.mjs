@@ -100,6 +100,58 @@ test('ネイティブドロップの座標・領域・追加先とポインタ�
   assert.equal(tree.shouldSuppressProjectTreeClick(false, 1), false)
 })
 
+test('ツリーの通常・修飾クリックと右クリックで可視行の選択を更新する', () => {
+  const tree = loadSourceModule('src/projectTree.ts')
+  const rows = [1, 2, 3, 4, 5]
+  assert.deepEqual(tree.projectTreeSelectionAfterClick(rows, new Set(), null, 2, {
+    ctrlKey: false, shiftKey: false,
+  }), { selectedNodeIds: [2], anchorNodeId: 2 })
+  assert.deepEqual(tree.projectTreeSelectionAfterClick(rows, new Set([2]), 2, 4, {
+    ctrlKey: false, shiftKey: true,
+  }), { selectedNodeIds: [2, 3, 4], anchorNodeId: 2 })
+  assert.deepEqual(tree.projectTreeSelectionAfterClick(rows, new Set([2, 4]), 4, 3, {
+    ctrlKey: true, shiftKey: true,
+  }), { selectedNodeIds: [2, 3, 4], anchorNodeId: 4 })
+  assert.deepEqual(tree.projectTreeSelectionAfterClick(rows, new Set([2, 3]), 3, 2, {
+    ctrlKey: true, shiftKey: false,
+  }), { selectedNodeIds: [3], anchorNodeId: 2 })
+  assert.deepEqual(tree.projectTreeSelectionAfterContextMenu(rows, new Set([2, 4]), 4), {
+    selectedNodeIds: [2, 4], anchorNodeId: 4,
+  })
+  assert.deepEqual(tree.projectTreeSelectionAfterContextMenu(rows, new Set([2, 4]), 3), {
+    selectedNodeIds: [3], anchorNodeId: 3,
+  })
+})
+
+test('ツリー選択は再読込後に別プロジェクトや不在ノードを除外し、複数削除APIを使う', async () => {
+  let invocation
+  const tree = loadSourceModule('src/projectTree.ts', {
+    '@tauri-apps/api/core': { invoke: async (command, args) => {
+      invocation = { command, args }
+    } },
+  })
+  assert.deepEqual(tree.projectTreeSelectionForNodes(new Set([1, 2, 9]), [
+    { id: 1, projectId: 7 }, { id: 2, projectId: 7 }, { id: 9, projectId: 8 },
+  ], 7), [1, 2])
+  assert.deepEqual(tree.projectTreeSelectionForNodes(new Set([1]), [
+    { id: 1, projectId: 7 },
+  ], null), [])
+  await tree.removeProjectNodes([1, 2])
+  assert.deepEqual(invocation, { command: 'project_nodes_remove', args: { nodeIds: [1, 2] } })
+})
+
+test('ツリーの複数選択メニューは一括解除だけを表示し、再読込で不可視選択を整理する', () => {
+  const sidebar = readFileSync(resolve(projectRoot, 'src/ProjectTreeSidebar.vue'), 'utf8')
+  const menu = sidebar.match(/<VList v-if="contextNode"[\s\S]*?<\/VList>/)?.[0]
+  assert.ok(menu)
+  const multiMenu = menu.slice(menu.indexOf('<template v-if="selectedNodes.length > 1">'), menu.indexOf('<template v-else>'))
+  const singleMenu = menu.slice(menu.indexOf('<template v-else>'))
+  assert.match(multiMenu, /選択した\$\{selectedNodes\.length\}件の登録を解除/)
+  assert.doesNotMatch(multiMenu, /VDivider|title="登録を解除"/)
+  assert.match(singleMenu, /VDivider[\s\S]*title="登録を解除"/)
+  assert.match(sidebar, /const displayedSelection = validSelection\.filter\(\(id\) => visibleIds\.has\(id\)\)/)
+})
+
 test('複数TXTのドロップ登録は一部が失敗しても残りを続行する', async () => {
   const invocations = []
   const tree = loadSourceModule('src/projectTree.ts', {

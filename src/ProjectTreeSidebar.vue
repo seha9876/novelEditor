@@ -16,10 +16,13 @@ import {
   projectTreeExternalDropDestination,
   projectTreePhysicalToViewport,
   projectTreeRowPlacement,
+  projectTreeSelectionAfterClick,
+  projectTreeSelectionAfterContextMenu,
+  projectTreeSelectionForNodes,
   registerProjectFile,
   registerDroppedProjectFiles,
   relinkProjectFile,
-  removeProjectNode,
+  removeProjectNodes,
   renameProject,
   renameProjectFolder,
   selectProject,
@@ -65,6 +68,8 @@ const delayedProgress = ref(false)
 const treeError = ref('')
 const expandedFolders = ref(new Set<number>(props.expandedFolderIds))
 const unavailableNodes = ref(new Set<number>(props.unavailableNodeIds))
+const selectedNodeIds = ref(new Set<number>())
+const selectionAnchorNodeId = ref<number | null>(null)
 const treeScrollElement = ref<HTMLElement | null>(null)
 const dragNodeId = ref<number | null>(null)
 const dropIndicator = ref<{ nodeId: number | null; placement: ProjectTreePlacement } | null>(null)
@@ -97,6 +102,8 @@ const currentOriginProject = computed(() => props.documentOrigin
 const showOriginNotice = computed(() => Boolean(
   props.documentOrigin && currentOriginProject.value && currentOriginProject.value.id !== snapshot.value.activeProjectId,
 ))
+const selectedNodes = computed(() => snapshot.value.nodes.filter((node) => selectedNodeIds.value.has(node.id)
+  && node.projectId === snapshot.value.activeProjectId))
 const isBusy = computed(() => props.disabled || loading.value || mutationPending.value || Boolean(treeError.value) || Boolean(pendingOpenRequest.value))
 
 /** 保存順を保ったまま、選択中プロジェクトの展開済み行を階層順に並べる。 */
@@ -120,11 +127,67 @@ const visibleRows = computed<VisibleTreeRow[]>(() => {
   return rows
 })
 
+/** ツリーの選択状態を置き換え、範囲選択の基準行も更新する。 */
+function setNodeSelection(nodeIds: number[], anchorNodeId: number | null = nodeIds.at(-1) ?? null): void {
+  selectedNodeIds.value = new Set(nodeIds)
+  selectionAnchorNodeId.value = anchorNodeId
+}
+
+/** ツリーの選択状態と範囲選択の基準行を空にする。 */
+function clearNodeSelection(): void {
+  setNodeSelection([])
+}
+
+/** 折りたたみや再読込で表示されなくなったノードを選択から外す。 */
+function pruneSelectionToVisibleRows(): void {
+  const visibleIds = new Set(visibleRows.value.map((row) => row.node.id))
+  const nextIds = [...selectedNodeIds.value].filter((id) => visibleIds.has(id))
+  if (nextIds.length === selectedNodeIds.value.size
+    && (selectionAnchorNodeId.value === null || visibleIds.has(selectionAnchorNodeId.value))) return
+  setNodeSelection(nextIds, selectionAnchorNodeId.value !== null && visibleIds.has(selectionAnchorNodeId.value)
+    ? selectionAnchorNodeId.value
+    : nextIds.at(-1) ?? null)
+}
+
+/** ツリーの表示行に対するクリック選択を適用する。 */
+function selectNodeFromClick(event: MouseEvent, node: ProjectTreeNode): boolean {
+  const change = projectTreeSelectionAfterClick(
+    visibleRows.value.map((row) => row.node.id),
+    selectedNodeIds.value,
+    selectionAnchorNodeId.value,
+    node.id,
+    { ctrlKey: event.ctrlKey || event.metaKey, shiftKey: event.shiftKey },
+  )
+  setNodeSelection(change.selectedNodeIds, change.anchorNodeId)
+  return event.ctrlKey || event.metaKey || event.shiftKey
+}
+
+/** 右クリック対象が未選択なら単独選択し、選択済みなら既存の選択を維持する。 */
+function selectNodeFromContextMenu(node: ProjectTreeNode): void {
+  const change = projectTreeSelectionAfterContextMenu(
+    visibleRows.value.map((row) => row.node.id),
+    selectedNodeIds.value,
+    node.id,
+  )
+  setNodeSelection(change.selectedNodeIds, change.anchorNodeId)
+}
+
 /** DB から最新のツリーを読み込み、削除済みノードに対する一時エラーを整理する。 */
 async function refreshSnapshot(): Promise<void> {
   snapshot.value = await loadProjectTreeSnapshot()
   const validIds = new Set(snapshot.value.nodes.map((node) => node.id))
   unavailableNodes.value = new Set([...unavailableNodes.value].filter((id) => validIds.has(id)))
+  const validSelection = projectTreeSelectionForNodes(
+    selectedNodeIds.value,
+    snapshot.value.nodes,
+    snapshot.value.activeProjectId,
+  )
+  // snapshot.value の更新後に visibleRows を参照すると、新しい階層に基づいて再計算される。
+  const visibleIds = new Set(visibleRows.value.map((row) => row.node.id))
+  const displayedSelection = validSelection.filter((id) => visibleIds.has(id))
+  setNodeSelection(displayedSelection, displayedSelection.includes(selectionAnchorNodeId.value ?? -1)
+    ? selectionAnchorNodeId.value
+    : displayedSelection.at(-1) ?? null)
   if (props.documentOrigin && !snapshot.value.projects.some((project) => project.id === props.documentOrigin?.projectId)) {
     emit('origin-detached', props.documentOrigin.nodeId)
   }
@@ -227,6 +290,7 @@ async function saveNameDialog(): Promise<void> {
 /** プロジェクト選択を保存してから表示を切り替える。 */
 async function changeProject(projectId: number | null): Promise<void> {
   if (projectId === null || projectId === snapshot.value.activeProjectId) return
+  clearNodeSelection()
   await runMutation(() => selectProject(projectId))
 }
 
@@ -324,6 +388,7 @@ function requestFolderCreate(parentId: number | null = null): void {
 function openNodeMenu(event: MouseEvent, node: ProjectTreeNode): void {
   event.preventDefault()
   event.stopPropagation()
+  selectNodeFromContextMenu(node)
   contextNodeId.value = node.id
   nodeMenuTarget.value = [event.clientX, event.clientY]
   nodeMenuOpen.value = true
@@ -378,6 +443,7 @@ function toggleFolder(nodeId: number): void {
 /** 展開状態を更新し、分離・復帰先へ渡す同期用スナップショットを送る。 */
 function setExpandedFolders(folderIds: Set<number>): void {
   expandedFolders.value = folderIds
+  pruneSelectionToVisibleRows()
   emit('expanded-change', [...folderIds].sort((left, right) => left - right))
 }
 
@@ -411,20 +477,25 @@ async function requestRelink(): Promise<void> {
   }
 }
 
-/** フォルダ配下を含む登録情報を確認後に削除し、対象文書の出自だけを解除する。 */
+/** 選択したノードと配下の登録情報を確認後に一括削除し、対象文書の出自だけを解除する。 */
 async function requestNodeRemove(): Promise<void> {
-  const node = contextNode.value
-  if (!node || isBusy.value) return
+  const nodes = selectedNodes.value
+  if (!nodes.length || isBusy.value) return
   nodeMenuOpen.value = false
-  const label = node.kind === 'folder' ? '仮想フォルダと配下の登録' : 'ファイルの登録'
-  if (!await ask(`「${node.name}」の${label}を削除します。実ファイルは削除されません。続けますか？`, {
+  const count = nodes.length
+  const description = count === 1
+    ? `「${nodes[0].name}」の${nodes[0].kind === 'folder' ? '仮想フォルダと配下の登録' : 'ファイルの登録'}`
+    : `選択した${count}件の登録`
+  if (!await ask(`${description}を解除します。実ファイルは削除されません。続けますか？`, {
     title: '登録の解除', kind: 'warning', okLabel: '登録解除', cancelLabel: 'キャンセル',
   })) return
 
   const originNodeId = props.documentOrigin?.nodeId
-  const removeOrigin = originNodeId !== undefined && containsNode(node.id, originNodeId)
-  if (await runMutation(() => removeProjectNode(node.id)) && removeOrigin) {
-    emit('origin-detached', originNodeId)
+  const removeOrigin = originNodeId !== undefined && nodes.some((node) => containsNode(node.id, originNodeId))
+  const nodeIds = nodes.map((node) => node.id)
+  if (await runMutation(() => removeProjectNodes(nodeIds))) {
+    clearNodeSelection()
+    if (removeOrigin) emit('origin-detached', originNodeId)
   }
 }
 
@@ -527,6 +598,7 @@ function trackPointerTreeDrag(event: PointerEvent): void {
     return
   }
   gesture.started = true
+  setNodeSelection([gesture.nodeId], gesture.nodeId)
   dragNodeId.value = gesture.nodeId
   event.preventDefault()
   latestPointerPosition = { x: event.clientX, y: event.clientY }
@@ -568,7 +640,40 @@ function activateNodeFromClick(event: MouseEvent, node: ProjectTreeNode): void {
     event.stopPropagation()
     return
   }
+  if (selectNodeFromClick(event, node)) return
   void activateNode(node)
+}
+
+/** ツリー内のキーボード選択操作と一括解除を処理する。 */
+function handleTreeKeydown(event: KeyboardEvent): void {
+  if (dialogOpen.value) return
+  const target = event.target instanceof HTMLElement ? event.target : null
+  if (target?.closest('input, textarea, [contenteditable="true"], [role="combobox"]')) return
+
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    clearNodeSelection()
+    nodeMenuOpen.value = false
+    return
+  }
+
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
+    event.preventDefault()
+    const ids = visibleRows.value.map((row) => row.node.id)
+    setNodeSelection(ids, ids[0] ?? null)
+    return
+  }
+
+  if (event.key === 'Delete' && selectedNodes.value.length > 0) {
+    event.preventDefault()
+    void requestNodeRemove()
+  }
+}
+
+/** 行以外のツリー空白をクリックしたときに選択を解除する。 */
+function handleTreeBackgroundClick(event: MouseEvent): void {
+  const target = event.target instanceof Element ? event.target : null
+  if (!target?.closest('.project-tree-row')) clearNodeSelection()
 }
 
 /** 物理座標で届くTauriのドロップ位置を、CSSピクセルのツリー要素へ変換する。 */
@@ -654,6 +759,7 @@ onMounted(() => {
 onBeforeUnmount(disposeTreePointerHandlers)
 watch(() => props.expandedFolderIds, (folderIds) => {
   expandedFolders.value = new Set(folderIds)
+  pruneSelectionToVisibleRows()
 }, { deep: true, immediate: true })
 watch(() => props.unavailableNodeIds, (nodeIds) => {
   applyingUnavailableNodeProps = true
@@ -733,7 +839,17 @@ watch(() => props.openResult, (result) => { void applyOpenResult(result) })
       <p>プロジェクトはまだありません。</p>
       <VBtn size="small" variant="tonal" prepend-icon="mdi-plus" @click="requestProjectCreate">作成</VBtn>
     </div>
-    <div ref="treeScrollElement" class="project-tree-scroll" :class="{ 'external-drop-active': externalDropActive }" role="tree" aria-label="ファイルと仮想フォルダ">
+    <div
+      ref="treeScrollElement"
+      class="project-tree-scroll"
+      :class="{ 'external-drop-active': externalDropActive }"
+      role="tree"
+      aria-label="ファイルと仮想フォルダ"
+      aria-multiselectable="true"
+      tabindex="0"
+      @keydown="handleTreeKeydown"
+      @click="handleTreeBackgroundClick"
+    >
       <div v-if="snapshot.activeProjectId === null" class="project-tree-empty">プロジェクトを選択してください。</div>
       <template v-else>
         <div v-if="visibleRows.length === 0" class="project-tree-empty">ファイルやフォルダを登録してください。</div>
@@ -743,6 +859,7 @@ watch(() => props.openResult, (result) => { void applyOpenResult(result) })
           class="project-tree-row"
           :class="{
             'is-active': documentOrigin?.nodeId === row.node.id,
+            'is-selected': selectedNodeIds.has(row.node.id),
             'is-unavailable': unavailableNodes.has(row.node.id),
             'drop-before': dropIndicator?.nodeId === row.node.id && dropIndicator.placement === 'before',
             'drop-after': dropIndicator?.nodeId === row.node.id && dropIndicator.placement === 'after',
@@ -753,6 +870,7 @@ watch(() => props.openResult, (result) => { void applyOpenResult(result) })
           role="treeitem"
           :aria-level="row.depth + 1"
           :aria-expanded="row.node.kind === 'folder' ? expandedFolders.has(row.node.id) : undefined"
+          :aria-selected="selectedNodeIds.has(row.node.id)"
           :aria-current="documentOrigin?.nodeId === row.node.id ? 'true' : undefined"
           @contextmenu="openNodeMenu($event, row.node)"
         >
@@ -796,15 +914,20 @@ watch(() => props.openResult, (result) => { void applyOpenResult(result) })
 
     <VMenu v-model="nodeMenuOpen" :target="nodeMenuTarget" location="bottom start" :close-on-content-click="true">
       <VList v-if="contextNode" density="compact" min-width="220" role="menu" aria-label="ノード操作">
-        <template v-if="contextNode.kind === 'folder'">
-          <VListItem role="menuitem" title="中にフォルダを作成" prepend-icon="mdi-folder-plus-outline" @click="requestFolderCreate(contextNode.id)" />
-          <VListItem role="menuitem" title="ここへ TXT を登録" prepend-icon="mdi-file-plus-outline" @click="registerFile(contextNode.id)" />
-          <VListItem role="menuitem" title="フォルダ名を変更" prepend-icon="mdi-pencil-outline" @click="openNameDialog('folder-rename', '仮想フォルダ名を変更', contextNode.name, { nodeId: contextNode.id })" />
+        <template v-if="selectedNodes.length > 1">
+          <VListItem role="menuitem" :title="`選択した${selectedNodes.length}件の登録を解除`" prepend-icon="mdi-delete-outline" @click="requestNodeRemove" />
         </template>
-        <VListItem v-else role="menuitem" title="エディターで開く" prepend-icon="mdi-file-edit-outline" @click="openTreeFile(contextNode)" />
-        <VListItem v-if="contextNode.kind === 'file'" role="menuitem" title="参照先を再指定" prepend-icon="mdi-link-variant" @click="requestRelink" />
-        <VDivider class="my-1" />
-        <VListItem role="menuitem" title="登録を解除" prepend-icon="mdi-delete-outline" @click="requestNodeRemove" />
+        <template v-else>
+          <template v-if="contextNode.kind === 'folder'">
+            <VListItem role="menuitem" title="中にフォルダを作成" prepend-icon="mdi-folder-plus-outline" @click="requestFolderCreate(contextNode.id)" />
+            <VListItem role="menuitem" title="ここへ TXT を登録" prepend-icon="mdi-file-plus-outline" @click="registerFile(contextNode.id)" />
+            <VListItem role="menuitem" title="フォルダ名を変更" prepend-icon="mdi-pencil-outline" @click="openNameDialog('folder-rename', '仮想フォルダ名を変更', contextNode.name, { nodeId: contextNode.id })" />
+          </template>
+          <VListItem v-else role="menuitem" title="エディターで開く" prepend-icon="mdi-file-edit-outline" @click="openTreeFile(contextNode)" />
+          <VListItem v-if="contextNode.kind === 'file'" role="menuitem" title="参照先を再指定" prepend-icon="mdi-link-variant" @click="requestRelink" />
+          <VDivider class="my-1" />
+          <VListItem role="menuitem" title="登録を解除" prepend-icon="mdi-delete-outline" @click="requestNodeRemove" />
+        </template>
       </VList>
     </VMenu>
 

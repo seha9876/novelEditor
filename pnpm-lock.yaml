@@ -38,6 +38,9 @@ importers:
       '@tauri-apps/plugin-store':
         specifier: ^2.0.0
         version: 2.4.5
+      '@types/google-apps-script':
+        specifier: ^2.0.13
+        version: 2.0.13
       vue:
         specifier: ^3.0.0
         version: 3.5.43(typescript@5.9.3)
@@ -567,6 +570,9 @@ packages:
 
   '@types/estree@1.0.9':
     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
+
+  '@types/google-apps-script@2.0.13':
+    resolution: {integrity: sha512-prNQIdxdoZu0oSzu1MpiSPblBnN9Gvs3Kbi5g3LNdjnmTwwvneVPAM/mQNDA+/CPMQOrfQRfN43ssS/O8vMGZg==}
 
   '@types/json-schema@7.0.15':
     resolution: {integrity: sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA==}
@@ -1595,6 +1601,8 @@ snapshots:
   '@types/esrecurse@4.3.1': {}
 
   '@types/estree@1.0.9': {}
+
+  '@types/google-apps-script@2.0.13': {}
 
   '@types/json-schema@7.0.15': {}
 

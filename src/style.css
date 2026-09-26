@@ -35,7 +35,7 @@ html, body, #app { width: 100%; height: 100%; margin: 0; }
 .toolbar-typography-number { width: var(--toolbar-number-width, 126px); display: flex; align-items: center; gap: 0; }
 .toolbar-typography-number-field { min-width: 0; flex: 1 1 auto; }
 .toolbar-typography-number-menu.v-btn.v-btn--icon { width: var(--toolbar-number-menu-width, 30px); min-width: var(--toolbar-number-menu-width, 30px); height: var(--toolbar-button-height, 28px); --v-btn-height: var(--toolbar-button-height, 28px); }
-.toolbar-typography-font.v-input--density-compact .v-field, .toolbar-typography-number.v-input--density-compact .v-field { --v-input-control-height: var(--toolbar-control-height, 36px); min-height: var(--toolbar-control-height, 36px); height: var(--toolbar-control-height, 36px); }
+.toolbar-typography-font.v-input--density-compact .v-field, .toolbar-typography-number-field.v-input--density-compact .v-field { --v-input-control-height: var(--toolbar-control-height, 36px); min-height: var(--toolbar-control-height, 36px); height: var(--toolbar-control-height, 36px); }
 .toolbar-typography-font .v-field__input, .toolbar-typography-number .v-field__input { min-height: var(--toolbar-control-height, 36px); padding-block: 5px; font-size: var(--toolbar-input-font-size, 0.8rem); }
 .toolbar-typography-font .v-label, .toolbar-typography-number .v-label { font-size: var(--toolbar-label-font-size, 0.75rem); }
 .toolbar-font-size-adjust { height: var(--toolbar-control-height, 36px); display: flex; flex: none; align-items: center; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 4px; }

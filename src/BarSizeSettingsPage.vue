@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import SettingExpansionSection from './SettingExpansionSection.vue'
-import { interfaceBarSizePresets, type InterfaceBarSizes, type InterfaceSize } from './appPreferences'
+import { interfaceBarSizePresets, type InterfaceBarSizes, type InterfaceSize } from './appPreferenceSchema'
 import type { SettingsSectionDefinition, SettingsSectionId } from './settingsDefinitions'
 
 defineProps<{

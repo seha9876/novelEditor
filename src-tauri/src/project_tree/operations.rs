@@ -1,300 +1,20 @@
-//! SQLite 永続化と Tauri コマンドを通じてプロジェクトツリーを管理する。
+//! プロジェクトツリーの検証、順位付け、トランザクション操作を担当する。
 
-use std::{
-    path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard},
-};
+use std::path::{Path, PathBuf};
 
-use rusqlite::{
-    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
-};
-use serde::Serialize;
-use tauri::{State, Window};
+use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
+use tauri::Window;
 use tauri_plugin_fs::FsExt;
 
 use crate::project_order::{order_between, reindexed_order_at, PositionError};
 
-/// 起動時の DB 障害をアプリ全体の起動失敗にせず、ツリー操作だけで報告する状態。
-pub struct ProjectTreeState {
-    connection: Mutex<Option<Connection>>,
-    initialization_error: Mutex<Option<String>>,
-}
-
-impl ProjectTreeState {
-    /// 指定された保存先の DB を開き、必要なテーブルを準備する。
-    pub fn initialize(database_path: Result<PathBuf, String>) -> Self {
-        let initialized = database_path.and_then(initialize_database);
-        match initialized {
-            Ok(connection) => Self {
-                connection: Mutex::new(Some(connection)),
-                initialization_error: Mutex::new(None),
-            },
-            Err(error) => Self {
-                connection: Mutex::new(None),
-                initialization_error: Mutex::new(Some(error)),
-            },
-        }
-    }
-
-    /// 保存先の復旧後に DB 接続を再初期化する。
-    pub fn reinitialize(&self, database_path: Result<PathBuf, String>) -> Result<(), String> {
-        let initialized = database_path.and_then(initialize_database);
-        match initialized {
-            Ok(connection) => {
-                *self
-                    .connection
-                    .lock()
-                    .map_err(|_| "プロジェクトツリー DB のロックに失敗しました".to_string())? =
-                    Some(connection);
-                *self
-                    .initialization_error
-                    .lock()
-                    .map_err(|_| "プロジェクトツリー DB の状態確認に失敗しました".to_string())? =
-                    None;
-                Ok(())
-            }
-            Err(error) => {
-                *self
-                    .connection
-                    .lock()
-                    .map_err(|_| "プロジェクトツリー DB のロックに失敗しました".to_string())? =
-                    None;
-                *self
-                    .initialization_error
-                    .lock()
-                    .map_err(|_| "プロジェクトツリー DB の状態確認に失敗しました".to_string())? =
-                    Some(error.clone());
-                Err(error)
-            }
-        }
-    }
-
-    /// 起動時 DB 初期化が失敗している場合に、その理由を保存先状態へ伝える。
-    pub fn initialization_error(&self) -> Result<Option<String>, String> {
-        self.initialization_error
-            .lock()
-            .map(|error| error.clone())
-            .map_err(|_| "プロジェクトツリー DB の状態確認に失敗しました".to_string())
-    }
-}
-
-/// クライアントに返すプロジェクト情報。
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectInfo {
-    id: i64,
-    name: String,
-}
-
-/// クライアントに返すツリーノード情報。
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectNodeInfo {
-    id: i64,
-    project_id: i64,
-    parent_id: Option<i64>,
-    kind: String,
-    name: String,
-    path: Option<String>,
-}
-
-/// サイドバーが必要とする永続化済みツリー状態。
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectTreeSnapshot {
-    projects: Vec<ProjectInfo>,
-    nodes: Vec<ProjectNodeInfo>,
-    active_project_id: Option<i64>,
-}
-
-/// 保存先移行前に新規 DB のスキーマを準備する。
-pub(crate) fn prepare_new_database_file(database_path: &Path) -> Result<(), String> {
-    let parent = database_path
-        .parent()
-        .ok_or_else(|| "プロジェクトツリー DB の保存先が不正です".to_string())?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("プロジェクトツリー保存先を作成できません: {error}"))?;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(database_path)
-        .map_err(|error| format!("新しいプロジェクトツリー DB を作成できません: {error}"))?;
-
-    let connection = Connection::open_with_flags(
-        database_path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-    )
-    .map_err(|error| format!("新しいプロジェクトツリー DB を作成できません: {error}"))?;
-    create_schema(&connection)
-        .map_err(|error| format!("新しいプロジェクトツリー DB を初期化できません: {error}"))?;
-    drop(connection);
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(database_path)
-        .and_then(|file| file.sync_all())
-        .map_err(|error| format!("新しいプロジェクトツリー DB を同期できません: {error}"))?;
-    Ok(())
-}
-
-/// 既存 DB の整合性とアプリが必要とする列を読み取り専用で検証する。
-pub(crate) fn validate_database_file(database_path: &Path) -> Result<(), String> {
-    let connection = Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| {
-        format!("プロジェクトツリー DB を読み取り専用で開けません: {error}")
-    })?;
-    let integrity: String = connection
-        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .map_err(|error| format!("プロジェクトツリー DB の整合性を確認できません: {error}"))?;
-    if integrity != "ok" {
-        return Err(format!(
-            "プロジェクトツリー DB の整合性検査に失敗しました: {integrity}"
-        ));
-    }
-    validate_project_tree_schema(&connection)
-}
-
-/// 新規移行の再開に使える、データのない project-tree DB か確認する。
-pub(crate) fn is_empty_database_file(database_path: &Path) -> Result<bool, String> {
-    let connection = Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| format!("移行先 DB を読み取り専用で開けません: {error}"))?;
-    let integrity: String = connection
-        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .map_err(|error| format!("移行先 DB の整合性を確認できません: {error}"))?;
-    if integrity != "ok" || validate_project_tree_schema(&connection).is_err() {
-        return Ok(false);
-    }
-
-    let project_count: i64 = connection
-        .query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))
-        .map_err(|error| format!("移行先 DB のプロジェクトを確認できません: {error}"))?;
-    let node_count: i64 = connection
-        .query_row("SELECT COUNT(*) FROM project_nodes", [], |row| row.get(0))
-        .map_err(|error| format!("移行先 DB のノードを確認できません: {error}"))?;
-    let state_count: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM project_tree_state
-             WHERE singleton = 1 AND active_project_id IS NULL",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("移行先 DB の選択状態を確認できません: {error}"))?;
-    Ok(project_count == 0 && node_count == 0 && state_count == 1)
-}
-
-/// project-tree が操作するテーブルと列がそろっているか読み取り専用で調べる。
-fn validate_project_tree_schema(connection: &Connection) -> Result<(), String> {
-    for (table, required_columns) in [
-        ("projects", &["id", "name"][..]),
-        (
-            "project_nodes",
-            &[
-                "id",
-                "project_id",
-                "parent_id",
-                "kind",
-                "name",
-                "path",
-                "sort_order",
-            ][..],
-        ),
-        (
-            "project_tree_state",
-            &["singleton", "active_project_id"][..],
-        ),
-    ] {
-        let mut statement = connection
-            .prepare(&format!("PRAGMA table_info(\"{table}\")"))
-            .map_err(|error| format!("DB スキーマを確認できません ({table}): {error}"))?;
-        let columns = statement
-            .query_map([], |row| row.get::<_, String>(1))
-            .map_err(|error| format!("DB スキーマを読み取れません ({table}): {error}"))?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|error| format!("DB スキーマを読み取れません ({table}): {error}"))?;
-        if required_columns
-            .iter()
-            .any(|required| !columns.iter().any(|column| column == required))
-        {
-            return Err(format!(
-                "プロジェクトツリー DB のスキーマが対応していません ({table})"
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// 起動時に既存 DB を新規作成せず開き、必要なスキーマを準備する。
-fn initialize_database(database_path: PathBuf) -> Result<Connection, String> {
-    let connection = Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-        .map_err(|error| format!("プロジェクトツリー DB を開けません: {error}"))?;
-    validate_project_tree_schema(&connection)?;
-    create_schema(&connection)
-        .map_err(|error| format!("プロジェクトツリー DB を初期化できません: {error}"))?;
-    Ok(connection)
-}
-
-/// DB スキーマと制約を作る。インメモリ DB からも同じ定義をテストできるよう分離する。
-fn create_schema(connection: &Connection) -> rusqlite::Result<()> {
-    connection.execute_batch(
-        "PRAGMA foreign_keys = ON;
-             CREATE TABLE IF NOT EXISTS projects (
-               id INTEGER PRIMARY KEY AUTOINCREMENT,
-               name TEXT NOT NULL CHECK (length(trim(name)) > 0)
-             );
-             CREATE TABLE IF NOT EXISTS project_nodes (
-               id INTEGER PRIMARY KEY AUTOINCREMENT,
-               project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-               parent_id INTEGER,
-               kind TEXT NOT NULL CHECK (kind IN ('folder', 'file')),
-               name TEXT NOT NULL CHECK (length(trim(name)) > 0),
-               path TEXT,
-               sort_order INTEGER NOT NULL,
-               UNIQUE (project_id, id),
-               FOREIGN KEY (project_id, parent_id)
-                 REFERENCES project_nodes(project_id, id) ON DELETE CASCADE,
-               CHECK (parent_id IS NULL OR parent_id != id),
-               CHECK (
-                 (kind = 'folder' AND path IS NULL) OR
-                 (kind = 'file' AND path IS NOT NULL)
-               )
-             );
-             CREATE INDEX IF NOT EXISTS project_nodes_order
-               ON project_nodes(project_id, parent_id, sort_order, id);
-             CREATE TABLE IF NOT EXISTS project_tree_state (
-               singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-               active_project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL
-             );
-             INSERT OR IGNORE INTO project_tree_state(singleton, active_project_id)
-               VALUES (1, NULL);",
-    )
-}
-
-/// プロジェクトツリー DB の接続をロックし、初期化失敗をコマンドエラーにする。
-fn lock_connection<'a>(
-    state: &'a ProjectTreeState,
-) -> Result<MutexGuard<'a, Option<Connection>>, String> {
-    let connection = state
-        .connection
-        .lock()
-        .map_err(|_| "プロジェクトツリー DB のロックに失敗しました".to_string())?;
-    if connection.is_none() {
-        return Err(state
-            .initialization_error
-            .lock()
-            .map_err(|_| "プロジェクトツリー DB の状態確認に失敗しました".to_string())?
-            .clone()
-            .unwrap_or_else(|| "プロジェクトツリー DB を利用できません".to_string()));
-    }
-    Ok(connection)
-}
-
-/// DB のエラーに操作対象を添えて表示する。
-fn database_error(context: &str, error: rusqlite::Error) -> String {
-    format!("{context}: {error}")
-}
+use super::{
+    database::{database_error, lock_connection},
+    ProjectInfo, ProjectNodeInfo, ProjectTreeSnapshot, ProjectTreeState,
+};
 
 /// 空白だけの名前を拒否し、保存時の前後空白を取り除く。
-fn normalized_name(name: String) -> Result<String, String> {
+pub(super) fn normalized_name(name: String) -> Result<String, String> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("名前を入力してください".to_string());
@@ -303,7 +23,7 @@ fn normalized_name(name: String) -> Result<String, String> {
 }
 
 /// 同じプロジェクトに属する仮想フォルダを親として検証する。
-fn validate_parent(
+pub(super) fn validate_parent(
     transaction: &Transaction<'_>,
     project_id: i64,
     parent_id: Option<i64>,
@@ -327,7 +47,7 @@ fn validate_parent(
 }
 
 /// 指定階層のノードを安定した順位順で取得する。
-fn ordered_siblings(
+pub(super) fn ordered_siblings(
     transaction: &Transaction<'_>,
     project_id: i64,
     parent_id: Option<i64>,
@@ -350,7 +70,7 @@ fn ordered_siblings(
 }
 
 /// ノード追加時に末尾へ順位を割り当て、必要ならその階層だけ再採番する。
-fn insert_ordered_node(
+pub(super) fn insert_ordered_node(
     transaction: &Transaction<'_>,
     project_id: i64,
     parent_id: Option<i64>,
@@ -382,7 +102,7 @@ fn insert_ordered_node(
 }
 
 /// 移動後の兄弟だけに、共通間隔で順位を振り直す。
-fn reindex_destination(
+pub(super) fn reindex_destination(
     transaction: &Transaction<'_>,
     project_id: i64,
     parent_id: Option<i64>,
@@ -407,7 +127,10 @@ fn reindex_destination(
 }
 
 /// ツリー登録用 TXT パスがアプリ管理の FS Scope に含まれ、実在する通常ファイルか検証する。
-fn validated_file_path(window: &Window, path: String) -> Result<(PathBuf, String), String> {
+pub(super) fn validated_file_path(
+    window: &Window,
+    path: String,
+) -> Result<(PathBuf, String), String> {
     let path = PathBuf::from(path);
     if !path.is_absolute() {
         return Err("絶対パスのファイルを指定してください".to_string());
@@ -437,7 +160,7 @@ fn validated_file_path(window: &Window, path: String) -> Result<(PathBuf, String
 }
 
 /// 接続済み DB のトランザクション内で、表示対象プロジェクトを補正する。
-fn active_project_id(transaction: &Transaction<'_>) -> Result<Option<i64>, String> {
+pub(super) fn active_project_id(transaction: &Transaction<'_>) -> Result<Option<i64>, String> {
     let active: Option<i64> = transaction
         .query_row(
             "SELECT active_project_id FROM project_tree_state WHERE singleton = 1",
@@ -466,232 +189,11 @@ fn active_project_id(transaction: &Transaction<'_>) -> Result<Option<i64>, Strin
     Ok(first)
 }
 
-/// 永続化した全ツリーと選択中プロジェクトを返す。
-#[tauri::command]
-pub fn project_tree_snapshot(
-    state: State<'_, ProjectTreeState>,
-) -> Result<ProjectTreeSnapshot, String> {
-    let mut guard = lock_connection(&state)?;
-    let connection = guard
-        .as_mut()
-        .expect("lock_connection checked initialization");
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| database_error("プロジェクトツリーを読めません", error))?;
-    let active_project_id = active_project_id(&transaction)?;
-
-    let mut projects_statement = transaction
-        .prepare("SELECT id, name FROM projects ORDER BY id ASC")
-        .map_err(|error| database_error("プロジェクトを取得できません", error))?;
-    let projects = projects_statement
-        .query_map([], |row| {
-            Ok(ProjectInfo {
-                id: row.get(0)?,
-                name: row.get(1)?,
-            })
-        })
-        .map_err(|error| database_error("プロジェクトを取得できません", error))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| database_error("プロジェクトを取得できません", error))?;
-    drop(projects_statement);
-
-    let mut nodes_statement = transaction
-        .prepare(
-            "SELECT id, project_id, parent_id, kind, name, path FROM project_nodes
-             ORDER BY project_id ASC, parent_id ASC, sort_order ASC, id ASC",
-        )
-        .map_err(|error| database_error("ツリーノードを取得できません", error))?;
-    let nodes = nodes_statement
-        .query_map([], |row| {
-            Ok(ProjectNodeInfo {
-                id: row.get(0)?,
-                project_id: row.get(1)?,
-                parent_id: row.get(2)?,
-                kind: row.get(3)?,
-                name: row.get(4)?,
-                path: row.get(5)?,
-            })
-        })
-        .map_err(|error| database_error("ツリーノードを取得できません", error))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| database_error("ツリーノードを取得できません", error))?;
-    drop(nodes_statement);
-    transaction
-        .commit()
-        .map_err(|error| database_error("プロジェクトツリーを確定できません", error))?;
-
-    Ok(ProjectTreeSnapshot {
-        projects,
-        nodes,
-        active_project_id,
-    })
-}
-
-/// 新しいプロジェクトを作成し、初回なら選択中にもする。
-#[tauri::command]
-pub fn project_create(state: State<'_, ProjectTreeState>, name: String) -> Result<(), String> {
-    let name = normalized_name(name)?;
-    let mut guard = lock_connection(&state)?;
-    let connection = guard
-        .as_mut()
-        .expect("lock_connection checked initialization");
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| database_error("プロジェクトを作成できません", error))?;
-    transaction
-        .execute("INSERT INTO projects(name) VALUES (?1)", params![name])
-        .map_err(|error| database_error("プロジェクトを作成できません", error))?;
-    let project_id = transaction.last_insert_rowid();
-    transaction
-        .execute(
-            "UPDATE project_tree_state SET active_project_id = COALESCE(active_project_id, ?1)
-             WHERE singleton = 1",
-            params![project_id],
-        )
-        .map_err(|error| database_error("選択中プロジェクトを保存できません", error))?;
-    transaction
-        .commit()
-        .map_err(|error| database_error("プロジェクトを確定できません", error))
-}
-
-/// プロジェクト名を変更する。
-#[tauri::command]
-pub fn project_rename(
-    state: State<'_, ProjectTreeState>,
-    project_id: i64,
-    name: String,
-) -> Result<(), String> {
-    let name = normalized_name(name)?;
-    let guard = lock_connection(&state)?;
-    let connection = guard
-        .as_ref()
-        .expect("lock_connection checked initialization");
-    let changed = connection
-        .execute(
-            "UPDATE projects SET name = ?1 WHERE id = ?2",
-            params![name, project_id],
-        )
-        .map_err(|error| database_error("プロジェクト名を変更できません", error))?;
-    if changed == 0 {
-        return Err("プロジェクトが見つかりません".to_string());
-    }
-    Ok(())
-}
-
-/// プロジェクトとツリー登録だけを削除し、選択先を同一トランザクションで補正する。
-#[tauri::command]
-pub fn project_delete(state: State<'_, ProjectTreeState>, project_id: i64) -> Result<(), String> {
-    let mut guard = lock_connection(&state)?;
-    let connection = guard
-        .as_mut()
-        .expect("lock_connection checked initialization");
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| database_error("プロジェクトを削除できません", error))?;
-    let active: Option<i64> = transaction
-        .query_row(
-            "SELECT active_project_id FROM project_tree_state WHERE singleton = 1",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| database_error("選択中プロジェクトを確認できません", error))?;
-    let deleted = transaction
-        .execute("DELETE FROM projects WHERE id = ?1", params![project_id])
-        .map_err(|error| database_error("プロジェクトを削除できません", error))?;
-    if deleted == 0 {
-        return Err("プロジェクトが見つかりません".to_string());
-    }
-    if active == Some(project_id) {
-        let fallback: Option<i64> = transaction
-            .query_row(
-                "SELECT id FROM projects ORDER BY id ASC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| database_error("代替プロジェクトを取得できません", error))?;
-        transaction
-            .execute(
-                "UPDATE project_tree_state SET active_project_id = ?1 WHERE singleton = 1",
-                params![fallback],
-            )
-            .map_err(|error| database_error("選択中プロジェクトを更新できません", error))?;
-    }
-    transaction
-        .commit()
-        .map_err(|error| database_error("プロジェクト削除を確定できません", error))
-}
-
-/// サイドバーで選択したプロジェクトを保存する。
-#[tauri::command]
-pub fn project_select(state: State<'_, ProjectTreeState>, project_id: i64) -> Result<(), String> {
-    let guard = lock_connection(&state)?;
-    let connection = guard
-        .as_ref()
-        .expect("lock_connection checked initialization");
-    let changed = connection
-        .execute(
-            "UPDATE project_tree_state SET active_project_id = ?1
-             WHERE singleton = 1 AND EXISTS (SELECT 1 FROM projects WHERE id = ?1)",
-            params![project_id],
-        )
-        .map_err(|error| database_error("プロジェクトを選択できません", error))?;
-    if changed == 0 {
-        return Err("プロジェクトが見つかりません".to_string());
-    }
-    Ok(())
-}
-
-/// 指定階層に仮想フォルダを追加する。
-#[tauri::command]
-pub fn project_folder_create(
-    state: State<'_, ProjectTreeState>,
-    project_id: i64,
-    parent_id: Option<i64>,
-    name: String,
-) -> Result<(), String> {
-    let name = normalized_name(name)?;
-    let mut guard = lock_connection(&state)?;
-    let connection = guard
-        .as_mut()
-        .expect("lock_connection checked initialization");
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| database_error("フォルダを作成できません", error))?;
-    validate_project(&transaction, project_id)?;
-    validate_parent(&transaction, project_id, parent_id)?;
-    insert_ordered_node(&transaction, project_id, parent_id, "folder", &name, None)?;
-    transaction
-        .commit()
-        .map_err(|error| database_error("フォルダ作成を確定できません", error))
-}
-
-/// 仮想フォルダの表示名を変更する。
-#[tauri::command]
-pub fn project_folder_rename(
-    state: State<'_, ProjectTreeState>,
-    node_id: i64,
-    name: String,
-) -> Result<(), String> {
-    let name = normalized_name(name)?;
-    let guard = lock_connection(&state)?;
-    let connection = guard
-        .as_ref()
-        .expect("lock_connection checked initialization");
-    let changed = connection
-        .execute(
-            "UPDATE project_nodes SET name = ?1 WHERE id = ?2 AND kind = 'folder'",
-            params![name, node_id],
-        )
-        .map_err(|error| database_error("フォルダ名を変更できません", error))?;
-    if changed == 0 {
-        return Err("フォルダが見つかりません".to_string());
-    }
-    Ok(())
-}
-
 /// プロジェクトが存在することを検証する。
-fn validate_project(transaction: &Transaction<'_>, project_id: i64) -> Result<(), String> {
+pub(super) fn validate_project(
+    transaction: &Transaction<'_>,
+    project_id: i64,
+) -> Result<(), String> {
     let exists: bool = transaction
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
@@ -706,67 +208,8 @@ fn validate_project(transaction: &Transaction<'_>, project_id: i64) -> Result<()
     }
 }
 
-/// ダイアログまたはOSからのドロップで受け取った TXT をツリーへ独立した参照として登録する。
-#[tauri::command]
-pub fn project_file_register(
-    state: State<'_, ProjectTreeState>,
-    window: Window,
-    project_id: i64,
-    parent_id: Option<i64>,
-    path: String,
-) -> Result<(), String> {
-    let (path, name) = validated_file_path(&window, path)?;
-    let path = path.to_string_lossy().into_owned();
-    let mut guard = lock_connection(&state)?;
-    let connection = guard
-        .as_mut()
-        .expect("lock_connection checked initialization");
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| database_error("ファイルを登録できません", error))?;
-    validate_project(&transaction, project_id)?;
-    validate_parent(&transaction, project_id, parent_id)?;
-    insert_ordered_node(
-        &transaction,
-        project_id,
-        parent_id,
-        "file",
-        &name,
-        Some(&path),
-    )?;
-    transaction
-        .commit()
-        .map_err(|error| database_error("ファイル登録を確定できません", error))
-}
-
-/// 既存のファイル参照を、ダイアログで選択した TXT に付け替える。
-#[tauri::command]
-pub fn project_file_relink(
-    state: State<'_, ProjectTreeState>,
-    window: Window,
-    node_id: i64,
-    path: String,
-) -> Result<(), String> {
-    let (path, name) = validated_file_path(&window, path)?;
-    let path = path.to_string_lossy().into_owned();
-    let guard = lock_connection(&state)?;
-    let connection = guard
-        .as_ref()
-        .expect("lock_connection checked initialization");
-    let changed = connection
-        .execute(
-            "UPDATE project_nodes SET path = ?1, name = ?2 WHERE id = ?3 AND kind = 'file'",
-            params![path, name, node_id],
-        )
-        .map_err(|error| database_error("参照先を変更できません", error))?;
-    if changed == 0 {
-        return Err("ファイルノードが見つかりません".to_string());
-    }
-    Ok(())
-}
-
 /// トランザクション内で、同一プロジェクトのノード登録だけを一括削除する。
-fn remove_project_nodes_in_transaction(
+pub(super) fn remove_project_nodes_in_transaction(
     transaction: &Transaction<'_>,
     node_ids: &[i64],
 ) -> Result<(), String> {
@@ -809,27 +252,8 @@ fn remove_project_nodes_in_transaction(
     Ok(())
 }
 
-/// ノード登録だけを一括削除し、実ファイルには触れない。
-#[tauri::command]
-pub fn project_nodes_remove(
-    state: State<'_, ProjectTreeState>,
-    node_ids: Vec<i64>,
-) -> Result<(), String> {
-    let mut guard = lock_connection(&state)?;
-    let connection = guard
-        .as_mut()
-        .expect("lock_connection checked initialization");
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| database_error("ツリーノード削除を開始できません", error))?;
-    remove_project_nodes_in_transaction(&transaction, &node_ids)?;
-    transaction
-        .commit()
-        .map_err(|error| database_error("ツリーノード削除を確定できません", error))
-}
-
 /// 移動するフォルダをその子孫配下へ入れないように検証する。
-fn validate_no_cycle(
+pub(super) fn validate_no_cycle(
     transaction: &Transaction<'_>,
     project_id: i64,
     node_id: i64,
@@ -854,7 +278,7 @@ fn validate_no_cycle(
 }
 
 /// トランザクション内でノードを移動し、再採番が発生したかを返す。
-fn move_node_in_transaction(
+pub(super) fn move_node_in_transaction(
     transaction: &Transaction<'_>,
     node_id: i64,
     target_id: Option<i64>,
@@ -962,15 +386,301 @@ fn move_node_in_transaction(
     }
 }
 
+/// 永続化した全ツリーと選択中プロジェクトを返す。
+pub(super) fn snapshot(state: &ProjectTreeState) -> Result<ProjectTreeSnapshot, String> {
+    let mut guard = lock_connection(state)?;
+    let connection = guard
+        .as_mut()
+        .expect("lock_connection checked initialization");
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| database_error("プロジェクトツリーを読めません", error))?;
+    let active_project_id = active_project_id(&transaction)?;
+
+    let mut projects_statement = transaction
+        .prepare("SELECT id, name FROM projects ORDER BY id ASC")
+        .map_err(|error| database_error("プロジェクトを取得できません", error))?;
+    let projects = projects_statement
+        .query_map([], |row| {
+            Ok(ProjectInfo {
+                id: row.get(0)?,
+                name: row.get(1)?,
+            })
+        })
+        .map_err(|error| database_error("プロジェクトを取得できません", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| database_error("プロジェクトを取得できません", error))?;
+    drop(projects_statement);
+
+    let mut nodes_statement = transaction
+        .prepare(
+            "SELECT id, project_id, parent_id, kind, name, path FROM project_nodes
+             ORDER BY project_id ASC, parent_id ASC, sort_order ASC, id ASC",
+        )
+        .map_err(|error| database_error("ツリーノードを取得できません", error))?;
+    let nodes = nodes_statement
+        .query_map([], |row| {
+            Ok(ProjectNodeInfo {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                parent_id: row.get(2)?,
+                kind: row.get(3)?,
+                name: row.get(4)?,
+                path: row.get(5)?,
+            })
+        })
+        .map_err(|error| database_error("ツリーノードを取得できません", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| database_error("ツリーノードを取得できません", error))?;
+    drop(nodes_statement);
+    transaction
+        .commit()
+        .map_err(|error| database_error("プロジェクトツリーを確定できません", error))?;
+
+    Ok(ProjectTreeSnapshot {
+        projects,
+        nodes,
+        active_project_id,
+    })
+}
+
+/// 新しいプロジェクトを作成し、初回なら選択中にもする。
+pub(super) fn create_project(state: &ProjectTreeState, name: String) -> Result<(), String> {
+    let name = normalized_name(name)?;
+    let mut guard = lock_connection(state)?;
+    let connection = guard
+        .as_mut()
+        .expect("lock_connection checked initialization");
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| database_error("プロジェクトを作成できません", error))?;
+    transaction
+        .execute("INSERT INTO projects(name) VALUES (?1)", params![name])
+        .map_err(|error| database_error("プロジェクトを作成できません", error))?;
+    let project_id = transaction.last_insert_rowid();
+    transaction
+        .execute(
+            "UPDATE project_tree_state SET active_project_id = COALESCE(active_project_id, ?1)
+             WHERE singleton = 1",
+            params![project_id],
+        )
+        .map_err(|error| database_error("選択中プロジェクトを保存できません", error))?;
+    transaction
+        .commit()
+        .map_err(|error| database_error("プロジェクトを確定できません", error))
+}
+
+/// プロジェクト名を変更する。
+pub(super) fn rename_project(
+    state: &ProjectTreeState,
+    project_id: i64,
+    name: String,
+) -> Result<(), String> {
+    let name = normalized_name(name)?;
+    let guard = lock_connection(state)?;
+    let connection = guard
+        .as_ref()
+        .expect("lock_connection checked initialization");
+    let changed = connection
+        .execute(
+            "UPDATE projects SET name = ?1 WHERE id = ?2",
+            params![name, project_id],
+        )
+        .map_err(|error| database_error("プロジェクト名を変更できません", error))?;
+    if changed == 0 {
+        return Err("プロジェクトが見つかりません".to_string());
+    }
+    Ok(())
+}
+
+/// プロジェクトとツリー登録だけを削除し、選択先を同一トランザクションで補正する。
+pub(super) fn delete_project(state: &ProjectTreeState, project_id: i64) -> Result<(), String> {
+    let mut guard = lock_connection(state)?;
+    let connection = guard
+        .as_mut()
+        .expect("lock_connection checked initialization");
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| database_error("プロジェクトを削除できません", error))?;
+    let active: Option<i64> = transaction
+        .query_row(
+            "SELECT active_project_id FROM project_tree_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| database_error("選択中プロジェクトを確認できません", error))?;
+    let deleted = transaction
+        .execute("DELETE FROM projects WHERE id = ?1", params![project_id])
+        .map_err(|error| database_error("プロジェクトを削除できません", error))?;
+    if deleted == 0 {
+        return Err("プロジェクトが見つかりません".to_string());
+    }
+    if active == Some(project_id) {
+        let fallback: Option<i64> = transaction
+            .query_row(
+                "SELECT id FROM projects ORDER BY id ASC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| database_error("代替プロジェクトを取得できません", error))?;
+        transaction
+            .execute(
+                "UPDATE project_tree_state SET active_project_id = ?1 WHERE singleton = 1",
+                params![fallback],
+            )
+            .map_err(|error| database_error("選択中プロジェクトを更新できません", error))?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| database_error("プロジェクト削除を確定できません", error))
+}
+
+/// サイドバーで選択したプロジェクトを保存する。
+pub(super) fn select_project(state: &ProjectTreeState, project_id: i64) -> Result<(), String> {
+    let guard = lock_connection(state)?;
+    let connection = guard
+        .as_ref()
+        .expect("lock_connection checked initialization");
+    let changed = connection
+        .execute(
+            "UPDATE project_tree_state SET active_project_id = ?1
+             WHERE singleton = 1 AND EXISTS (SELECT 1 FROM projects WHERE id = ?1)",
+            params![project_id],
+        )
+        .map_err(|error| database_error("プロジェクトを選択できません", error))?;
+    if changed == 0 {
+        return Err("プロジェクトが見つかりません".to_string());
+    }
+    Ok(())
+}
+
+/// 指定階層に仮想フォルダを追加する。
+pub(super) fn create_folder(
+    state: &ProjectTreeState,
+    project_id: i64,
+    parent_id: Option<i64>,
+    name: String,
+) -> Result<(), String> {
+    let name = normalized_name(name)?;
+    let mut guard = lock_connection(state)?;
+    let connection = guard
+        .as_mut()
+        .expect("lock_connection checked initialization");
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| database_error("フォルダを作成できません", error))?;
+    validate_project(&transaction, project_id)?;
+    validate_parent(&transaction, project_id, parent_id)?;
+    insert_ordered_node(&transaction, project_id, parent_id, "folder", &name, None)?;
+    transaction
+        .commit()
+        .map_err(|error| database_error("フォルダ作成を確定できません", error))
+}
+
+/// 仮想フォルダの表示名を変更する。
+pub(super) fn rename_folder(
+    state: &ProjectTreeState,
+    node_id: i64,
+    name: String,
+) -> Result<(), String> {
+    let name = normalized_name(name)?;
+    let guard = lock_connection(state)?;
+    let connection = guard
+        .as_ref()
+        .expect("lock_connection checked initialization");
+    let changed = connection
+        .execute(
+            "UPDATE project_nodes SET name = ?1 WHERE id = ?2 AND kind = 'folder'",
+            params![name, node_id],
+        )
+        .map_err(|error| database_error("フォルダ名を変更できません", error))?;
+    if changed == 0 {
+        return Err("フォルダが見つかりません".to_string());
+    }
+    Ok(())
+}
+
+/// ダイアログまたはOSからのドロップで受け取った TXT をツリーへ独立した参照として登録する。
+pub(super) fn register_file(
+    state: &ProjectTreeState,
+    window: Window,
+    project_id: i64,
+    parent_id: Option<i64>,
+    path: String,
+) -> Result<(), String> {
+    let (path, name) = validated_file_path(&window, path)?;
+    let path = path.to_string_lossy().into_owned();
+    let mut guard = lock_connection(state)?;
+    let connection = guard
+        .as_mut()
+        .expect("lock_connection checked initialization");
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| database_error("ファイルを登録できません", error))?;
+    validate_project(&transaction, project_id)?;
+    validate_parent(&transaction, project_id, parent_id)?;
+    insert_ordered_node(
+        &transaction,
+        project_id,
+        parent_id,
+        "file",
+        &name,
+        Some(&path),
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| database_error("ファイル登録を確定できません", error))
+}
+
+/// 既存のファイル参照を、ダイアログで選択した TXT に付け替える。
+pub(super) fn relink_file(
+    state: &ProjectTreeState,
+    window: Window,
+    node_id: i64,
+    path: String,
+) -> Result<(), String> {
+    let (path, name) = validated_file_path(&window, path)?;
+    let path = path.to_string_lossy().into_owned();
+    let guard = lock_connection(state)?;
+    let connection = guard
+        .as_ref()
+        .expect("lock_connection checked initialization");
+    let changed = connection
+        .execute(
+            "UPDATE project_nodes SET path = ?1, name = ?2 WHERE id = ?3 AND kind = 'file'",
+            params![path, name, node_id],
+        )
+        .map_err(|error| database_error("参照先を変更できません", error))?;
+    if changed == 0 {
+        return Err("ファイルノードが見つかりません".to_string());
+    }
+    Ok(())
+}
+
+/// ノード登録だけを一括削除し、実ファイルには触れない。
+pub(super) fn remove_nodes(state: &ProjectTreeState, node_ids: Vec<i64>) -> Result<(), String> {
+    let mut guard = lock_connection(state)?;
+    let connection = guard
+        .as_mut()
+        .expect("lock_connection checked initialization");
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| database_error("ツリーノード削除を開始できません", error))?;
+    remove_project_nodes_in_transaction(&transaction, &node_ids)?;
+    transaction
+        .commit()
+        .map_err(|error| database_error("ツリーノード削除を確定できません", error))
+}
+
 /// ノードを同一プロジェクト内で並べ替え、必要な場合だけ移動先兄弟を再採番する。
-#[tauri::command]
-pub fn project_node_move(
-    state: State<'_, ProjectTreeState>,
+pub(super) fn move_node(
+    state: &ProjectTreeState,
     node_id: i64,
     target_id: Option<i64>,
     placement: String,
 ) -> Result<(), String> {
-    let mut guard = lock_connection(&state)?;
+    let mut guard = lock_connection(state)?;
     let connection = guard
         .as_mut()
         .expect("lock_connection checked initialization");
@@ -984,13 +694,12 @@ pub fn project_node_move(
 }
 
 /// 保存済みノードの参照先を検証し、アプリ管理の FS Scope へ追加する。
-#[tauri::command]
-pub fn project_file_authorize(
-    state: State<'_, ProjectTreeState>,
+pub(super) fn authorize_file(
+    state: &ProjectTreeState,
     window: Window,
     node_id: i64,
 ) -> Result<String, String> {
-    let guard = lock_connection(&state)?;
+    let guard = lock_connection(state)?;
     let connection = guard
         .as_ref()
         .expect("lock_connection checked initialization");
@@ -1020,74 +729,12 @@ pub fn project_file_authorize(
 #[cfg(test)]
 mod tests {
     use rusqlite::{params, Connection, TransactionBehavior};
-    use std::{
-        fs,
-        sync::atomic::{AtomicU64, Ordering},
-    };
 
     use super::{
-        create_schema, insert_ordered_node, move_node_in_transaction, ordered_siblings,
-        remove_project_nodes_in_transaction, validate_no_cycle, ProjectTreeState,
+        insert_ordered_node, move_node_in_transaction, ordered_siblings,
+        remove_project_nodes_in_transaction, validate_no_cycle,
     };
     use crate::project_order::ORDER_GAP;
-
-    static DATABASE_TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-    /// 一時的なテスト DB 保存先を用意する。
-    fn temporary_database_path() -> (std::path::PathBuf, std::path::PathBuf) {
-        let sequence = DATABASE_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let directory = std::env::temp_dir().join(format!(
-            "novel-editor-project-tree-test-{}-{sequence}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&directory).unwrap();
-        (directory.join("project-tree.sqlite3"), directory)
-    }
-
-    /// 新規作成を許可しない通常接続は、消えた DB を空 DB として再生成しない。
-    #[test]
-    fn initialization_does_not_create_a_missing_database() {
-        let (database_path, test_directory) = temporary_database_path();
-
-        let state = ProjectTreeState::initialize(Ok(database_path.clone()));
-
-        assert!(state.initialization_error().unwrap().is_some());
-        assert!(!database_path.exists());
-        fs::remove_dir_all(test_directory).unwrap();
-    }
-
-    /// 未対応の SQLite を起動初期化でアプリ DB へ書き換えない。
-    #[test]
-    fn initialization_rejects_unrelated_sqlite_schema_without_modifying_it() {
-        let (database_path, test_directory) = temporary_database_path();
-        Connection::open(&database_path)
-            .unwrap()
-            .execute_batch("CREATE TABLE unrelated(value TEXT);")
-            .unwrap();
-
-        let state = ProjectTreeState::initialize(Ok(database_path.clone()));
-
-        assert!(state.initialization_error().unwrap().is_some());
-        let connection = Connection::open(&database_path).unwrap();
-        let unrelated_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'unrelated'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let project_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'projects'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(unrelated_count, 1);
-        assert_eq!(project_count, 0);
-        drop(connection);
-        fs::remove_dir_all(test_directory).unwrap();
-    }
 
     /// 本番と同じ制約を持つインメモリ DB を作る。
     fn memory_database() -> Connection {
@@ -1095,7 +742,7 @@ mod tests {
         connection
             .execute_batch("PRAGMA foreign_keys = ON;")
             .unwrap();
-        create_schema(&connection).unwrap();
+        super::super::database::create_schema(&connection).unwrap();
         connection
     }
 

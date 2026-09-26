@@ -1,5 +1,5 @@
 import type { EditorSettings } from './editorSettings'
-import type { InterfaceBarSizes, ToolbarItem, ToolbarPreferences } from './appPreferences'
+import type { InterfaceBarSizes, ToolbarItem, ToolbarPreferences } from './appPreferenceSchema'
 import type { SettingsViewId } from './settingsDefinitions'
 
 /** 設定ウィンドウへ配信する現在値とUndo／Redoの状態。 */

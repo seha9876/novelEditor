@@ -1,24 +1,32 @@
 //! アプリ設定、プロジェクト DB、復元データの保存先を管理する。
 
+mod migration;
+mod pointer;
+mod validation;
+
 use std::{
     collections::BTreeMap,
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    fs::{self, File},
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex, MutexGuard,
-    },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{Mutex, MutexGuard},
 };
 
-use rusqlite::{backup::Backup, types::Value, Connection, OpenFlags};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use serde::Serialize;
 use tauri::{State, Window};
 use tauri_plugin_fs::FsExt;
 
 use crate::project_tree::ProjectTreeState;
+
+use migration::{
+    ensure_project_tree_database, fingerprint_data_files, fingerprint_file, migrate_data_files,
+};
+use pointer::{
+    acquire_process_lock, display_path, pointer_version, process_lock_path, read_pointer,
+    same_existing_path, write_pointer_atomic, StoragePointer,
+};
+use validation::{
+    canonical_directory, validate_existing_data_directory, verify_writable_directory,
+};
 
 const POINTER_FILE: &str = "storage-location.json";
 const APP_DATA_DIRECTORY: &str = "novelEditor-data";
@@ -26,8 +34,6 @@ const PREFERENCES_FILE: &str = "preferences.json";
 const PROJECT_TREE_FILE: &str = "project-tree.sqlite3";
 const RECOVERY_FILE: &str = "recovery.json";
 const DATA_FILES: [&str; 3] = [PREFERENCES_FILE, PROJECT_TREE_FILE, RECOVERY_FILE];
-
-static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// 画面が保存先設定と復旧状態を表示するための情報。
 #[derive(Clone, Debug, Serialize)]
@@ -38,37 +44,6 @@ pub struct StorageStatus {
     pending_directory: Option<String>,
     blocked_reason: Option<String>,
     cleanup_pending: bool,
-}
-
-/// AppData 内に置く保存先ポインタ。
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct StoragePointer {
-    #[serde(default = "pointer_version")]
-    version: u32,
-    #[serde(default)]
-    active_directory: Option<PathBuf>,
-    #[serde(default)]
-    pending_directory: Option<PathBuf>,
-    #[serde(default)]
-    pending_relink_existing: bool,
-    #[serde(default)]
-    cleanup_directory: Option<PathBuf>,
-    #[serde(default)]
-    cleanup_fingerprints: BTreeMap<String, String>,
-}
-
-impl Default for StoragePointer {
-    fn default() -> Self {
-        Self {
-            version: pointer_version(),
-            active_directory: None,
-            pending_directory: None,
-            pending_relink_existing: false,
-            cleanup_directory: None,
-            cleanup_fingerprints: BTreeMap::new(),
-        }
-    }
 }
 
 /// 起動時に読み込んだ保存先設定と、現在の起動可否を保持する。
@@ -607,645 +582,23 @@ fn initialize_database_connection(
     storage.status()
 }
 
-/// AppData ポインタを読み込む。不在は初期状態として扱う。
-fn read_pointer(pointer_file: &Path) -> Result<StoragePointer, String> {
-    let bytes = match fs::read(pointer_file) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(StoragePointer::default());
-        }
-        Err(error) => return Err(format!("保存先ポインタを読み込めません: {error}")),
-    };
-    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
-        format!(
-            "保存先ポインタを解析できません ({}): {error}",
-            pointer_file.display()
-        )
-    })?;
-    let fields = value
-        .as_object()
-        .ok_or_else(|| format!("保存先ポインタの形式が不正です: {}", pointer_file.display()))?;
-    for field in [
-        "version",
-        "activeDirectory",
-        "pendingDirectory",
-        "pendingRelinkExisting",
-        "cleanupDirectory",
-        "cleanupFingerprints",
-    ] {
-        if !fields.contains_key(field) {
-            return Err(format!(
-                "保存先ポインタの項目が不足しています ({field}): {}",
-                pointer_file.display()
-            ));
-        }
-    }
-    let pointer: StoragePointer = serde_json::from_value(value).map_err(|error| {
-        format!(
-            "保存先ポインタを解析できません ({}): {error}",
-            pointer_file.display()
-        )
-    })?;
-    if pointer.version != pointer_version() {
-        return Err(format!(
-            "未対応の保存先ポインタ形式です: version {}",
-            pointer.version
-        ));
-    }
-    if pointer.pending_relink_existing && pointer.pending_directory.is_none() {
-        return Err(format!(
-            "保存先ポインタの予約状態が不正です: {}",
-            pointer_file.display()
-        ));
-    }
-    if pointer.cleanup_directory.is_some() != !pointer.cleanup_fingerprints.is_empty() {
-        return Err(format!(
-            "保存先ポインタの片付け状態が不正です: {}",
-            pointer_file.display()
-        ));
-    }
-    for directory in [
-        pointer.active_directory.as_ref(),
-        pointer.pending_directory.as_ref(),
-        pointer.cleanup_directory.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if !directory.is_absolute() {
-            return Err(format!(
-                "保存先ポインタに相対パスがあります: {}",
-                pointer_file.display()
-            ));
-        }
-    }
-    for (file_name, fingerprint) in &pointer.cleanup_fingerprints {
-        if !DATA_FILES.contains(&file_name.as_str())
-            || fingerprint.len() != 64
-            || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
-            return Err(format!(
-                "保存先ポインタの検証情報が不正です: {}",
-                pointer_file.display()
-            ));
-        }
-    }
-    Ok(pointer)
-}
-
-/// ポインタを一時ファイルへ書いてから置換し、途中書き込みを有効な設定として扱わない。
-fn write_pointer_atomic(pointer_file: &Path, pointer: &StoragePointer) -> Result<(), String> {
-    let parent = pointer_file
-        .parent()
-        .ok_or_else(|| "保存先ポインタの場所が不正です".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| format!("AppData を作成できません: {error}"))?;
-    let temporary_path = temporary_path(pointer_file, "pointer");
-    let bytes = serde_json::to_vec_pretty(pointer)
-        .map_err(|error| format!("保存先ポインタを作成できません: {error}"))?;
-    let write_result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_path)
-            .map_err(|error| format!("保存先ポインタの一時ファイルを作成できません: {error}"))?;
-        file.write_all(&bytes)
-            .map_err(|error| format!("保存先ポインタを書き込めません: {error}"))?;
-        file.sync_all()
-            .map_err(|error| format!("保存先ポインタを同期できません: {error}"))?;
-        fs::rename(&temporary_path, pointer_file)
-            .map_err(|error| format!("保存先ポインタを更新できません: {error}"))?;
-        Ok(())
-    })();
-    if write_result.is_err() {
-        let _ = fs::remove_file(&temporary_path);
-    }
-    write_result
-}
-
-/// AppData のファイルロックを保持し、二重起動による移行・片付けの競合を防ぐ。
-fn acquire_process_lock(lock_path: &Path) -> Result<File, String> {
-    let parent = lock_path
-        .parent()
-        .ok_or_else(|| "保存先ロックの場所が不正です".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| format!("AppData を作成できません: {error}"))?;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(lock_path)
-        .map_err(|error| format!("保存先ロックを開けません: {error}"))?;
-    file.try_lock().map_err(|error| {
-        format!(
-            "別のアプリインスタンスが保存データを使用中です。閉じてから再試行してください: {error}"
-        )
-    })?;
-    Ok(file)
-}
-
-/// source に存在する3ファイルだけを、既存ファイルを上書きせず target へ複製する。
-fn migrate_data_files(source_directory: &Path, target_directory: &Path) -> Result<(), String> {
-    if let Ok(metadata) = fs::symlink_metadata(source_directory) {
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(format!(
-                "移行元が通常のフォルダではありません: {}",
-                source_directory.display()
-            ));
-        }
-    }
-    match fs::symlink_metadata(target_directory) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => {
-            return Err(format!(
-                "移行先が通常のフォルダではありません: {}",
-                target_directory.display()
-            ));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(target_directory)
-                .map_err(|error| format!("移行先フォルダを作成できません: {error}"))?;
-        }
-        Err(error) => return Err(format!("移行先フォルダを確認できません: {error}")),
-    }
-
-    for file_name in DATA_FILES {
-        let source_path = source_directory.join(file_name);
-        let target_path = target_directory.join(file_name);
-        let source_metadata = match fs::symlink_metadata(&source_path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                match fs::symlink_metadata(&target_path) {
-                    Ok(_) => {
-                        if file_name == PROJECT_TREE_FILE
-                            && crate::project_tree::is_empty_database_file(&target_path)?
-                        {
-                            // 初回移行がポインタ確定前に中断した場合、空の新規 DB だけ再利用する。
-                            continue;
-                        }
-                        return Err(format!(
-                            "移行先に移行元にはない同名ファイルがあります。上書きせず停止しました: {}",
-                            target_path.display()
-                        ));
-                    }
-                    Err(target_error) if target_error.kind() == std::io::ErrorKind::NotFound => {
-                        continue;
-                    }
-                    Err(target_error) => {
-                        return Err(format!(
-                            "移行先ファイルを確認できません ({}): {target_error}",
-                            target_path.display()
-                        ));
-                    }
-                }
-            }
-            Err(error) => {
-                return Err(format!(
-                    "移行元を確認できません ({}): {error}",
-                    source_path.display()
-                ))
-            }
-        };
-        if !source_metadata.file_type().is_file() {
-            return Err(format!(
-                "移行元が通常ファイルではありません: {}",
-                source_path.display()
-            ));
-        }
-
-        match fs::symlink_metadata(&target_path) {
-            Ok(metadata) => {
-                if !metadata.file_type().is_file()
-                    || !data_files_match(file_name, &source_path, &target_path)?
-                {
-                    return Err(format!(
-                        "移行先に異なる同名ファイルがあります。上書きしません: {}",
-                        target_path.display()
-                    ));
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                copy_data_file(file_name, &source_path, &target_path)?;
-                if !data_files_match(file_name, &source_path, &target_path)? {
-                    let _ = fs::remove_file(&target_path);
-                    return Err(format!(
-                        "移行先の検証に失敗しました: {}",
-                        target_path.display()
-                    ));
-                }
-            }
-            Err(error) => {
-                return Err(format!(
-                    "移行先ファイルを確認できません ({}): {error}",
-                    target_path.display()
-                ))
-            }
-        }
-    }
-    Ok(())
-}
-
-/// JSON ファイルはバイト列、SQLite は DB 内容を比較して移行の再試行を判定する。
-fn data_files_match(file_name: &str, source: &Path, target: &Path) -> Result<bool, String> {
-    if file_name == PROJECT_TREE_FILE {
-        return sqlite_contents_match(source, target);
-    }
-    let source_bytes = fs::read(source)
-        .map_err(|error| format!("移行元を読み込めません ({}): {error}", source.display()))?;
-    let target_bytes = fs::read(target)
-        .map_err(|error| format!("移行先を読み込めません ({}): {error}", target.display()))?;
-    Ok(source_bytes == target_bytes)
-}
-
-/// SQLite Backup API で一時 DB に複製してから、移行先へ原子的に配置する。
-fn copy_data_file(file_name: &str, source: &Path, target: &Path) -> Result<(), String> {
-    let temporary_path = temporary_path(target, "migration");
-    let result = if file_name == PROJECT_TREE_FILE {
-        backup_database(source, &temporary_path)
-    } else {
-        copy_file_to_temporary(source, &temporary_path)
-    };
-    if let Err(error) = result {
-        let _ = fs::remove_file(&temporary_path);
-        return Err(error);
-    }
-
-    let install_result = install_temporary_file(&temporary_path, target);
-    if install_result.is_err() {
-        let _ = fs::remove_file(&temporary_path);
-    }
-    install_result
-}
-
-/// SQLite Backup API を使い、複製後に integrity_check を通す。
-fn backup_database(source: &Path, temporary_target: &Path) -> Result<(), String> {
-    let source_connection = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| format!("SQLite 移行元を開けません: {error}"))?;
-    let mut target_connection = Connection::open(temporary_target)
-        .map_err(|error| format!("SQLite 一時 DB を作成できません: {error}"))?;
-    {
-        let backup = Backup::new(&source_connection, &mut target_connection)
-            .map_err(|error| format!("SQLite バックアップを開始できません: {error}"))?;
-        backup
-            .run_to_completion(64, Duration::from_millis(5), None)
-            .map_err(|error| format!("SQLite をバックアップできません: {error}"))?;
-    }
-    let integrity: String = target_connection
-        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .map_err(|error| format!("SQLite 移行先を検証できません: {error}"))?;
-    if integrity != "ok" {
-        return Err(format!(
-            "SQLite 移行先の整合性検査に失敗しました: {integrity}"
-        ));
-    }
-    drop(target_connection);
-    drop(source_connection);
-    Ok(())
-}
-
-/// JSON ファイルを同じ移行先フォルダ内の一時ファイルへ同期して書き込む。
-fn copy_file_to_temporary(source: &Path, temporary_target: &Path) -> Result<(), String> {
-    let bytes = fs::read(source)
-        .map_err(|error| format!("移行元を読み込めません ({}): {error}", source.display()))?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(temporary_target)
-        .map_err(|error| format!("一時ファイルを作成できません: {error}"))?;
-    file.write_all(&bytes)
-        .map_err(|error| format!("一時ファイルへ書き込めません: {error}"))?;
-    file.sync_all()
-        .map_err(|error| format!("一時ファイルを同期できません: {error}"))
-}
-
-/// 移行先に既存ファイルがない場合だけ一時ファイルを確定する。
-fn install_temporary_file(temporary_path: &Path, target_path: &Path) -> Result<(), String> {
-    if target_path.exists() {
-        return Err(format!(
-            "移行先ファイルが既にあります: {}",
-            target_path.display()
-        ));
-    }
-    match fs::hard_link(temporary_path, target_path) {
-        Ok(()) => {
-            fs::remove_file(temporary_path)
-                .map_err(|error| format!("移行一時ファイルを片付けられません: {error}"))?;
-            Ok(())
-        }
-        Err(hard_link_error) => {
-            if target_path.exists() {
-                return Err(format!(
-                    "移行先ファイルが既にあります: {}",
-                    target_path.display()
-                ));
-            }
-            fs::rename(temporary_path, target_path).map_err(|rename_error| {
-                format!(
-                    "移行先へファイルを確定できません (hard link: {hard_link_error}; rename: {rename_error})"
-                )
-            })
-        }
-    }
-}
-
-/// SQLite のスキーマとテーブル内容が一致するか調べ、中断移行の同一 DB を判定する。
-fn sqlite_contents_match(source: &Path, target: &Path) -> Result<bool, String> {
-    let source_connection = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| format!("SQLite 移行元を開けません: {error}"))?;
-    let target_connection = Connection::open_with_flags(target, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| format!("SQLite 移行先を開けません: {error}"))?;
-    let source_integrity = integrity_check(&source_connection)?;
-    let target_integrity = integrity_check(&target_connection)?;
-    if source_integrity != "ok" || target_integrity != "ok" {
-        return Ok(false);
-    }
-    Ok(database_contents(&source_connection)? == database_contents(&target_connection)?)
-}
-
-/// SQLite の論理内容を、表定義・全行・autoincrement 状態の順に取得する。
-fn database_contents(connection: &Connection) -> Result<DatabaseContents, String> {
-    let mut object_statement = connection
-        .prepare(
-            "SELECT type, name, sql FROM sqlite_master
-             WHERE type IN ('table', 'index', 'trigger', 'view')
-               AND name NOT LIKE 'sqlite_%'
-             ORDER BY type, name",
-        )
-        .map_err(|error| format!("SQLite スキーマを読み込めません: {error}"))?;
-    let objects = object_statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        })
-        .map_err(|error| format!("SQLite スキーマを取得できません: {error}"))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|error| format!("SQLite スキーマを読み込めません: {error}"))?;
-
-    let mut tables = Vec::new();
-    for (kind, name, _) in &objects {
-        if kind != "table" {
-            continue;
-        }
-        let escaped_name = name.replace('"', "\"\"");
-        let mut statement = connection
-            .prepare(&format!("SELECT * FROM \"{escaped_name}\" ORDER BY rowid"))
-            .map_err(|error| format!("SQLite テーブルを読み込めません ({name}): {error}"))?;
-        let column_count = statement.column_count();
-        let rows = statement
-            .query_map([], |row| {
-                (0..column_count)
-                    .map(|index| row.get::<_, Value>(index))
-                    .collect::<rusqlite::Result<Vec<_>>>()
-            })
-            .map_err(|error| format!("SQLite テーブルを取得できません ({name}): {error}"))?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|error| format!("SQLite テーブルを読み込めません ({name}): {error}"))?;
-        tables.push((name.clone(), rows));
-    }
-
-    let sequence = match connection.prepare("SELECT name, seq FROM sqlite_sequence ORDER BY name") {
-        Ok(mut statement) => statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })
-            .map_err(|error| format!("SQLite ID 採番状態を取得できません: {error}"))?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|error| format!("SQLite ID 採番状態を読み込めません: {error}"))?,
-        Err(rusqlite::Error::SqliteFailure(error, _))
-            if error.code == rusqlite::ErrorCode::Unknown =>
-        {
-            Vec::new()
-        }
-        Err(error) => return Err(format!("SQLite ID 採番状態を確認できません: {error}")),
-    };
-
-    Ok(DatabaseContents {
-        objects,
-        tables,
-        sequence,
-    })
-}
-
-/// DB が読み取り可能で整合しているかを調べる。
-fn integrity_check(connection: &Connection) -> Result<String, String> {
-    connection
-        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .map_err(|error| format!("SQLite 整合性を検査できません: {error}"))
-}
-
-#[derive(Debug, PartialEq)]
-struct DatabaseContents {
-    objects: Vec<(String, String, Option<String>)>,
-    tables: Vec<(String, Vec<Vec<Value>>)>,
-    sequence: Vec<(String, i64)>,
-}
-
-/// 移行元の対象ファイルを SHA-256 で記録し、移行後に外部変更を検知する。
-fn fingerprint_data_files(directory: &Path) -> Result<BTreeMap<String, String>, String> {
-    let mut fingerprints = BTreeMap::new();
-    for file_name in DATA_FILES {
-        let file_path = directory.join(file_name);
-        match fs::symlink_metadata(&file_path) {
-            Ok(metadata) if metadata.file_type().is_file() => {
-                fingerprints.insert(file_name.to_string(), fingerprint_file(&file_path)?);
-            }
-            Ok(_) => {
-                return Err(format!(
-                    "保存データが通常ファイルではありません: {}",
-                    file_path.display()
-                ));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("保存データを確認できません: {error}")),
-        }
-    }
-    Ok(fingerprints)
-}
-
-/// SQLite が大きくても全体をメモリへ読み込まず fingerprint を計算する。
-fn fingerprint_file(path: &Path) -> Result<String, String> {
-    let mut file = fs::File::open(path)
-        .map_err(|error| format!("ファイルを検証用に開けません ({}): {error}", path.display()))?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("ファイルを検証できません ({}): {error}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", digest.finalize()))
-}
-
-/// 指定フォルダへ一時ファイルを作成・削除し、移行に必要な書込権限を確認する。
-fn verify_writable_directory(directory: &Path) -> Result<(), String> {
-    let probe_path = temporary_path(&directory.join("storage-write-probe"), "permission-check");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe_path)
-        .map_err(|error| format!("保存先へ書き込めません ({}): {error}", directory.display()))?;
-    let write_result = file
-        .write_all(b"storage write test")
-        .and_then(|()| file.sync_all());
-    drop(file);
-    let remove_result = fs::remove_file(&probe_path);
-    write_result.map_err(|error| {
-        format!(
-            "保存先への書込を検証できません ({}): {error}",
-            directory.display()
-        )
-    })?;
-    remove_result.map_err(|error| {
-        format!(
-            "保存先の検査ファイルを削除できません ({}): {error}",
-            probe_path.display()
-        )
-    })
-}
-
-/// フォルダ選択結果を既存の実ディレクトリに正規化する。
-fn canonical_directory(path: &str) -> Result<PathBuf, String> {
-    let path = Path::new(path);
-    let directory = fs::canonicalize(path)
-        .map_err(|error| format!("指定フォルダを確認できません ({}): {error}", path.display()))?;
-    if !directory.is_dir() {
-        return Err(format!(
-            "指定先がフォルダではありません: {}",
-            directory.display()
-        ));
-    }
-    Ok(directory)
-}
-
-/// 既存保存先として使うには、利用可能な既存プロジェクト DB が必要。
-fn validate_existing_data_directory(directory: &Path) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(directory).map_err(|error| {
-        format!(
-            "既存データフォルダを確認できません ({}): {error}",
-            directory.display()
-        )
-    })?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(format!(
-            "既存データ先が通常のフォルダではありません: {}",
-            directory.display()
-        ));
-    }
-    let database_path = directory.join(PROJECT_TREE_FILE);
-    let database_metadata = fs::symlink_metadata(&database_path).map_err(|error| {
-        format!(
-            "既存データフォルダにプロジェクト DB がありません ({}): {error}",
-            database_path.display()
-        )
-    })?;
-    if !database_metadata.file_type().is_file() {
-        return Err(format!(
-            "既存データフォルダのプロジェクト DB が通常ファイルではありません: {}",
-            database_path.display()
-        ));
-    }
-    crate::project_tree::validate_database_file(&database_path)
-}
-
-/// 保存先の初回起動では空 DB を原子的に準備し、再起動時も安全に再利用できるようにする。
-fn ensure_project_tree_database(database_path: &Path) -> Result<(), String> {
-    match fs::symlink_metadata(database_path) {
-        Ok(metadata) if metadata.file_type().is_file() => {
-            crate::project_tree::validate_database_file(database_path)
-        }
-        Ok(_) => Err(format!(
-            "プロジェクトツリー DB が通常ファイルではありません: {}",
-            database_path.display()
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let temporary_path = temporary_path(database_path, "new-database");
-            if let Err(error) = crate::project_tree::prepare_new_database_file(&temporary_path) {
-                let _ = fs::remove_file(&temporary_path);
-                return Err(error);
-            }
-            if let Err(error) = install_temporary_file(&temporary_path, database_path) {
-                let _ = fs::remove_file(&temporary_path);
-                if crate::project_tree::is_empty_database_file(database_path).unwrap_or(false) {
-                    return Ok(());
-                }
-                return Err(error);
-            }
-            crate::project_tree::validate_database_file(database_path)
-        }
-        Err(error) => Err(format!(
-            "プロジェクトツリー DB を確認できません ({}): {error}",
-            database_path.display()
-        )),
-    }
-}
-
-/// 既存パス同士は canonical path で比較し、作成前のパスはそのまま比較する。
-fn same_existing_path(left: &Path, right: &Path) -> bool {
-    match (fs::canonicalize(left), fs::canonicalize(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => left == right,
-    }
-}
-
-/// Data directory ごとに区別した OS 一時フォルダのプロセスロックパスを作る。
-fn process_lock_path(default_directory: &Path) -> PathBuf {
-    let digest = Sha256::digest(default_directory.to_string_lossy().as_bytes());
-    std::env::temp_dir().join(format!("novel-editor-storage-{:x}.lock", digest))
-}
-
-/// Windows の拡張長パス接頭辞を表示用文字列から取り除く。
-fn display_path(path: &Path) -> String {
-    let path = path.to_string_lossy();
-    #[cfg(windows)]
-    {
-        if let Some(unc_path) = path.strip_prefix(r"\\?\UNC\") {
-            return format!(r"\\{unc_path}");
-        }
-        if let Some(ordinary_path) = path.strip_prefix(r"\\?\") {
-            return ordinary_path.to_string();
-        }
-    }
-    path.into_owned()
-}
-
-/// 一時ファイル名の衝突を避ける。
-fn temporary_path(target: &Path, purpose: &str) -> PathBuf {
-    let sequence = TEMPORARY_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("storage");
-    target.with_file_name(format!(
-        ".{file_name}.{purpose}-{}-{timestamp}-{sequence}.tmp",
-        std::process::id(),
-    ))
-}
-
-fn pointer_version() -> u32 {
-    1
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use rusqlite::params;
-    use std::sync::atomic::{AtomicU64, Ordering};
+pub(super) mod test_support {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use super::process_lock_path;
 
     static TEST_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-    struct TestDirectory(PathBuf);
+    pub(super) struct TestDirectory(PathBuf);
 
     impl TestDirectory {
-        fn new() -> Self {
+        /// 他のテストと衝突しない一時保存先を作成する。
+        pub(super) fn new() -> Self {
             let sequence = TEST_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
                 "novel-editor-storage-test-{}-{sequence}",
@@ -1255,7 +608,8 @@ mod tests {
             Self(path)
         }
 
-        fn path(&self) -> &Path {
+        /// テスト用保存先のパスを返す。
+        pub(super) fn path(&self) -> &Path {
             &self.0
         }
     }
@@ -1267,83 +621,18 @@ mod tests {
         }
     }
 
-    /// DB の移行結果を検証するため、小さく識別可能なテーブルを作る。
-    fn create_test_database(path: &Path) {
-        let connection = Connection::open(path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE documents(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);
-                 CREATE INDEX documents_name ON documents(name);
-                 INSERT INTO documents(name) VALUES ('first'), ('second');",
-            )
-            .unwrap();
-        connection
-            .execute("DELETE FROM documents WHERE id = 2", [])
-            .unwrap();
-        connection
-            .execute("INSERT INTO documents(name) VALUES (?1)", params!["third"])
-            .unwrap();
-    }
-
     /// 保存先の再指定テスト用に空のアプリ DB を作成する。
-    fn create_project_tree_database(path: &Path) {
+    pub(super) fn create_project_tree_database(path: &Path) {
         crate::project_tree::prepare_new_database_file(path).unwrap();
     }
+}
 
-    /// 各データファイルが任意に欠けていても、存在する分だけを移行できる。
-    #[test]
-    fn migrates_each_of_eight_file_presence_combinations() {
-        for mask in 0_u8..8 {
-            let test_directory = TestDirectory::new();
-            let source = test_directory.path().join("source");
-            let target = test_directory.path().join("target");
-            fs::create_dir_all(&source).unwrap();
-
-            if mask & 0b001 != 0 {
-                fs::write(source.join(PREFERENCES_FILE), br#"{"prefs":1}"#).unwrap();
-            }
-            if mask & 0b010 != 0 {
-                create_test_database(&source.join(PROJECT_TREE_FILE));
-            }
-            if mask & 0b100 != 0 {
-                fs::write(source.join(RECOVERY_FILE), br#"{"snapshot":2}"#).unwrap();
-            }
-
-            migrate_data_files(&source, &target).unwrap();
-            for file_name in DATA_FILES {
-                assert_eq!(
-                    source.join(file_name).exists(),
-                    target.join(file_name).exists(),
-                    "presence mismatch for mask {mask} and {file_name}"
-                );
-                if file_name == PROJECT_TREE_FILE && source.join(file_name).exists() {
-                    assert!(sqlite_contents_match(
-                        &source.join(file_name),
-                        &target.join(file_name)
-                    )
-                    .unwrap());
-                } else if source.join(file_name).exists() {
-                    assert_eq!(
-                        fs::read(source.join(file_name)).unwrap(),
-                        fs::read(target.join(file_name)).unwrap()
-                    );
-                }
-            }
-        }
-    }
-
-    /// DB は通常接続を開く前に Backup API で複製され、論理内容が保たれる。
-    #[test]
-    fn sqlite_backup_preserves_database_contents() {
-        let test_directory = TestDirectory::new();
-        let source = test_directory.path().join(PROJECT_TREE_FILE);
-        let target = test_directory.path().join("copied.sqlite3");
-        create_test_database(&source);
-
-        backup_database(&source, &target).unwrap();
-
-        assert!(sqlite_contents_match(&source, &target).unwrap());
-    }
+#[cfg(test)]
+mod tests {
+    use super::test_support::{create_project_tree_database, TestDirectory};
+    use super::*;
+    use rusqlite::Connection;
+    use std::fs;
 
     /// コピー衝突は保留ポインタと移行元を残し、異なる移行先を上書きしない。
     #[test]
@@ -1383,25 +672,6 @@ mod tests {
         assert_eq!(
             fs::read(target_directory.join(PREFERENCES_FILE)).unwrap(),
             target_bytes
-        );
-    }
-
-    /// 移行元にない名前でも移行先に既存ファイルがあれば予約を失敗させる。
-    #[test]
-    fn migration_rejects_destination_file_without_source_counterpart() {
-        let test_directory = TestDirectory::new();
-        let source = test_directory.path().join("source");
-        let target = test_directory.path().join("target");
-        fs::create_dir_all(&source).unwrap();
-        fs::create_dir_all(&target).unwrap();
-        fs::write(target.join(RECOVERY_FILE), b"existing recovery").unwrap();
-
-        let error = migrate_data_files(&source, &target).unwrap_err();
-
-        assert!(error.contains("移行元にはない同名ファイル"));
-        assert_eq!(
-            fs::read(target.join(RECOVERY_FILE)).unwrap(),
-            b"existing recovery"
         );
     }
 
@@ -1503,24 +773,6 @@ mod tests {
             .unwrap()
             .active_directory
             .is_none());
-    }
-
-    /// 移行完了前にポインタを切り替えず、コピー済み同一 JSON を再試行に使える。
-    #[test]
-    fn identical_destination_file_is_safe_to_reuse_after_interruption() {
-        let test_directory = TestDirectory::new();
-        let source = test_directory.path().join("source");
-        let target = test_directory.path().join("target");
-        fs::create_dir_all(&source).unwrap();
-        fs::create_dir_all(&target).unwrap();
-        let bytes = br#"{"same":true}"#;
-        fs::write(source.join(PREFERENCES_FILE), bytes).unwrap();
-        fs::write(target.join(PREFERENCES_FILE), bytes).unwrap();
-
-        migrate_data_files(&source, &target).unwrap();
-
-        assert_eq!(fs::read(source.join(PREFERENCES_FILE)).unwrap(), bytes);
-        assert_eq!(fs::read(target.join(PREFERENCES_FILE)).unwrap(), bytes);
     }
 
     /// 元 DB がない初回移行でも、ポインタ確定前に新しい DB を準備する。
@@ -1675,64 +927,5 @@ mod tests {
         assert!(pointer.cleanup_fingerprints.is_empty());
         assert_eq!(pointer.active_directory, Some(active_directory));
         assert!(!state.abandon_cleanup().unwrap().cleanup_pending);
-    }
-
-    /// 同時起動は保存データ操作を拒み、先行プロセス終了後の再試行を許可する。
-    #[test]
-    fn process_lock_prevents_two_instances_from_using_storage() {
-        let test_directory = TestDirectory::new();
-        let default_directory = test_directory.path().join("default");
-        let first = StorageLocationState::new(default_directory.clone());
-        first.bootstrap().unwrap();
-        let second = StorageLocationState::new(default_directory);
-
-        assert!(second
-            .bootstrap()
-            .unwrap_err()
-            .contains("別のアプリインスタンス"));
-        drop(first);
-        assert!(second.bootstrap().is_ok());
-    }
-
-    /// 同じポインタの置換を繰り返してもファイルは常に解析可能な状態で残る。
-    #[test]
-    fn pointer_replacement_keeps_complete_json() {
-        let test_directory = TestDirectory::new();
-        let pointer_file = test_directory.path().join(POINTER_FILE);
-        for name in ["first", "second"] {
-            let active_directory = test_directory.path().join(name);
-            let pointer = StoragePointer {
-                version: pointer_version(),
-                active_directory: Some(active_directory.clone()),
-                pending_directory: None,
-                pending_relink_existing: false,
-                cleanup_directory: None,
-                cleanup_fingerprints: BTreeMap::new(),
-            };
-            write_pointer_atomic(&pointer_file, &pointer).unwrap();
-            assert_eq!(
-                read_pointer(&pointer_file).unwrap().active_directory,
-                Some(active_directory)
-            );
-        }
-    }
-
-    /// 不在場所以外で壊れたポインタや必須項目の欠落を既定先として扱わない。
-    #[test]
-    fn malformed_or_incomplete_pointer_is_rejected() {
-        let test_directory = TestDirectory::new();
-        let pointer_file = test_directory.path().join(POINTER_FILE);
-        fs::write(&pointer_file, b"{}").unwrap();
-
-        assert!(read_pointer(&pointer_file)
-            .unwrap_err()
-            .contains("項目が不足しています"));
-
-        let mut unsupported = StoragePointer::default();
-        unsupported.version = 0;
-        write_pointer_atomic(&pointer_file, &unsupported).unwrap();
-        assert!(read_pointer(&pointer_file)
-            .unwrap_err()
-            .contains("未対応の保存先ポインタ形式"));
     }
 }

@@ -1,24 +1,22 @@
 <!-- 保存先の異なる TXT と仮想フォルダを、実ファイルを動かさず管理する。 -->
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { getCurrentWindow } from '@tauri-apps/api/window'
 import { ask, message } from '@tauri-apps/plugin-dialog'
 import { chooseTextFile, fileName } from './textFile'
 import type { ProjectTreeOpenRequest, ProjectTreeOpenResult } from './projectTreeWindow'
 import {
-  createProject,
-  createProjectFolder,
-  deleteProject,
-  hasProjectTreePointerDragStarted,
-  loadProjectTreeSnapshot,
-  moveProjectNode,
-  projectTreeAutoScrollStep,
-  projectTreeExternalDropDestination,
-  projectTreePhysicalToViewport,
-  projectTreeRowPlacement,
   projectTreeSelectionAfterClick,
   projectTreeSelectionAfterContextMenu,
   projectTreeSelectionForNodes,
+  type ProjectTreeNode,
+  type ProjectTreeSnapshot,
+} from './projectTreeModel'
+import {
+  createProject,
+  createProjectFolder,
+  deleteProject,
+  loadProjectTreeSnapshot,
+  moveProjectNode,
   registerProjectFile,
   registerDroppedProjectFiles,
   relinkProjectFile,
@@ -26,17 +24,13 @@ import {
   renameProject,
   renameProjectFolder,
   selectProject,
-  shouldSuppressProjectTreeClick,
-  type ProjectTreeNode,
-  type ProjectTreePlacement,
-  type ProjectTreeSnapshot,
-} from './projectTree'
+} from './projectTreeClient'
+import { useProjectTreeDragAndDrop } from './useProjectTreeDragAndDrop'
+import { useProjectTreeStore } from './useProjectTreeStore'
 
 type DocumentOrigin = { nodeId: number; projectId: number }
 type DialogMode = 'project-create' | 'project-rename' | 'folder-create' | 'folder-rename'
 type VisibleTreeRow = { node: ProjectTreeNode; depth: number }
-type PointerTreeDrag = { nodeId: number; pointerId: number; startX: number; startY: number; started: boolean }
-type TreeDropTarget = { nodeId: number | null; placement: ProjectTreePlacement; parentId: number | null }
 
 const props = withDefaults(defineProps<{
   disabled: boolean
@@ -61,20 +55,10 @@ const emit = defineEmits<{
   'detach-request': []
 }>()
 
-const snapshot = ref<ProjectTreeSnapshot>({ projects: [], nodes: [], activeProjectId: null })
-const loading = ref(true)
-const mutationPending = ref(false)
-const delayedProgress = ref(false)
-const treeError = ref('')
 const expandedFolders = ref(new Set<number>(props.expandedFolderIds))
 const unavailableNodes = ref(new Set<number>(props.unavailableNodeIds))
 const selectedNodeIds = ref(new Set<number>())
 const selectionAnchorNodeId = ref<number | null>(null)
-const treeScrollElement = ref<HTMLElement | null>(null)
-const dragNodeId = ref<number | null>(null)
-const dropIndicator = ref<{ nodeId: number | null; placement: ProjectTreePlacement } | null>(null)
-const pointerTreeDrag = ref<PointerTreeDrag | null>(null)
-const externalDropActive = ref(false)
 const nodeMenuOpen = ref(false)
 const nodeMenuTarget = ref<[number, number]>([0, 0])
 const contextNodeId = ref<number | null>(null)
@@ -88,11 +72,22 @@ const dialogParentId = ref<number | null>(null)
 const dialogNodeId = ref<number | null>(null)
 const pendingOpenRequest = ref<ProjectTreeOpenRequest | null>(null)
 let applyingUnavailableNodeProps = false
-let unlistenNativeDrop: (() => void) | null = null
-let nativeDropSetupCancelled = false
-let autoScrollFrame: number | null = null
-let latestPointerPosition = { x: 0, y: 0 }
-let suppressPointerGeneratedClick = false
+
+const {
+  snapshot,
+  loading,
+  mutationPending,
+  delayedProgress,
+  treeError,
+  initializeTree,
+  runMutation,
+  dispose: disposeProjectTreeStore,
+} = useProjectTreeStore({
+  loadSnapshot: loadProjectTreeSnapshot,
+  canMutate: () => !props.disabled && !pendingOpenRequest.value,
+  showError: showTreeError,
+  onSnapshotRefreshed: handleSnapshotRefreshed,
+})
 
 const activeProject = computed(() => snapshot.value.projects.find((project) => project.id === snapshot.value.activeProjectId) ?? null)
 const contextNode = computed(() => snapshot.value.nodes.find((node) => node.id === contextNodeId.value) ?? null)
@@ -172,15 +167,14 @@ function selectNodeFromContextMenu(node: ProjectTreeNode): void {
   setNodeSelection(change.selectedNodeIds, change.anchorNodeId)
 }
 
-/** DB から最新のツリーを読み込み、削除済みノードに対する一時エラーを整理する。 */
-async function refreshSnapshot(): Promise<void> {
-  snapshot.value = await loadProjectTreeSnapshot()
-  const validIds = new Set(snapshot.value.nodes.map((node) => node.id))
+/** DBから受け取ったツリーを表示用選択状態へ反映する。 */
+function handleSnapshotRefreshed(nextSnapshot: ProjectTreeSnapshot): void {
+  const validIds = new Set(nextSnapshot.nodes.map((node) => node.id))
   unavailableNodes.value = new Set([...unavailableNodes.value].filter((id) => validIds.has(id)))
   const validSelection = projectTreeSelectionForNodes(
     selectedNodeIds.value,
-    snapshot.value.nodes,
-    snapshot.value.activeProjectId,
+    nextSnapshot.nodes,
+    nextSnapshot.activeProjectId,
   )
   // snapshot.value の更新後に visibleRows を参照すると、新しい階層に基づいて再計算される。
   const visibleIds = new Set(visibleRows.value.map((row) => row.node.id))
@@ -188,44 +182,8 @@ async function refreshSnapshot(): Promise<void> {
   setNodeSelection(displayedSelection, displayedSelection.includes(selectionAnchorNodeId.value ?? -1)
     ? selectionAnchorNodeId.value
     : displayedSelection.at(-1) ?? null)
-  if (props.documentOrigin && !snapshot.value.projects.some((project) => project.id === props.documentOrigin?.projectId)) {
+  if (props.documentOrigin && !nextSnapshot.projects.some((project) => project.id === props.documentOrigin?.projectId)) {
     emit('origin-detached', props.documentOrigin.nodeId)
-  }
-  treeError.value = ''
-}
-
-/** 初回表示時に保存済みプロジェクトとツリーを読み込む。 */
-async function initializeTree(): Promise<void> {
-  loading.value = true
-  treeError.value = ''
-  try {
-    await refreshSnapshot()
-  } catch (error) {
-    treeError.value = String(error)
-  } finally {
-    loading.value = false
-  }
-}
-
-/** DB 更新を直列化し、成功後に保存済み状態を再取得する。 */
-async function runMutation(action: () => Promise<void>): Promise<boolean> {
-  if (isBusy.value) return false
-  mutationPending.value = true
-  const progressTimer = setTimeout(() => { delayedProgress.value = true }, 250)
-  let mutationSucceeded = false
-  try {
-    await action()
-    mutationSucceeded = true
-    await refreshSnapshot()
-    return true
-  } catch (error) {
-    if (mutationSucceeded) treeError.value = String(error)
-    await showTreeError(error)
-    return false
-  } finally {
-    clearTimeout(progressTimer)
-    delayedProgress.value = false
-    mutationPending.value = false
   }
 }
 
@@ -341,30 +299,15 @@ async function registerDroppedFiles(paths: string[], parentId: number | null): P
     return
   }
 
-  mutationPending.value = true
-  const progressTimer = setTimeout(() => { delayedProgress.value = true }, 250)
   let registeredCount = 0
   let failures: { path: string; error: string }[] = []
-  let refreshError: unknown = null
-  try {
+  const succeeded = await runMutation(async () => {
     const result = await registerDroppedProjectFiles(projectId, parentId, paths)
     registeredCount = result.registeredCount
     failures = result.failures
-    await refreshSnapshot()
-    if (registeredCount > 0) expandFolderPath(parentId)
-  } catch (error) {
-    treeError.value = String(error)
-    refreshError = error
-  } finally {
-    clearTimeout(progressTimer)
-    delayedProgress.value = false
-    mutationPending.value = false
-  }
-
-  if (refreshError) {
-    await showTreeError(refreshError)
-    return
-  }
+  }, { setErrorOnFailure: true })
+  if (!succeeded) return
+  if (registeredCount > 0) expandFolderPath(parentId)
   if (failures.length === 0) return
 
   const details = failures.slice(0, 5).map(({ path, error }) => `・${fileName(path)}: ${error}`)
@@ -510,132 +453,9 @@ function containsNode(parentId: number, candidateId: number): boolean {
   return false
 }
 
-/** ツリー表示領域上の位置から、内部移動または外部登録の追加先を決める。 */
-function treeDropTargetAt(clientX: number, clientY: number, external: boolean): TreeDropTarget | null {
-  const scroll = treeScrollElement.value
-  const scrollBounds = scroll?.getBoundingClientRect()
-  if (!scroll || !scrollBounds) return null
-  const isWithinTree = clientX >= scrollBounds.left && clientX <= scrollBounds.right
-    && clientY >= scrollBounds.top && clientY <= scrollBounds.bottom
-  const row = isWithinTree
-    ? document.elementFromPoint(clientX, clientY)?.closest<HTMLElement>('.project-tree-row')
-    : null
-  const nodeId = row && scroll.contains(row) ? Number(row.dataset.nodeId) : null
-  const node = nodeId === null ? null : snapshot.value.nodes.find((item) => item.id === nodeId) ?? null
-
-  if (external) {
-    const destination = projectTreeExternalDropDestination(isWithinTree, node)
-    if (!destination.accepted) return null
-    if (destination.parentId !== null && node) {
-      return { nodeId: node.id, placement: 'inside', parentId: destination.parentId }
-    }
-    return { nodeId: null, placement: 'root_end', parentId: null }
-  }
-
-  if (!isWithinTree) return null
-  if (node && node.id !== dragNodeId.value) {
-    const rowBounds = row!.getBoundingClientRect()
-    const placement = projectTreeRowPlacement(node.kind, clientY, rowBounds.top, rowBounds.height)
-    return { nodeId: node.id, placement, parentId: node.parentId }
-  }
-  if (node) return null
-  return { nodeId: null, placement: 'root_end', parentId: null }
-}
-
-/** ドラッグ中のポインター位置に応じて自動スクロールを続ける。 */
-function continueTreeAutoScroll(): void {
-  if (autoScrollFrame !== null) return
-  const scrollFrame = (): void => {
-    autoScrollFrame = null
-    if (!pointerTreeDrag.value?.started) return
-    const scroll = treeScrollElement.value
-    if (!scroll) return
-    const bounds = scroll.getBoundingClientRect()
-    const scrollStep = projectTreeAutoScrollStep(latestPointerPosition, bounds)
-    if (scrollStep === 0) return
-    const previousTop = scroll.scrollTop
-    scroll.scrollTop += scrollStep
-    if (scroll.scrollTop === previousTop) return
-    updateInternalDropTarget(latestPointerPosition.x, latestPointerPosition.y)
-    autoScrollFrame = window.requestAnimationFrame(scrollFrame)
-  }
-  autoScrollFrame = window.requestAnimationFrame(scrollFrame)
-}
-
-/** 内部移動の開始後にマウス・ペン・タッチの移動を追跡する。 */
-function startPointerTreeDrag(event: PointerEvent, node: ProjectTreeNode): void {
-  suppressPointerGeneratedClick = false
-  if (event.button !== 0 || isBusy.value) return
-  pointerTreeDrag.value = {
-    nodeId: node.id,
-    pointerId: event.pointerId,
-    startX: event.clientX,
-    startY: event.clientY,
-    started: false,
-  }
-  try {
-    ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
-  } catch {
-    // 要素が先に破棄された場合も、ウィンドウのポインターイベントで追跡する。
-  }
-}
-
-/** ドラッグ中に表示する移動先を更新する。 */
-function updateInternalDropTarget(clientX: number, clientY: number): void {
-  const target = treeDropTargetAt(clientX, clientY, false)
-  dropIndicator.value = target ? { nodeId: target.nodeId, placement: target.placement } : null
-}
-
-/** 内部移動を開始してから、行の位置表示と端の自動スクロールを更新する。 */
-function trackPointerTreeDrag(event: PointerEvent): void {
-  const gesture = pointerTreeDrag.value
-  if (!gesture || gesture.pointerId !== event.pointerId) return
-  if (!gesture.started && !hasProjectTreePointerDragStarted(
-    { x: gesture.startX, y: gesture.startY }, { x: event.clientX, y: event.clientY },
-  )) return
-  if (isBusy.value) {
-    clearDragState()
-    return
-  }
-  gesture.started = true
-  setNodeSelection([gesture.nodeId], gesture.nodeId)
-  dragNodeId.value = gesture.nodeId
-  event.preventDefault()
-  latestPointerPosition = { x: event.clientX, y: event.clientY }
-  externalDropActive.value = false
-  updateInternalDropTarget(event.clientX, event.clientY)
-  continueTreeAutoScroll()
-}
-
-/** ポインターを放した場所へノードを移動し、通常の行クリックと区別する。 */
-function finishPointerTreeDrag(event: PointerEvent): void {
-  const gesture = pointerTreeDrag.value
-  if (!gesture || gesture.pointerId !== event.pointerId) return
-  if (!gesture.started) {
-    pointerTreeDrag.value = null
-    return
-  }
-  latestPointerPosition = { x: event.clientX, y: event.clientY }
-  const target = treeDropTargetAt(event.clientX, event.clientY, false)
-  const sourceId = gesture.nodeId
-  const canMove = Boolean(target) && (target?.nodeId === null || target?.nodeId !== sourceId) && !isBusy.value
-  suppressPointerGeneratedClick = true
-  clearDragState()
-  if (canMove && target) {
-    void runMutation(() => moveProjectNode(sourceId, target.nodeId, target.placement))
-  }
-}
-
-/** ポインター取消時に、移動予約を行わず表示だけを初期化する。 */
-function cancelPointerTreeDrag(event: PointerEvent): void {
-  if (pointerTreeDrag.value?.pointerId !== event.pointerId) return
-  clearDragState()
-}
-
 /** ドラッグ直後の合成クリックだけを抑え、通常クリックではノードを開く。 */
 function activateNodeFromClick(event: MouseEvent, node: ProjectTreeNode): void {
-  if (shouldSuppressProjectTreeClick(suppressPointerGeneratedClick, event.detail)) {
-    suppressPointerGeneratedClick = false
+  if (shouldSuppressGeneratedClick(event.detail)) {
     event.preventDefault()
     event.stopPropagation()
     return
@@ -676,72 +496,24 @@ function handleTreeBackgroundClick(event: MouseEvent): void {
   if (!target?.closest('.project-tree-row')) clearNodeSelection()
 }
 
-/** 物理座標で届くTauriのドロップ位置を、CSSピクセルのツリー要素へ変換する。 */
-function viewportPosition(position: { x: number; y: number }): { x: number; y: number } {
-  return projectTreePhysicalToViewport(position, window.devicePixelRatio || 1)
-}
-
-/** 外部ファイルのネイティブドロップ位置を表示し、TXT登録先を明示する。 */
-function updateExternalDropTarget(position: { x: number; y: number }): void {
-  if (isBusy.value) {
-    externalDropActive.value = false
-    dropIndicator.value = null
-    return
-  }
-  const point = viewportPosition(position)
-  const target = treeDropTargetAt(point.x, point.y, true)
-  externalDropActive.value = target !== null
-  dropIndicator.value = target ? { nodeId: target.nodeId, placement: target.placement } : null
-}
-
-/** Tauriネイティブのファイルドロップをツリー領域だけで受け付ける。 */
-function handleNativeDropEvent(payload: import('@tauri-apps/api/webview').DragDropEvent): void {
-  if (payload.type === 'leave') {
-    externalDropActive.value = false
-    if (!pointerTreeDrag.value?.started) dropIndicator.value = null
-    return
-  }
-  const point = viewportPosition(payload.position)
-  const target = treeDropTargetAt(point.x, point.y, true)
-  if (payload.type === 'drop') {
-    externalDropActive.value = false
-    dropIndicator.value = null
-    if (target) void registerDroppedFiles(payload.paths, target.parentId)
-    return
-  }
-  updateExternalDropTarget(payload.position)
-}
-
-/** ドラッグ終了時にポインター追跡・自動スクロール・移動表示を片付ける。 */
-function clearDragState(): void {
-  pointerTreeDrag.value = null
-  dragNodeId.value = null
-  dropIndicator.value = null
-  if (autoScrollFrame !== null) window.cancelAnimationFrame(autoScrollFrame)
-  autoScrollFrame = null
-}
-
-/** 現在のウィンドウでOSからのファイルドロップを購読する。 */
-function listenForNativeDrops(): void {
-  nativeDropSetupCancelled = false
-  void getCurrentWindow().onDragDropEvent(({ payload }) => handleNativeDropEvent(payload)).then((unlisten) => {
-    if (nativeDropSetupCancelled) unlisten()
-    else unlistenNativeDrop = unlisten
-  }).catch((error: unknown) => {
-    console.error('TXTのドロップを受け付けられません。', error)
-  })
-}
-
-/** ウィンドウイベントとネイティブドロップ購読を解除し、自動スクロールを停止する。 */
-function disposeTreePointerHandlers(): void {
-  nativeDropSetupCancelled = true
-  unlistenNativeDrop?.()
-  unlistenNativeDrop = null
-  window.removeEventListener('pointermove', trackPointerTreeDrag)
-  window.removeEventListener('pointerup', finishPointerTreeDrag)
-  window.removeEventListener('pointercancel', cancelPointerTreeDrag)
-  clearDragState()
-}
+const {
+  treeScrollElement,
+  dragNodeId,
+  dropIndicator,
+  externalDropActive,
+  startPointerTreeDrag,
+  cancelPointerTreeDrag,
+  shouldSuppressGeneratedClick,
+} = useProjectTreeDragAndDrop({
+  snapshot,
+  isBusy: () => isBusy.value,
+  setNodeSelection,
+  runMutation,
+  moveProjectNode,
+  registerDroppedFiles,
+})
+// テンプレートの ref 属性から composable が所有するスクロール要素へ接続する。
+void treeScrollElement
 
 /** 別プロジェクト由来の文書を開いている場合、そのプロジェクトを表示する。 */
 async function returnToOriginProject(): Promise<void> {
@@ -750,13 +522,11 @@ async function returnToOriginProject(): Promise<void> {
 }
 
 onMounted(() => {
-  window.addEventListener('pointermove', trackPointerTreeDrag, { passive: false })
-  window.addEventListener('pointerup', finishPointerTreeDrag)
-  window.addEventListener('pointercancel', cancelPointerTreeDrag)
-  listenForNativeDrops()
   void initializeTree()
 })
-onBeforeUnmount(disposeTreePointerHandlers)
+onBeforeUnmount(() => {
+  disposeProjectTreeStore()
+})
 watch(() => props.expandedFolderIds, (folderIds) => {
   expandedFolders.value = new Set(folderIds)
   pruneSelectionToVisibleRows()

@@ -1,11 +1,12 @@
 import type { EditorSettings } from './editorSettings'
-import type { ToolbarItem, ToolbarPreferences } from './appPreferences'
+import type { InterfaceBarSizes, ToolbarItem, ToolbarPreferences } from './appPreferences'
 import type { SettingsViewId } from './settingsDefinitions'
 
 /** 設定ウィンドウへ配信する現在値とUndo／Redoの状態。 */
 export type SettingsSnapshot = {
   editor: EditorSettings
   toolbar: ToolbarPreferences
+  barSizes: InterfaceBarSizes
   page: SettingsViewId
   history: {
     canUndo: boolean
@@ -24,6 +25,7 @@ export type SettingsCommand =
       type: 'change'
       editor?: Partial<EditorSettings>
       toolbar?: Partial<ToolbarPreferences> & { items?: ToolbarItem[] }
+      barSizes?: Partial<InterfaceBarSizes>
       flush?: boolean
     }
 

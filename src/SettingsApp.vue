@@ -6,10 +6,13 @@ import ToolbarSettingsPage from './ToolbarSettingsPage.vue'
 import WrappingSettingsPage from './WrappingSettingsPage.vue'
 import TypographySettingsPage from './TypographySettingsPage.vue'
 import StorageSettingsPage from './StorageSettingsPage.vue'
+import BarSizeSettingsPage from './BarSizeSettingsPage.vue'
 import {
-  createDefaultToolbarItems,
+  resetToolbarPreferences,
+  resetInterfaceBarSizes,
   type ToolbarItem,
   type ToolbarPreferences,
+  type InterfaceBarSizes,
 } from './appPreferences'
 import {
   defaultEditorSettings,
@@ -285,6 +288,19 @@ function changeToolbar(value: Partial<ToolbarPreferences> & { items?: ToolbarIte
   void sendCommand({ type: 'change', toolbar: value, flush })
 }
 
+/** 各バーのサイズを画面へ反映し、共通のUndo・自動保存経路へ送る。 */
+function changeBarSizes(value: Partial<InterfaceBarSizes>, flush = false): void {
+  if (!snapshot.value) return
+  snapshot.value = {
+    ...snapshot.value,
+    barSizes: {
+      ...snapshot.value.barSizes,
+      ...value,
+    },
+  }
+  void sendCommand({ type: 'change', barSizes: value, flush })
+}
+
 /** ツールバー初期化の確認画面を開く。 */
 function restoreToolbarDefaults(): void {
   toolbarResetDialog.value = true
@@ -293,7 +309,9 @@ function restoreToolbarDefaults(): void {
 /** 確認後にツールバー構成を初期値へ戻して即時保存する。 */
 function confirmToolbarDefaults(): void {
   toolbarResetDialog.value = false
-  changeToolbar({ items: createDefaultToolbarItems() }, true)
+  if (!snapshot.value) return
+  const toolbar = resetToolbarPreferences(snapshot.value.toolbar)
+  changeToolbar({ items: toolbar.items }, true)
 }
 
 /** 全設定初期化の確認画面を開く。 */
@@ -305,7 +323,8 @@ function restoreAllDefaults(): void {
 function confirmAllDefaults(): void {
   allResetDialog.value = false
   if (!snapshot.value) return
-  const toolbar = { visible: true, items: createDefaultToolbarItems() }
+  const toolbar = { ...resetToolbarPreferences(snapshot.value.toolbar), visible: true }
+  const barSizes = resetInterfaceBarSizes()
   columnsValue.value = defaultEditorSettings.wrapColumns
   trackColumnsPendingValue(defaultEditorSettings.wrapColumns)
   for (const field of typographyFields) {
@@ -316,6 +335,7 @@ function confirmAllDefaults(): void {
     ...snapshot.value,
     editor: { ...defaultEditorSettings },
     toolbar,
+    barSizes,
   }
   columnsInput.value = String(defaultEditorSettings.wrapColumns)
   columnsInputDirty.value = false
@@ -327,6 +347,7 @@ function confirmAllDefaults(): void {
     type: 'change',
     editor: { ...defaultEditorSettings },
     toolbar,
+    barSizes,
     flush: true,
   })
 }
@@ -522,6 +543,16 @@ onBeforeUnmount(() => {
             @reset-toolbar="restoreToolbarDefaults"
             @toggle-section="toggleSection"
           />
+          <BarSizeSettingsPage
+            v-else-if="page.id === 'appearance.bars'"
+            :key="`${page.id}-${activeView}`"
+            :bar-sizes="snapshot.barSizes"
+            :heading-level="activeView === 'all' ? 4 : 2"
+            :sections="page.sections"
+            :expanded-section-ids="openedSectionIds"
+            @update-bar-sizes="changeBarSizes"
+            @toggle-section="toggleSection"
+          />
           <StorageSettingsPage
             v-else-if="page.id === 'application.storage'"
             :heading-level="activeView === 'all' ? 4 : 2"
@@ -547,7 +578,7 @@ onBeforeUnmount(() => {
     </VDialog>
     <VDialog v-model="allResetDialog" max-width="440">
       <VCard title="すべての設定を初期値に戻しますか？">
-        <VCardText>本文表示、折り返し、ツールバーの設定を初期値へ変更し、自動保存します。データ保存先は変更しません。</VCardText>
+        <VCardText>本文表示、折り返し、ツールバー、各バーのサイズを初期値へ変更し、自動保存します。データ保存先は変更しません。</VCardText>
         <VCardActions>
           <VSpacer />
           <VBtn variant="text" @click="allResetDialog = false">戻る</VBtn>

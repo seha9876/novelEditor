@@ -755,6 +755,124 @@ test('プロジェクトツリー設定は旧データを補完し、保存幅�
   assert.deepEqual(preferences.normalizeApplicationPreferences({ ui: { projectTree: { width: 'wide', detached: 'yes' } } }).ui.projectTree, { width: 280, detached: false })
 })
 
+test('バーサイズ設定は旧データを中サイズで補完し、項目ごとの不正値だけを補正する', () => {
+  const preferences = loadSourceModule('src/appPreferences.ts', {
+    '@tauri-apps/plugin-store': { load: async () => { throw new Error('このテストではStoreを使いません。') } },
+  })
+  assert.deepEqual(preferences.createDefaultApplicationPreferences().ui.barSizes, { menu: 'medium', toolbar: 'medium', status: 'medium' })
+  assert.deepEqual(preferences.normalizeApplicationPreferences({ schemaVersion: 1, ui: { toolbar: { visible: false } } }).ui.barSizes, {
+    menu: 'medium', toolbar: 'medium', status: 'medium',
+  })
+  assert.deepEqual(preferences.normalizeApplicationPreferences({ ui: {
+    barSizes: { menu: 'small', toolbar: 'invalid', status: 'large' },
+  } }).ui.barSizes, { menu: 'small', toolbar: 'medium', status: 'large' })
+  assert.deepEqual(preferences.normalizeInterfaceBarSizes({ menu: 'large', status: null }), {
+    menu: 'large', toolbar: 'medium', status: 'medium',
+  })
+  assert.equal(preferences.interfaceBarSizePresets.small.menu.height, 40)
+  assert.equal(preferences.interfaceBarSizePresets.small.toolbar.buttonHeight, 32)
+  assert.equal(preferences.interfaceBarSizePresets.medium.toolbar.buttonHeight, 40)
+  assert.equal(preferences.interfaceBarSizePresets.medium.toolbar.buttonWidth, 40)
+  assert.equal(preferences.interfaceBarSizePresets.medium.toolbar.numberMenuWidth, 30)
+  assert.equal(preferences.interfaceBarSizePresets.medium.toolbar.adjustButtonWidth, 32)
+  assert.equal(preferences.interfaceBarSizePresets.large.toolbar.buttonHeight, 48)
+  assert.equal(preferences.interfaceBarSizePresets.medium.toolbar.height, 60)
+  assert.equal(preferences.interfaceBarSizePresets.large.status.height, 44)
+})
+
+test('バーサイズ設定の保存はStoreへ正規化済みの実値を書き込む', async () => {
+  let storedValue = {
+    schemaVersion: 1,
+    ui: {
+      toolbar: { visible: true, items: [] },
+      barSizes: { menu: 'small', toolbar: 'invalid', status: 'large' },
+      projectTree: { width: 280, detached: false },
+    },
+  }
+  let setCount = 0
+  const store = {
+    async get() { return storedValue },
+    async set(_key, value) { storedValue = value; setCount += 1 },
+    async save() {},
+  }
+  const mocks = { '@tauri-apps/plugin-store': { load: async () => store } }
+  const cache = new Map()
+  const storage = loadSourceModule('src/storageLocation.ts', mocks, cache)
+  storage.setActiveStorageDirectory('C:\\bar-size-test')
+  const preferences = loadSourceModule('src/appPreferences.ts', mocks, cache)
+  const initialization = await preferences.initializeApplicationPreferences()
+  assert.deepEqual(initialization.preferences.ui.barSizes, { menu: 'small', toolbar: 'medium', status: 'large' })
+
+  await preferences.saveSettingsPreferences(
+    initialization.preferences.editor,
+    initialization.preferences.ui.toolbar,
+    { menu: 'large', toolbar: 'not-a-size', status: 'small' },
+  )
+  assert.deepEqual(storedValue.ui.barSizes, { menu: 'large', toolbar: 'medium', status: 'small' })
+  assert.ok(setCount >= 2)
+})
+
+test('バーサイズとツールバー初期化の境界を純粋関数で保持する', () => {
+  const mocks = {
+    '@tauri-apps/plugin-store': { load: async () => { throw new Error('このテストではStoreを使いません。') } },
+  }
+  const cache = new Map()
+  const preferences = loadSourceModule('src/appPreferences.ts', mocks, cache)
+  const source = {
+    toolbar: { visible: false, items: [{ type: 'separator', id: 'custom-separator' }] },
+    barSizes: { menu: 'small', toolbar: 'large', status: 'small' },
+  }
+  const clonedBarSizes = preferences.cloneInterfaceBarSizes(source.barSizes)
+  clonedBarSizes.menu = 'large'
+  const reset = preferences.resetInterfaceBarSizes()
+  const toolbarReset = preferences.resetToolbarPreferences(source.toolbar)
+  assert.equal(clonedBarSizes.menu, 'large')
+  assert.equal(source.barSizes.menu, 'small')
+  assert.deepEqual(reset, { menu: 'medium', toolbar: 'medium', status: 'medium' })
+  assert.equal(toolbarReset.visible, false)
+  assert.deepEqual(toolbarReset.items, preferences.createDefaultToolbarItems())
+  assert.deepEqual(source.toolbar.items, [{ type: 'separator', id: 'custom-separator' }])
+  assert.deepEqual(source.barSizes, { menu: 'small', toolbar: 'large', status: 'small' })
+})
+
+test('バーサイズ設定は設定画面・状態通信・メインレイアウトへ接続される', () => {
+  const app = readFileSync(resolve(projectRoot, 'src/App.vue'), 'utf8')
+  const settings = readFileSync(resolve(projectRoot, 'src/SettingsApp.vue'), 'utf8')
+  const session = readFileSync(resolve(projectRoot, 'src/settingsSession.ts'), 'utf8')
+  const definitions = readFileSync(resolve(projectRoot, 'src/settingsDefinitions.ts'), 'utf8')
+  const styles = readFileSync(resolve(projectRoot, 'src/style.css'), 'utf8')
+  const barPage = readFileSync(resolve(projectRoot, 'src/BarSizeSettingsPage.vue'), 'utf8')
+
+  assert.match(app, /:height="interfaceBarMetrics\.menu\.height"/)
+  assert.match(app, /:extension-height="interfaceBarMetrics\.toolbar\.height"/)
+  assert.match(app, /:height="interfaceBarMetrics\.status\.height"/)
+  assert.match(app, /barSizes: \{ \.\.\.barSizes\.value \}/)
+  assert.match(settings, /page\.id === 'appearance\.bars'/)
+  assert.match(settings, /const barSizes = resetInterfaceBarSizes\(\)/)
+  assert.match(session, /barSizes\?: Partial<InterfaceBarSizes>/)
+  assert.match(definitions, /appearance\.bars\.sizes/)
+  assert.match(barPage, /mandatory/)
+  assert.match(styles, /--toolbar-control-height/)
+  assert.match(styles, /toolbar-typography-number-menu\.v-btn\.v-btn--icon/)
+  assert.match(styles, /statistics-button\.v-btn/)
+  assert.match(styles, /height: var\(--status-bar-height, 36px\)/)
+})
+
+test('バーサイズの初期化範囲は全設定とツールバー構成で分離される', () => {
+  const settings = readFileSync(resolve(projectRoot, 'src/SettingsApp.vue'), 'utf8')
+  const app = readFileSync(resolve(projectRoot, 'src/App.vue'), 'utf8')
+  const mediumPreset = readFileSync(resolve(projectRoot, 'src/appPreferences.ts'), 'utf8')
+
+  assert.match(settings, /const barSizes = resetInterfaceBarSizes\(\)/)
+  assert.match(settings, /barSizes,\s*flush: true/)
+  assert.match(settings, /const toolbar = resetToolbarPreferences\(snapshot\.value\.toolbar\)/)
+  assert.doesNotMatch(settings.slice(settings.indexOf('function confirmToolbarDefaults'), settings.indexOf('/** 全設定初期化の確認画面を開く。')), /barSizes/)
+  assert.match(app, /function cloneCurrentSettings\(\): SettingsValues/)
+  assert.match(app, /updateCurrentSettings\(previous\.editor, previous\.toolbar, false, false, previous\.barSizes\)/)
+  assert.match(app, /updateCurrentSettings\(next\.editor, next\.toolbar, false, false, next\.barSizes\)/)
+  assert.match(mediumPreset, /medium:\s*\{[\s\S]*?menu: \{ height: 48, controlHeight: 28[\s\S]*?toolbar: \{ height: 60, controlHeight: 36, buttonHeight: 40, buttonWidth: 40/)
+})
+
 test('本文書式コントロールをツールバーへ一度ずつ登録でき、既定構成は維持する', () => {
   const commands = loadSourceModule('src/appCommands.ts')
   const preferences = loadSourceModule('src/appPreferences.ts', {

@@ -19,6 +19,37 @@ export type ToolbarPreferences = {
   items: ToolbarItem[]
 }
 
+/** メニュー・ツール・ステータスバーへ適用する表示サイズの段階。 */
+export type InterfaceSize = 'small' | 'medium' | 'large'
+
+/** 各バーの表示サイズを個別に保持する。設定画面の選択値と保存値で共有する。 */
+export type InterfaceBarSizes = {
+  menu: InterfaceSize
+  toolbar: InterfaceSize
+  status: InterfaceSize
+}
+
+/** バーサイズごとの高さと内部コントロール寸法を一か所で管理する。 */
+export const interfaceBarSizePresets = {
+  small: {
+    menu: { height: 40, controlHeight: 24, iconSize: 18, fontSize: '0.6875rem', titleFontSize: '0.75rem', secondaryFontSize: '0.6875rem', windowControlWidth: 40, buttonPadding: 8, padding: 4, gap: 1, titleGap: 6, titlePadding: 8 },
+    toolbar: { height: 48, controlHeight: 32, buttonHeight: 32, buttonWidth: 32, adjustButtonWidth: 28, iconSize: 18, fontSize: '0.6875rem', inputFontSize: '0.75rem', labelFontSize: '0.6875rem', fontWidth: 124, numberWidth: 114, numberMenuWidth: 26, padding: 6, gap: 3, itemMargin: 1, dividerHeight: 20, dividerMargin: 3 },
+    status: { height: 30, fontSize: '0.6875rem', gap: 12, padding: 8, buttonHeight: 24, buttonPadding: 8, buttonFontSize: '0.6875rem', buttonIconSize: 16 },
+  },
+  medium: {
+    menu: { height: 48, controlHeight: 28, iconSize: 20, fontSize: '0.75rem', titleFontSize: '0.875rem', secondaryFontSize: '0.75rem', windowControlWidth: 46, buttonPadding: 12, padding: 8, gap: 2, titleGap: 8, titlePadding: 12 },
+    toolbar: { height: 60, controlHeight: 36, buttonHeight: 40, buttonWidth: 40, adjustButtonWidth: 32, iconSize: 20, fontSize: '0.75rem', inputFontSize: '0.8rem', labelFontSize: '0.75rem', fontWidth: 136, numberWidth: 126, numberMenuWidth: 30, padding: 8, gap: 4, itemMargin: 2, dividerHeight: 24, dividerMargin: 4 },
+    status: { height: 36, fontSize: '0.75rem', gap: 16, padding: 12, buttonHeight: 28, buttonPadding: 12, buttonFontSize: '0.75rem', buttonIconSize: 18 },
+  },
+  large: {
+    menu: { height: 56, controlHeight: 36, iconSize: 24, fontSize: '0.875rem', titleFontSize: '1rem', secondaryFontSize: '0.8125rem', windowControlWidth: 54, buttonPadding: 16, padding: 12, gap: 3, titleGap: 10, titlePadding: 16 },
+    toolbar: { height: 72, controlHeight: 44, buttonHeight: 48, buttonWidth: 48, adjustButtonWidth: 40, iconSize: 24, fontSize: '0.875rem', inputFontSize: '0.9rem', labelFontSize: '0.875rem', fontWidth: 148, numberWidth: 138, numberMenuWidth: 36, padding: 12, gap: 6, itemMargin: 3, dividerHeight: 32, dividerMargin: 5 },
+    status: { height: 44, fontSize: '0.875rem', gap: 20, padding: 16, buttonHeight: 36, buttonPadding: 16, buttonFontSize: '0.875rem', buttonIconSize: 22 },
+  },
+} as const
+
+const defaultInterfaceBarSizes: InterfaceBarSizes = { menu: 'medium', toolbar: 'medium', status: 'medium' }
+
 export type ProjectTreePreferences = {
   width: number
   detached: boolean
@@ -29,6 +60,7 @@ export type ApplicationPreferencesV1 = {
   editor: EditorSettings
   ui: {
     toolbar: ToolbarPreferences
+    barSizes: InterfaceBarSizes
     projectTree: ProjectTreePreferences
   }
 }
@@ -67,8 +99,44 @@ export function createDefaultApplicationPreferences(): ApplicationPreferencesV1 
         visible: true,
         items: createDefaultToolbarItems(),
       },
+      barSizes: createDefaultInterfaceBarSizes(),
       projectTree: { width: defaultProjectTreeWidth, detached: false },
     },
+  }
+}
+
+/** 既定の各バーサイズを独立したオブジェクトとして返す。 */
+export function createDefaultInterfaceBarSizes(): InterfaceBarSizes {
+  return { ...defaultInterfaceBarSizes }
+}
+
+/** バーサイズ設定を履歴や保存処理から独立した値として複製する。 */
+export function cloneInterfaceBarSizes(value: InterfaceBarSizes): InterfaceBarSizes {
+  return { menu: value.menu, toolbar: value.toolbar, status: value.status }
+}
+
+/** 全設定初期化で使う、各バーを中サイズへ戻した値を返す。 */
+export function resetInterfaceBarSizes(): InterfaceBarSizes {
+  return createDefaultInterfaceBarSizes()
+}
+
+/** ツールバーの表示状態を保ったまま、項目構成だけを初期値へ戻す。 */
+export function resetToolbarPreferences(value: ToolbarPreferences): ToolbarPreferences {
+  return { visible: value.visible, items: createDefaultToolbarItems() }
+}
+
+/** 文字列のバーサイズを検査し、不正値を中サイズへ補正する。 */
+export function normalizeInterfaceSize(value: unknown): InterfaceSize {
+  return value === 'small' || value === 'large' || value === 'medium' ? value : 'medium'
+}
+
+/** 保存データのバーサイズを項目ごとに検査し、欠損値も中サイズへ補完する。 */
+export function normalizeInterfaceBarSizes(value: unknown): InterfaceBarSizes {
+  const raw = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  return {
+    menu: normalizeInterfaceSize(raw.menu),
+    toolbar: normalizeInterfaceSize(raw.toolbar),
+    status: normalizeInterfaceSize(raw.status),
   }
 }
 
@@ -123,6 +191,9 @@ export function normalizeApplicationPreferences(value: unknown): ApplicationPref
   const rawProjectTree = rawUi.projectTree && typeof rawUi.projectTree === 'object'
     ? rawUi.projectTree as Record<string, unknown>
     : {}
+  const rawBarSizes = rawUi.barSizes && typeof rawUi.barSizes === 'object'
+    ? rawUi.barSizes
+    : undefined
   const projectTreeWidth = typeof rawProjectTree.width === 'number' && Number.isFinite(rawProjectTree.width)
     ? Math.round(rawProjectTree.width)
     : defaultProjectTreeWidth
@@ -134,6 +205,7 @@ export function normalizeApplicationPreferences(value: unknown): ApplicationPref
         visible: typeof rawToolbar.visible === 'boolean' ? rawToolbar.visible : true,
         items: normalizeToolbarItems(rawToolbar.items),
       },
+      barSizes: normalizeInterfaceBarSizes(rawBarSizes),
       projectTree: {
         width: Math.max(220, Math.min(480, projectTreeWidth)),
         detached: typeof rawProjectTree.detached === 'boolean' ? rawProjectTree.detached : false,
@@ -230,8 +302,8 @@ async function writePreferences(targetStore: Store, preferences: ApplicationPref
   await targetStore.save()
 }
 
-/** エディターとツールバーの現在値を一つのStore更新として保存する。 */
-export function saveSettingsPreferences(editor: EditorSettings, toolbar: ToolbarPreferences): Promise<void> {
+/** エディター・ツールバー・バーサイズの現在値を一つのStore更新として保存する。 */
+export function saveSettingsPreferences(editor: EditorSettings, toolbar: ToolbarPreferences, barSizes: InterfaceBarSizes): Promise<void> {
   return savePreferenceUpdate((current) => ({
     ...current,
     editor: normalizeEditorSettings(editor),
@@ -241,6 +313,7 @@ export function saveSettingsPreferences(editor: EditorSettings, toolbar: Toolbar
         visible: toolbar.visible,
         items: normalizeToolbarItems(toolbar.items),
       },
+      barSizes: normalizeInterfaceBarSizes(barSizes),
     },
   }))
 }
@@ -299,6 +372,7 @@ function clonePreferences(value: ApplicationPreferencesV1): ApplicationPreferenc
         visible: value.ui.toolbar.visible,
         items: value.ui.toolbar.items.map((item) => ({ ...item })),
       },
+      barSizes: { ...value.ui.barSizes },
       projectTree: { ...value.ui.projectTree },
     },
   }

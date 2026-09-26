@@ -40,6 +40,13 @@ html, body, #app { width: 100%; height: 100%; margin: 0; }
 .setting-subsection-content { min-width: 0; }
 .setting-subsection-description { margin: 0 0 12px; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: 0.875rem; }
 .setting-subsection-actions { margin-block-start: 4px; }
+.bar-size-help { margin-block-end: 16px; }
+.bar-size-options { display: grid; gap: 12px; }
+.bar-size-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.bar-size-row:last-child { border-block-end: 0; }
+.bar-size-label { min-width: 180px; display: grid; gap: 2px; }
+.bar-size-label .setting-help { margin: 0; }
+.bar-size-row .v-btn-toggle { flex: none; }
 .toolbar-customizer { display: grid; grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr); gap: 20px; margin-block-start: 24px; }
 .toolbar-customizer-column { min-width: 0; }
 .toolbar-customizer-heading { margin: 0 0 8px; font-size: 1rem; font-weight: 500; line-height: 1.5; }

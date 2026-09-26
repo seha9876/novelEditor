@@ -28,10 +28,14 @@ import {
   saveSettingsPreferences,
   saveProjectTreePreferences,
   normalizeToolbarItems,
+  normalizeInterfaceBarSizes,
+  interfaceBarSizePresets,
   type ApplicationPreferencesV1,
+  type InterfaceBarSizes,
   type PreferencesPersistenceState,
   type ToolbarPreferences,
 } from './appPreferences'
+import { cloneSettingsValues, type SettingsValues } from './settingsValues'
 import { authorizeProjectFile, loadProjectTreeSnapshot } from './projectTree'
 import {
   PROJECT_TREE_WINDOW_COMMAND_EVENT,
@@ -79,11 +83,6 @@ const props = defineProps<{
   storageInitializationReady: boolean
 }>()
 
-type SettingsValues = {
-  editor: EditorSettings
-  toolbar: ToolbarPreferences
-}
-
 // 本文は CodeMirror、設定はVueの現在値を正本とし、設定更新は明示保存経路へ集約する。
 const editor = ref<EditorHandle | null>(null)
 const path = ref<string | null>(null)
@@ -107,6 +106,7 @@ const toolbarPreferences = ref<ToolbarPreferences>({
   visible: props.initialPreferences.ui.toolbar.visible,
   items: props.initialPreferences.ui.toolbar.items.map((item) => ({ ...item })),
 })
+const barSizes = ref<InterfaceBarSizes>({ ...props.initialPreferences.ui.barSizes })
 const projectTreeWidth = ref(props.initialPreferences.ui.projectTree.width)
 const projectTreeDetached = ref(props.initialPreferences.ui.projectTree.detached)
 const projectTreeResizing = ref(false)
@@ -119,6 +119,50 @@ const projectTreeMaximumWidth = computed(() => Math.max(220, Math.min(480, mainV
 const projectTreeDisplayWidth = computed(() => Math.min(projectTreeWidth.value, projectTreeMaximumWidth.value))
 const displayedToolbarItems = computed(() => toolbarPreferences.value.items)
 const displayedToolbarVisible = computed(() => toolbarPreferences.value.visible)
+const interfaceBarMetrics = computed(() => ({
+  menu: interfaceBarSizePresets[barSizes.value.menu].menu,
+  toolbar: interfaceBarSizePresets[barSizes.value.toolbar].toolbar,
+  status: interfaceBarSizePresets[barSizes.value.status].status,
+}))
+const interfaceBarStyle = computed<Record<string, string>>(() => ({
+  '--menu-bar-height': `${interfaceBarMetrics.value.menu.height}px`,
+  '--menu-control-height': `${interfaceBarMetrics.value.menu.controlHeight}px`,
+  '--menu-icon-size': `${interfaceBarMetrics.value.menu.iconSize}px`,
+  '--menu-font-size': interfaceBarMetrics.value.menu.fontSize,
+  '--menu-title-font-size': interfaceBarMetrics.value.menu.titleFontSize,
+  '--menu-secondary-font-size': interfaceBarMetrics.value.menu.secondaryFontSize,
+  '--window-control-width': `${interfaceBarMetrics.value.menu.windowControlWidth}px`,
+  '--menu-button-padding': `${interfaceBarMetrics.value.menu.buttonPadding}px`,
+  '--menu-bar-padding': `${interfaceBarMetrics.value.menu.padding}px`,
+  '--menu-bar-gap': `${interfaceBarMetrics.value.menu.gap}px`,
+  '--menu-title-gap': `${interfaceBarMetrics.value.menu.titleGap}px`,
+  '--menu-title-padding': `${interfaceBarMetrics.value.menu.titlePadding}px`,
+  '--toolbar-bar-height': `${interfaceBarMetrics.value.toolbar.height}px`,
+  '--toolbar-control-height': `${interfaceBarMetrics.value.toolbar.controlHeight}px`,
+  '--toolbar-button-height': `${interfaceBarMetrics.value.toolbar.buttonHeight}px`,
+  '--toolbar-button-width': `${interfaceBarMetrics.value.toolbar.buttonWidth}px`,
+  '--toolbar-adjust-button-width': `${interfaceBarMetrics.value.toolbar.adjustButtonWidth}px`,
+  '--toolbar-icon-size': `${interfaceBarMetrics.value.toolbar.iconSize}px`,
+  '--toolbar-font-size': interfaceBarMetrics.value.toolbar.fontSize,
+  '--toolbar-input-font-size': interfaceBarMetrics.value.toolbar.inputFontSize,
+  '--toolbar-label-font-size': interfaceBarMetrics.value.toolbar.labelFontSize,
+  '--toolbar-font-width': `${interfaceBarMetrics.value.toolbar.fontWidth}px`,
+  '--toolbar-number-width': `${interfaceBarMetrics.value.toolbar.numberWidth}px`,
+  '--toolbar-number-menu-width': `${interfaceBarMetrics.value.toolbar.numberMenuWidth}px`,
+  '--toolbar-bar-padding': `${interfaceBarMetrics.value.toolbar.padding}px`,
+  '--toolbar-bar-gap': `${interfaceBarMetrics.value.toolbar.gap}px`,
+  '--toolbar-item-margin': `${interfaceBarMetrics.value.toolbar.itemMargin}px`,
+  '--toolbar-divider-height': `${interfaceBarMetrics.value.toolbar.dividerHeight}px`,
+  '--toolbar-divider-margin': `${interfaceBarMetrics.value.toolbar.dividerMargin}px`,
+  '--status-bar-height': `${interfaceBarMetrics.value.status.height}px`,
+  '--status-font-size': interfaceBarMetrics.value.status.fontSize,
+  '--status-gap': `${interfaceBarMetrics.value.status.gap}px`,
+  '--status-bar-padding': `${interfaceBarMetrics.value.status.padding}px`,
+  '--status-button-height': `${interfaceBarMetrics.value.status.buttonHeight}px`,
+  '--status-button-padding': `${interfaceBarMetrics.value.status.buttonPadding}px`,
+  '--status-button-font-size': interfaceBarMetrics.value.status.buttonFontSize,
+  '--status-button-icon-size': `${interfaceBarMetrics.value.status.buttonIconSize}px`,
+}))
 const toolbarFontItems = computed(() => {
   const items: { title: string; value: string }[] = editorFontOptions.map((option) => ({ title: option.label, value: option.fontFamily }))
   if (!items.some((item) => item.value === editorSettings.value.fontFamily)) {
@@ -180,7 +224,7 @@ let trailingSaveDue = false
 let settingsChangeRevision = 0
 let persistedSettingsRevision = 0
 let settingsStateRevision = 0
-let lastPersistedSettings = cloneSettings(editorSettings.value, toolbarPreferences.value)
+let lastPersistedSettings = cloneCurrentSettings()
 let settingsHistoryActive = false
 const settingsUndoHistory: SettingsValues[] = []
 const settingsRedoHistory: SettingsValues[] = []
@@ -929,6 +973,7 @@ async function publishSettingsState(): Promise<void> {
     const snapshot: SettingsSnapshot = {
       editor: { ...editorSettings.value },
       toolbar: cloneToolbarPreferences(toolbarPreferences.value),
+      barSizes: { ...barSizes.value },
       page: settingsPage.value,
       history: {
         canUndo: settingsUndoHistory.length > 0,
@@ -942,12 +987,13 @@ async function publishSettingsState(): Promise<void> {
   }
 }
 
-/** エディター設定とツールバー設定を分離せず複製する。 */
-function cloneSettings(editorValue: EditorSettings, toolbarValue: ToolbarPreferences): SettingsValues {
-  return {
-    editor: { ...editorValue },
-    toolbar: cloneToolbarPreferences(toolbarValue),
-  }
+/** 現在の設定値を履歴・保存用スナップショットへ複製する。 */
+function cloneCurrentSettings(): SettingsValues {
+  return cloneSettingsValues({
+    editor: editorSettings.value,
+    toolbar: toolbarPreferences.value,
+    barSizes: barSizes.value,
+  })
 }
 
 /** ツールバー設定を別画面へ渡す際の参照共有を避ける。 */
@@ -978,6 +1024,7 @@ function updateCurrentSettings(
   toolbarPatch?: Partial<ToolbarPreferences>,
   flushImmediately = false,
   recordHistory = true,
+  barSizesPatch?: Partial<InterfaceBarSizes>,
 ): void {
   const nextEditor = normalizeEditorSettings({ ...editorSettings.value, ...editorPatch })
   const nextToolbar = {
@@ -987,20 +1034,23 @@ function updateCurrentSettings(
       ? normalizeToolbarItems(toolbarPatch.items)
       : toolbarPreferences.value.items.map((item) => ({ ...item })),
   }
+  const nextBarSizes = normalizeInterfaceBarSizes({ ...barSizes.value, ...barSizesPatch })
   const hasChanged = JSON.stringify(nextEditor) !== JSON.stringify(editorSettings.value) ||
-    JSON.stringify(nextToolbar) !== JSON.stringify(toolbarPreferences.value)
+    JSON.stringify(nextToolbar) !== JSON.stringify(toolbarPreferences.value) ||
+    JSON.stringify(nextBarSizes) !== JSON.stringify(barSizes.value)
   if (!hasChanged) {
     if (flushImmediately) requestSettingsFlush(true)
     return
   }
 
   if (recordHistory && settingsHistoryActive) {
-    settingsUndoHistory.push(cloneSettings(editorSettings.value, toolbarPreferences.value))
+    settingsUndoHistory.push(cloneCurrentSettings())
     if (settingsUndoHistory.length > settingsHistoryLimit) settingsUndoHistory.shift()
     settingsRedoHistory.length = 0
   }
   editorSettings.value = nextEditor
   toolbarPreferences.value = nextToolbar
+  barSizes.value = nextBarSizes
   settingsChangeRevision += 1
   scheduleSettingsSave()
   if (flushImmediately) requestSettingsFlush(true)
@@ -1029,8 +1079,8 @@ function undoSettingsChange(): void {
   const previous = settingsUndoHistory.pop()
   if (!previous) return
 
-  settingsRedoHistory.push(cloneSettings(editorSettings.value, toolbarPreferences.value))
-  updateCurrentSettings(previous.editor, previous.toolbar, false, false)
+  settingsRedoHistory.push(cloneCurrentSettings())
+  updateCurrentSettings(previous.editor, previous.toolbar, false, false, previous.barSizes)
   void publishSettingsState()
 }
 
@@ -1039,8 +1089,8 @@ function redoSettingsChange(): void {
   const next = settingsRedoHistory.pop()
   if (!next) return
 
-  settingsUndoHistory.push(cloneSettings(editorSettings.value, toolbarPreferences.value))
-  updateCurrentSettings(next.editor, next.toolbar, false, false)
+  settingsUndoHistory.push(cloneCurrentSettings())
+  updateCurrentSettings(next.editor, next.toolbar, false, false, next.barSizes)
   void publishSettingsState()
 }
 
@@ -1081,7 +1131,7 @@ async function runSettingsSaveSequence(immediate: boolean): Promise<void> {
 
   while (settingsChangeRevision > persistedSettingsRevision) {
     const writeRevision = settingsChangeRevision
-    const writeSnapshot = cloneSettings(editorSettings.value, toolbarPreferences.value)
+    const writeSnapshot = cloneCurrentSettings()
     await runSettingsSaveCycle(writeSnapshot, writeRevision)
     const hasNewerChanges = settingsChangeRevision > persistedSettingsRevision
 
@@ -1117,6 +1167,7 @@ function restoreLastPersistedSettings(error: unknown): void {
   settingsSaveTimer = undefined
   editorSettings.value = { ...lastPersistedSettings.editor }
   toolbarPreferences.value = cloneToolbarPreferences(lastPersistedSettings.toolbar)
+  barSizes.value = { ...lastPersistedSettings.barSizes }
   settingsChangeRevision += 1
   persistedSettingsRevision = settingsChangeRevision
   flushAfterCurrentSave = false
@@ -1131,13 +1182,13 @@ function restoreLastPersistedSettings(error: unknown): void {
 
 /** Storeへの1回の書き込みを実行し、失敗はrollbackと通知へ変換して解決する。 */
 async function runSettingsSaveCycle(
-  writeSnapshot: { editor: EditorSettings; toolbar: ToolbarPreferences },
+  writeSnapshot: { editor: EditorSettings; toolbar: ToolbarPreferences; barSizes: InterfaceBarSizes },
   writeRevision: number,
 ): Promise<boolean> {
   try {
     await publishSettingsState()
-    await saveSettingsPreferences(writeSnapshot.editor, writeSnapshot.toolbar)
-    lastPersistedSettings = writeSnapshot
+    await saveSettingsPreferences(writeSnapshot.editor, writeSnapshot.toolbar, writeSnapshot.barSizes)
+    lastPersistedSettings = cloneSettingsValues(writeSnapshot)
     persistedSettingsRevision = writeRevision
     await publishSettingsState()
     return true
@@ -1183,7 +1234,7 @@ async function handleSettingsCommand(command: SettingsCommand): Promise<void> {
     } else if (command.type === 'redo') {
       redoSettingsChange()
     } else if (command.type === 'change') {
-      updateCurrentSettings(command.editor, command.toolbar, command.flush ?? false)
+      updateCurrentSettings(command.editor, command.toolbar, command.flush ?? false, true, command.barSizes)
     }
   } catch (error) {
     await emitTo('settings', SETTINGS_ERROR_EVENT, String(error))
@@ -1567,12 +1618,12 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <VApp class="app-shell" :class="{ 'is-project-tree-resizing': projectTreeResizing }">
+  <VApp class="app-shell" :class="{ 'is-project-tree-resizing': projectTreeResizing }" :style="interfaceBarStyle">
     <VAppBar
       class="titlebar"
-      :height="48"
+      :height="interfaceBarMetrics.menu.height"
       :extended="displayedToolbarVisible"
-      :extension-height="60"
+      :extension-height="interfaceBarMetrics.toolbar.height"
       flat
     >
       <nav class="menu-bar" aria-label="メニューバー">
@@ -1805,6 +1856,6 @@ onBeforeUnmount(() => {
     <VMain class="writing-area" aria-label="本文編集領域">
       <EditorPane ref="editor" :settings="editorSettings" :read-only="documentLocked" @change="onChange" @statistics="statistics = $event" @search-status="onSearchStatus" @search-navigate="onSearchNavigate" />
     </VMain>
-    <VFooter app class="status-bar" height="36"><StatisticsStatus :statistics="statistics" /></VFooter>
+    <VFooter app class="status-bar" :height="interfaceBarMetrics.status.height"><StatisticsStatus :statistics="statistics" /></VFooter>
   </VApp>
 </template>

@@ -1,5 +1,5 @@
 /** 設定画面で編集できる具体的なページを識別する。 */
-export type SettingsPageId = 'editor.wrapping' | 'editor.typography' | 'appearance.toolbar' | 'application.storage'
+export type SettingsPageId = 'editor.wrapping' | 'editor.typography' | 'appearance.toolbar' | 'appearance.bars' | 'application.storage'
 
 /** 左ナビと本文が表示する対象を識別する。 */
 export type SettingsViewId = 'all' | SettingsPageId
@@ -8,7 +8,7 @@ export type SettingsViewId = 'all' | SettingsPageId
 export type SettingsCategoryId = 'editor' | 'appearance' | 'application'
 
 /** 設定アコーディオンを識別する。ページIDとは分け、同一ページ内で増やせるようにする。 */
-export type SettingsSectionId = 'editor.wrapping.behavior' | 'editor.typography.text' | 'appearance.toolbar.configuration' | 'application.storage.location'
+export type SettingsSectionId = 'editor.wrapping.behavior' | 'editor.typography.text' | 'appearance.toolbar.configuration' | 'appearance.bars.sizes' | 'application.storage.location'
 
 /** 設定一覧モードのナビゲーション表示情報。 */
 export const settingsAllViewDefinition = {
@@ -39,6 +39,11 @@ export type SettingsSectionDefinition =
   | {
       id: 'appearance.toolbar.configuration'
       pageId: 'appearance.toolbar'
+      label: string
+    }
+  | {
+      id: 'appearance.bars.sizes'
+      pageId: 'appearance.bars'
       label: string
     }
   | {
@@ -79,6 +84,11 @@ const settingsPageDefinitionById: Record<SettingsPageId, SettingsPageDefinition>
     categoryId: 'appearance',
     label: 'ツールバー',
   },
+  'appearance.bars': {
+    id: 'appearance.bars',
+    categoryId: 'appearance',
+    label: 'バーのサイズ',
+  },
   'application.storage': {
     id: 'application.storage',
     categoryId: 'application',
@@ -92,6 +102,7 @@ const settingsSectionDefinitionById: Record<SettingsSectionId, SettingsSectionDe
   'editor.typography.text': { id: 'editor.typography.text', pageId: 'editor.typography', label: '書体・文字サイズ・行間' },
   'editor.wrapping.behavior': { id: 'editor.wrapping.behavior', pageId: 'editor.wrapping', label: '折り返し方法' },
   'appearance.toolbar.configuration': { id: 'appearance.toolbar.configuration', pageId: 'appearance.toolbar', label: 'ツールバーの表示と構成' },
+  'appearance.bars.sizes': { id: 'appearance.bars.sizes', pageId: 'appearance.bars', label: 'メニュー・ツール・ステータスバーのサイズ' },
   'application.storage.location': { id: 'application.storage.location', pageId: 'application.storage', label: 'アプリデータの保存先' },
 }
 export const settingsSectionDefinitions: ReadonlyArray<SettingsSectionDefinition> = Object.values(settingsSectionDefinitionById)

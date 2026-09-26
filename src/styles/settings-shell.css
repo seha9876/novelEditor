@@ -1,0 +1,49 @@
+/* 設定画面の共通外枠、ページ、展開パネル、バーサイズ設定を定義する。 */
+:root {
+  font-family: Roboto, "Yu Gothic UI", "Meiryo", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { width: 100%; height: 100%; margin: 0; }
+.settings-shell { height: 100%; }
+.settings-shell .v-application__wrap { min-height: 100%; }
+.settings-navigation { padding-block: 12px; }
+.settings-navigation .v-navigation-drawer__content { display: flex; flex-direction: column; }
+.settings-navigation .v-list { flex: 1 1 auto; }
+.settings-navigation-footer { flex: none; padding: 12px; }
+.settings-main { min-height: 0; overflow: auto; }
+.settings-content { min-height: 100%; padding: 20px 24px 28px; }
+.settings-expand-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; margin-block-end: 8px; }
+.settings-category-heading { margin: 14px 0 8px; font-size: 1.125rem; font-weight: 600; line-height: 1.5; }
+.settings-expand-actions + .settings-category-heading { margin-block-start: 0; }
+.settings-page-heading { margin: 0 0 8px; font-size: 1rem; font-weight: 500; line-height: 1.5; }
+.setting-expansion-panels { align-items: stretch; overflow: visible; border-radius: 0; margin-block-end: 12px; }
+.setting-expansion-panels > .setting-expansion-section { flex: 1 0 100%; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 8px; }
+.setting-expansion-heading { margin: 0; }
+.setting-expansion-heading > .v-expansion-panel-title { width: 100%; }
+.setting-expansion-section.v-expansion-panel--active > .setting-expansion-heading > .v-expansion-panel-title { min-height: 64px; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.setting-expansion-title { font-size: 1rem; font-weight: 500; line-height: 1.5; white-space: normal; }
+.setting-expansion-panels .v-expansion-panel-title { gap: 8px; }
+.setting-expansion-panels .v-expansion-panel-text__wrapper { padding: 8px 20px 20px; }
+.setting-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.setting-help { margin: -8px 0 0; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: 0.75rem; }
+.setting-children { margin-block-start: 20px; margin-inline-start: clamp(0px, 2vw, 24px); }
+.setting-children-sheet { padding: 16px; }
+.setting-children-title { margin: 0 0 16px; font-size: 1rem; font-weight: 500; line-height: 1.5; }
+.setting-children-divider { margin-block: 16px; }
+.setting-subsection { min-width: 0; }
+.setting-subsection-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-block-end: 12px; }
+.setting-subsection-title { min-width: 0; margin: 0; font-size: 0.95rem; font-weight: 500; line-height: 1.5; }
+.setting-subsection-content { min-width: 0; }
+.setting-subsection-description { margin: 0 0 12px; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: 0.875rem; }
+.setting-subsection-actions { margin-block-start: 4px; }
+.bar-size-help { margin-block-end: 16px; }
+.bar-size-options { display: grid; gap: 12px; }
+.bar-size-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.bar-size-row:last-child { border-block-end: 0; }
+.bar-size-label { min-width: 180px; display: grid; gap: 2px; }
+.bar-size-label .setting-help { margin: 0; }
+.bar-size-row .v-btn-toggle { flex: none; }

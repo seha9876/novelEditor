@@ -1,7 +1,6 @@
 <script setup lang="ts">
 // 設定ページを切り替えながら編集し、変更を共通経路へ反映して自動保存する。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { emitTo, listen } from '@tauri-apps/api/event'
 import ToolbarSettingsPage from './ToolbarSettingsPage.vue'
 import WrappingSettingsPage from './WrappingSettingsPage.vue'
 import TypographySettingsPage from './TypographySettingsPage.vue'
@@ -19,10 +18,6 @@ import {
   type EditorSettings,
 } from './editorSettings'
 import {
-  SETTINGS_COMMAND_EVENT,
-  SETTINGS_ERROR_EVENT,
-  SETTINGS_STATE_EVENT,
-  type SettingsCommand,
   type SettingsSnapshot,
 } from './settingsSession'
 import {
@@ -37,9 +32,13 @@ import {
   type SettingsViewId,
 } from './settingsDefinitions'
 import { useEditorSettingsDrafts } from './useEditorSettingsDrafts'
+import { useSettingsWindowChannel } from './useSettingsWindowChannel'
 
-const snapshot = ref<SettingsSnapshot | null>(null)
-const errorMessage = ref('')
+let receiveChannelSnapshot: (nextSnapshot: SettingsSnapshot) => void = () => {}
+const settingsChannel = useSettingsWindowChannel({
+  onSnapshot: (nextSnapshot) => receiveChannelSnapshot(nextSnapshot),
+})
+const { snapshot, errorMessage, sendCommand } = settingsChannel
 const activeView = ref<SettingsViewId>('editor.wrapping')
 const openedGroups = ref(['editor', 'appearance', 'application'])
 const openedSectionIds = ref<SettingsSectionId[]>([...allSettingsSectionIds])
@@ -50,9 +49,6 @@ const errorSnackbarOpen = computed({
   get: () => errorMessage.value.length > 0,
   set: (value: boolean) => { if (!value) errorMessage.value = '' },
 })
-let unlistenState: (() => void) | undefined
-let unlistenError: (() => void) | undefined
-
 const settingsPagesByCategory = computed<Record<SettingsCategoryId, typeof settingsPageDefinitions[number][]>>(() => ({
   editor: settingsPageDefinitions.filter((page) => page.categoryId === 'editor'),
   appearance: settingsPageDefinitions.filter((page) => page.categoryId === 'appearance'),
@@ -108,16 +104,6 @@ watch(openedSectionIds, (sectionIds) => {
   if (!sectionIds.includes('appearance.toolbar.configuration')) toolbarDragResetRevision.value += 1
 })
 
-/** 設定変更やページ移動をメインウィンドウへ送る。 */
-async function sendCommand(command: SettingsCommand): Promise<void> {
-  errorMessage.value = ''
-  try {
-    await emitTo('main', SETTINGS_COMMAND_EVENT, command)
-  } catch (error) {
-    errorMessage.value = String(error)
-  }
-}
-
 const {
   columnsValue,
   columnsInput,
@@ -138,6 +124,10 @@ const {
   resetDrafts,
   receiveSettingsSnapshot: syncSettingsSnapshot,
 } = useEditorSettingsDrafts({ snapshot, sendCommand })
+
+receiveChannelSnapshot = (nextSnapshot: SettingsSnapshot): void => {
+  if (syncSettingsSnapshot(nextSnapshot)) activeView.value = nextSnapshot.page
+}
 
 /** 指定表示先へ移動し、メイン画面にも選択状態を共有する。 */
 function selectView(page: SettingsViewId): void {
@@ -218,11 +208,6 @@ function confirmAllDefaults(): void {
   })
 }
 
-/** 新しい状態をrevision順に受け取り、編集中の入力文字列を維持する。 */
-function receiveSettingsSnapshot(nextSnapshot: SettingsSnapshot): void {
-  if (syncSettingsSnapshot(nextSnapshot)) activeView.value = nextSnapshot.page
-}
-
 /** 入力欄ではブラウザー標準の文字編集Undo／Redoを優先する。 */
 function isTextEditingTarget(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && (
@@ -250,20 +235,14 @@ function onKeydown(event: KeyboardEvent): void {
 // メインウィンドウの状態を受け取れるようにしてから、現在値を要求する。
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
-  unlistenState = await listen<SettingsSnapshot>(SETTINGS_STATE_EVENT, (event) => {
-    receiveSettingsSnapshot(event.payload)
-  })
-  unlistenError = await listen<string>(SETTINGS_ERROR_EVENT, (event) => {
-    errorMessage.value = event.payload
-  })
+  await settingsChannel.setup()
   await sendCommand({ type: 'ready' })
 })
 
 // 設定ウィンドウを破棄する際に状態イベントの購読を解除する。
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
-  unlistenState?.()
-  unlistenError?.()
+  settingsChannel.dispose()
 })
 </script>
 

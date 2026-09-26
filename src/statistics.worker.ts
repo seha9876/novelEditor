@@ -1,4 +1,4 @@
-import { calculateStatistics, type StatisticsRequest, type StatisticsResponse } from './editorStatistics'
+import { calculateStatistics, type StatisticsRequest, type StatisticsResponse } from './statisticsCalculation'
 
 // UIやCodeMirrorを読み込まず、同じ独立計数関数をWorker内で実行する。
 self.onmessage = (event: MessageEvent<StatisticsRequest>) => {

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import SettingExpansionSection from './SettingExpansionSection.vue'
-import { interfaceBarSizePresets, type InterfaceBarSizes, type InterfaceSize } from './appPreferenceSchema'
+import { getInterfaceBarHeight } from './interfaceBarPresentation'
+import type { InterfaceBarSizes, InterfaceSize } from './appPreferenceSchema'
 import type { SettingsSectionDefinition, SettingsSectionId } from './settingsDefinitions'
 
 defineProps<{
@@ -34,7 +35,7 @@ function changeBarSize(bar: keyof InterfaceBarSizes, value: unknown): void {
 
 /** 選択肢に対応する高さを説明文へ表示する。px値の入力は受け付けない。 */
 function describeHeight(bar: keyof InterfaceBarSizes, size: InterfaceSize): string {
-  return `${interfaceBarSizePresets[size][bar].height}px`
+  return `${getInterfaceBarHeight(bar, size)}px`
 }
 </script>
 

@@ -1,20 +1,15 @@
-//! 保存先ポインタの JSON、原子的な更新、一重起動排他を管理する。
+//! 保存先ポインタの JSON と原子的な更新を管理する。
 
 use std::{
     collections::BTreeMap,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
-use super::DATA_FILES;
-
-static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+use super::paths::{temporary_path, DATA_FILES};
 
 /// AppData 内に置く保存先ポインタ。
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -165,80 +160,15 @@ pub(super) fn write_pointer_atomic(
     write_result
 }
 
-/// AppData のファイルロックを保持し、二重起動による移行・片付けの競合を防ぐ。
-pub(super) fn acquire_process_lock(lock_path: &Path) -> Result<File, String> {
-    let parent = lock_path
-        .parent()
-        .ok_or_else(|| "保存先ロックの場所が不正です".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| format!("AppData を作成できません: {error}"))?;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(lock_path)
-        .map_err(|error| format!("保存先ロックを開けません: {error}"))?;
-    file.try_lock().map_err(|error| {
-        format!(
-            "別のアプリインスタンスが保存データを使用中です。閉じてから再試行してください: {error}"
-        )
-    })?;
-    Ok(file)
-}
-
-/// 既存パス同士は canonical path で比較し、作成前のパスはそのまま比較する。
-pub(super) fn same_existing_path(left: &Path, right: &Path) -> bool {
-    match (fs::canonicalize(left), fs::canonicalize(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => left == right,
-    }
-}
-
-/// Data directory ごとに区別した OS 一時フォルダのプロセスロックパスを作る。
-pub(super) fn process_lock_path(default_directory: &Path) -> PathBuf {
-    let digest = Sha256::digest(default_directory.to_string_lossy().as_bytes());
-    std::env::temp_dir().join(format!("novel-editor-storage-{:x}.lock", digest))
-}
-
-/// Windows の拡張長パス接頭辞を表示用文字列から取り除く。
-pub(super) fn display_path(path: &Path) -> String {
-    let path = path.to_string_lossy();
-    #[cfg(windows)]
-    {
-        if let Some(unc_path) = path.strip_prefix(r"\\?\UNC\") {
-            return format!(r"\\{unc_path}");
-        }
-        if let Some(ordinary_path) = path.strip_prefix(r"\\?\") {
-            return ordinary_path.to_string();
-        }
-    }
-    path.into_owned()
-}
-
-/// 一時ファイル名の衝突を避ける。
-pub(super) fn temporary_path(target: &Path, purpose: &str) -> PathBuf {
-    let sequence = TEMPORARY_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("storage");
-    target.with_file_name(format!(
-        ".{file_name}.{purpose}-{}-{timestamp}-{sequence}.tmp",
-        std::process::id(),
-    ))
-}
-
+/// 現行の保存先ポインタ形式のバージョンを返す。
 pub(super) fn pointer_version() -> u32 {
     1
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::paths::POINTER_FILE;
     use super::super::test_support::TestDirectory;
-    use super::super::{StorageLocationState, POINTER_FILE};
     use super::*;
     use std::{collections::BTreeMap, fs};
 
@@ -282,22 +212,5 @@ mod tests {
         assert!(read_pointer(&pointer_file)
             .unwrap_err()
             .contains("未対応の保存先ポインタ形式"));
-    }
-
-    /// 同時起動は保存データ操作を拒み、先行プロセス終了後の再試行を許可する。
-    #[test]
-    fn process_lock_prevents_two_instances_from_using_storage() {
-        let test_directory = TestDirectory::new();
-        let default_directory = test_directory.path().join("default");
-        let first = StorageLocationState::new(default_directory.clone());
-        first.bootstrap().unwrap();
-        let second = StorageLocationState::new(default_directory);
-
-        assert!(second
-            .bootstrap()
-            .unwrap_err()
-            .contains("別のアプリインスタンス"));
-        drop(first);
-        assert!(second.bootstrap().is_ok());
     }
 }

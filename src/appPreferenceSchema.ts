@@ -26,25 +26,6 @@ export type InterfaceBarSizes = {
   status: InterfaceSize
 }
 
-/** バーサイズごとの高さと内部コントロール寸法を一か所で管理する。 */
-export const interfaceBarSizePresets = {
-  small: {
-    menu: { height: 40, controlHeight: 24, iconSize: 18, fontSize: '0.6875rem', titleFontSize: '0.75rem', secondaryFontSize: '0.6875rem', windowControlWidth: 40, buttonPadding: 8, padding: 4, gap: 1, titleGap: 6, titlePadding: 8 },
-    toolbar: { height: 48, controlHeight: 36, buttonHeight: 32, buttonWidth: 32, adjustButtonWidth: 28, iconSize: 18, fontSize: '0.6875rem', inputFontSize: '0.75rem', labelFontSize: '0.6875rem', fontWidth: 124, numberWidth: 114, numberMenuWidth: 26, padding: 6, gap: 3, itemMargin: 1, dividerHeight: 20, dividerMargin: 3 },
-    status: { height: 30, fontSize: '0.6875rem', gap: 12, padding: 8, buttonHeight: 24, buttonPadding: 8, buttonFontSize: '0.6875rem', buttonIconSize: 16 },
-  },
-  medium: {
-    menu: { height: 48, controlHeight: 28, iconSize: 20, fontSize: '0.75rem', titleFontSize: '0.875rem', secondaryFontSize: '0.75rem', windowControlWidth: 46, buttonPadding: 12, padding: 8, gap: 2, titleGap: 8, titlePadding: 12 },
-    toolbar: { height: 60, controlHeight: 36, buttonHeight: 40, buttonWidth: 40, adjustButtonWidth: 32, iconSize: 20, fontSize: '0.75rem', inputFontSize: '0.8rem', labelFontSize: '0.75rem', fontWidth: 136, numberWidth: 126, numberMenuWidth: 30, padding: 8, gap: 4, itemMargin: 2, dividerHeight: 24, dividerMargin: 4 },
-    status: { height: 36, fontSize: '0.75rem', gap: 16, padding: 12, buttonHeight: 28, buttonPadding: 12, buttonFontSize: '0.75rem', buttonIconSize: 18 },
-  },
-  large: {
-    menu: { height: 56, controlHeight: 36, iconSize: 24, fontSize: '0.875rem', titleFontSize: '1rem', secondaryFontSize: '0.8125rem', windowControlWidth: 54, buttonPadding: 16, padding: 12, gap: 3, titleGap: 10, titlePadding: 16 },
-    toolbar: { height: 72, controlHeight: 44, buttonHeight: 48, buttonWidth: 48, adjustButtonWidth: 40, iconSize: 24, fontSize: '0.875rem', inputFontSize: '0.9rem', labelFontSize: '0.875rem', fontWidth: 148, numberWidth: 138, numberMenuWidth: 36, padding: 12, gap: 6, itemMargin: 3, dividerHeight: 32, dividerMargin: 5 },
-    status: { height: 44, fontSize: '0.875rem', gap: 20, padding: 16, buttonHeight: 36, buttonPadding: 16, buttonFontSize: '0.875rem', buttonIconSize: 22 },
-  },
-} as const
-
 const defaultInterfaceBarSizes: InterfaceBarSizes = { menu: 'medium', toolbar: 'medium', status: 'medium' }
 const defaultProjectTreeWidth = 280
 const defaultToolbarItems: ToolbarItem[] = [

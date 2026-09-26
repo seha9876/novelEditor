@@ -1,9 +1,10 @@
-/** 本文、保存、復元候補をメイン画面のライフサイクルから分離する。 */
+/** 本文とファイル操作をメイン画面のライフサイクルから分離し、復元処理へ橋渡しする。 */
 import { computed, ref, type Ref } from 'vue'
 import { ask } from '@tauri-apps/plugin-dialog'
-import { createEmptyStatistics, type EditorStatistics } from './editorStatistics'
+import { createEmptyStatistics } from './statisticsCalculation'
+import type { EditorStatistics } from './statisticsCalculation'
 import { authorizeProjectFile, loadProjectTreeSnapshot } from './projectTreeClient'
-import { loadRecoverySnapshot, saveRecoverySnapshot } from './recoveryStore'
+import { useDocumentRecovery } from './useDocumentRecovery'
 import {
   chooseSavePath,
   chooseTextFile,
@@ -54,103 +55,39 @@ export function useDocumentSession(options: DocumentSessionOptions) {
   const restoredUnsaved = ref(false)
   const displayName = computed(() => path.value ? fileName(path.value) : restoredUnsaved.value ? suggestedFileName.value : '無題')
 
-  let recoveryReady = false
-  let recoveryTimer: ReturnType<typeof setTimeout> | undefined
-  let recoveryErrorReported = false
   let disposed = false
 
-  /** 古い本文に対する遅延処理を取り消し、文書切り替え後に復元候補が復活しないようにする。 */
-  function cancelRecoveryTimer(): void {
-    if (recoveryTimer) clearTimeout(recoveryTimer)
-    recoveryTimer = undefined
-  }
-
-  /** 現在の未保存本文、または候補の削除を直列Storeへ渡す。失敗は編集を妨げず通知する。 */
-  async function syncRecoverySnapshot(): Promise<void> {
-    if (!recoveryReady || disposed) return
-    cancelRecoveryTimer()
-    try {
-      await saveRecoverySnapshot(dirty.value ? {
-        schemaVersion: 1,
-        text: options.editor.value?.getText() ?? '',
-        fileName: path.value ? fileName(path.value) : suggestedFileName.value,
-        ...documentFormat.value,
-        updatedAt: new Date().toISOString(),
-      } : null)
-      if (disposed) return
-      recoveryErrorReported = false
-    } catch (error) {
-      if (disposed) return
-      if (!recoveryErrorReported) {
-        options.showPersistenceNotice(`復元データを更新できません。本文を通常の保存で保護してください。${String(error)}`)
-        recoveryErrorReported = true
-      }
-    }
-  }
-
-  /** 入力が1秒止まった時点で最新本文を保護し、Undo等で保存済みに戻った場合は候補を削除する。 */
-  function scheduleRecoverySave(): void {
-    if (!recoveryReady || disposed) return
-    cancelRecoveryTimer()
-    if (!dirty.value) {
-      void syncRecoverySnapshot()
-      return
-    }
-    recoveryTimer = setTimeout(() => {
-      recoveryTimer = undefined
-      void syncRecoverySnapshot()
-    }, 1000)
-  }
+  const recovery = useDocumentRecovery({
+    getSnapshot: () => dirty.value ? {
+      schemaVersion: 1,
+      text: options.editor.value?.getText() ?? '',
+      fileName: path.value ? fileName(path.value) : suggestedFileName.value,
+      ...documentFormat.value,
+      updatedAt: new Date().toISOString(),
+    } : null,
+    applySnapshot: (snapshot) => {
+      suggestedFileName.value = snapshot.fileName
+      documentFormat.value = { lineEnding: snapshot.lineEnding, hasBom: snapshot.hasBom }
+      restoredUnsaved.value = true
+      options.editor.value?.setDocument(snapshot.text)
+    },
+    onInitializationFinished: () => {
+      busy.value = false
+      documentLocked.value = false
+    },
+    focusEditor: () => options.editor.value?.focus(),
+    showPersistenceNotice: options.showPersistenceNotice,
+  })
 
   /** CodeMirrorの本文変更だけから未保存状態を判定する。統計・選択の通知は関与しない。 */
   function onChange(text: string): void {
     dirty.value = restoredUnsaved.value || text !== savedText.value
-    scheduleRecoverySave()
+    recovery.scheduleSave()
   }
 
   /** 復元候補を確認し、保存先を持たない未保存文書として開く。空の本文でも明示保存までは未保存を維持する。 */
   async function initializeRecovery(): Promise<boolean> {
-    if (disposed) return false
-    let unresolvedSnapshot = false
-    let recoveryLoaded = false
-    try {
-      const snapshot = await loadRecoverySnapshot()
-      if (disposed) return false
-      recoveryLoaded = true
-      if (snapshot) {
-        unresolvedSnapshot = true
-        const restore = await ask(`前回の未保存の本文があります。復元しますか？\n${snapshot.fileName}\n${new Date(snapshot.updatedAt).toLocaleString('ja-JP')}`, {
-          title: '本文の復元',
-          kind: 'warning',
-          okLabel: '復元',
-          cancelLabel: '破棄',
-        })
-        if (disposed) return false
-        unresolvedSnapshot = false
-        if (restore) {
-          suggestedFileName.value = snapshot.fileName
-          documentFormat.value = { lineEnding: snapshot.lineEnding, hasBom: snapshot.hasBom }
-          restoredUnsaved.value = true
-          options.editor.value?.setDocument(snapshot.text)
-        } else {
-          await saveRecoverySnapshot(null)
-          if (disposed) return false
-        }
-      }
-    } catch (error) {
-      if (disposed) return false
-      options.showPersistenceNotice(unresolvedSnapshot
-        ? `復元の確認ができませんでした。前回の候補を保護するため、今回は復元データの自動保存を停止します。${String(error)}`
-        : `復元データを読み込めませんでした。${String(error)}`)
-    } finally {
-      if (!disposed) {
-        recoveryReady = !unresolvedSnapshot
-        busy.value = false
-        documentLocked.value = false
-        options.editor.value?.focus()
-      }
-    }
-    return recoveryLoaded
+    return recovery.initialize()
   }
 
   /** 未保存の変更を破棄してよいか確認し、続行できる場合に true を返す。確認ダイアログを開く。 */
@@ -170,7 +107,7 @@ export function useDocumentSession(options: DocumentSessionOptions) {
     documentLocked.value = true
     try {
       if (!(await confirmDiscard()) || disposed) return
-      cancelRecoveryTimer()
+      recovery.flush()
       path.value = null
       documentOrigin.value = null
       currentFile.value = null
@@ -179,7 +116,7 @@ export function useDocumentSession(options: DocumentSessionOptions) {
       restoredUnsaved.value = false
       savedText.value = ''
       options.editor.value?.setDocument('')
-      await syncRecoverySnapshot()
+      await recovery.syncSnapshot()
       if (disposed) return
       options.editor.value?.focus()
     } catch (error) {
@@ -203,7 +140,7 @@ export function useDocumentSession(options: DocumentSessionOptions) {
       if (disposed || !selected) return
       const file = await loadTextFile(selected)
       if (disposed || !(await confirmDiscard()) || disposed) return
-      cancelRecoveryTimer()
+      recovery.flush()
       documentOrigin.value = null
       currentFile.value = file
       path.value = file.path
@@ -215,7 +152,7 @@ export function useDocumentSession(options: DocumentSessionOptions) {
       file.editorText = options.editor.value?.getText() ?? file.text
       savedText.value = file.editorText
       dirty.value = false
-      await syncRecoverySnapshot()
+      await recovery.syncSnapshot()
       if (disposed) return
       options.editor.value?.focus()
     } catch (error) {
@@ -261,7 +198,7 @@ export function useDocumentSession(options: DocumentSessionOptions) {
         options.reportProjectTreeOpenResult({ requestId: request.requestId, nodeId: request.nodeId }, sourceWindowId)
         return
       }
-      cancelRecoveryTimer()
+      recovery.flush()
       currentFile.value = file
       path.value = file.path
       documentOrigin.value = { nodeId: request.nodeId, projectId: request.projectId }
@@ -272,7 +209,7 @@ export function useDocumentSession(options: DocumentSessionOptions) {
       file.editorText = options.editor.value?.getText() ?? file.text
       savedText.value = file.editorText
       dirty.value = false
-      await syncRecoverySnapshot()
+      await recovery.syncSnapshot()
       if (disposed) return
       options.editor.value?.focus()
       options.reportProjectTreeOpenResult({ requestId: request.requestId, nodeId: request.nodeId }, sourceWindowId)
@@ -322,7 +259,7 @@ export function useDocumentSession(options: DocumentSessionOptions) {
       savedText.value = text
       // 書き込み中にも編集できるので、保存開始時の本文と現在の本文を改めて比較する。
       dirty.value = (options.editor.value?.getText() ?? '') !== text
-      await syncRecoverySnapshot()
+      await recovery.syncSnapshot()
       if (disposed) return
     } catch (error) {
       if (disposed) return
@@ -334,25 +271,23 @@ export function useDocumentSession(options: DocumentSessionOptions) {
 
   /** 終了前に遅延中の復元保存だけを取り消し、呼び出し元の削除処理へ順序を渡す。 */
   function flush(): void {
-    cancelRecoveryTimer()
+    recovery.flush()
   }
 
   /** 保存済み復元候補を明示的に削除する。終了処理では自動保存より後に呼び出す。 */
   async function clearRecoverySnapshot(): Promise<void> {
-    if (disposed || !recoveryReady) return
-    await saveRecoverySnapshot(null)
+    await recovery.clear()
   }
 
   /** 終了処理が取り消された場合に復元保存を再開する。 */
   function resumeRecoverySave(): void {
-    scheduleRecoverySave()
+    recovery.resume()
   }
 
   /** 文書セッションのタイマーと復元状態を破棄する。 */
   function dispose(): void {
     disposed = true
-    cancelRecoveryTimer()
-    recoveryReady = false
+    recovery.dispose()
   }
 
   /** ツリー側の登録解除に合わせ、本文の出自だけを解除する。 */

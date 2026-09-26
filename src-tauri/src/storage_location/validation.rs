@@ -6,8 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::pointer::temporary_path;
-use super::PROJECT_TREE_FILE;
+use super::paths::{temporary_path, PROJECT_TREE_FILE};
 
 /// 指定フォルダへ一時ファイルを作成・削除し、移行に必要な書込権限を確認する。
 pub(super) fn verify_writable_directory(directory: &Path) -> Result<(), String> {

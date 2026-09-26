@@ -7,7 +7,10 @@ use serde::Serialize;
 use tauri::{State, Window};
 
 mod database;
-mod operations;
+mod nodes;
+mod ordering;
+mod projects;
+mod queries;
 
 use database::initialize_database;
 
@@ -109,13 +112,13 @@ pub struct ProjectTreeSnapshot {
 pub fn project_tree_snapshot(
     state: State<'_, ProjectTreeState>,
 ) -> Result<ProjectTreeSnapshot, String> {
-    operations::snapshot(state.inner())
+    queries::snapshot(state.inner())
 }
 
 /// 新しいプロジェクトを作成し、初回なら選択中にもする。
 #[tauri::command]
 pub fn project_create(state: State<'_, ProjectTreeState>, name: String) -> Result<(), String> {
-    operations::create_project(state.inner(), name)
+    projects::create_project(state.inner(), name)
 }
 
 /// プロジェクト名を変更する。
@@ -125,19 +128,19 @@ pub fn project_rename(
     project_id: i64,
     name: String,
 ) -> Result<(), String> {
-    operations::rename_project(state.inner(), project_id, name)
+    projects::rename_project(state.inner(), project_id, name)
 }
 
 /// プロジェクトとツリー登録だけを削除し、選択先を同一トランザクションで補正する。
 #[tauri::command]
 pub fn project_delete(state: State<'_, ProjectTreeState>, project_id: i64) -> Result<(), String> {
-    operations::delete_project(state.inner(), project_id)
+    projects::delete_project(state.inner(), project_id)
 }
 
 /// サイドバーで選択したプロジェクトを保存する。
 #[tauri::command]
 pub fn project_select(state: State<'_, ProjectTreeState>, project_id: i64) -> Result<(), String> {
-    operations::select_project(state.inner(), project_id)
+    projects::select_project(state.inner(), project_id)
 }
 
 /// 指定階層に仮想フォルダを追加する。
@@ -148,7 +151,7 @@ pub fn project_folder_create(
     parent_id: Option<i64>,
     name: String,
 ) -> Result<(), String> {
-    operations::create_folder(state.inner(), project_id, parent_id, name)
+    nodes::create_folder(state.inner(), project_id, parent_id, name)
 }
 
 /// 仮想フォルダの表示名を変更する。
@@ -158,7 +161,7 @@ pub fn project_folder_rename(
     node_id: i64,
     name: String,
 ) -> Result<(), String> {
-    operations::rename_folder(state.inner(), node_id, name)
+    nodes::rename_folder(state.inner(), node_id, name)
 }
 
 /// ダイアログまたはOSからのドロップで受け取った TXT をツリーへ独立した参照として登録する。
@@ -170,7 +173,7 @@ pub fn project_file_register(
     parent_id: Option<i64>,
     path: String,
 ) -> Result<(), String> {
-    operations::register_file(state.inner(), window, project_id, parent_id, path)
+    nodes::register_file(state.inner(), window, project_id, parent_id, path)
 }
 
 /// 既存のファイル参照を、ダイアログで選択した TXT に付け替える。
@@ -181,7 +184,7 @@ pub fn project_file_relink(
     node_id: i64,
     path: String,
 ) -> Result<(), String> {
-    operations::relink_file(state.inner(), window, node_id, path)
+    nodes::relink_file(state.inner(), window, node_id, path)
 }
 
 /// ノード登録だけを一括削除し、実ファイルには触れない。
@@ -190,7 +193,7 @@ pub fn project_nodes_remove(
     state: State<'_, ProjectTreeState>,
     node_ids: Vec<i64>,
 ) -> Result<(), String> {
-    operations::remove_nodes(state.inner(), node_ids)
+    nodes::remove_nodes(state.inner(), node_ids)
 }
 
 /// ノードを同一プロジェクト内で並べ替え、必要な場合だけ移動先兄弟を再採番する。
@@ -201,7 +204,7 @@ pub fn project_node_move(
     target_id: Option<i64>,
     placement: String,
 ) -> Result<(), String> {
-    operations::move_node(state.inner(), node_id, target_id, placement)
+    nodes::move_node(state.inner(), node_id, target_id, placement)
 }
 
 /// 保存済みノードの参照先を検証し、アプリ管理の FS Scope へ追加する。
@@ -211,7 +214,7 @@ pub fn project_file_authorize(
     window: Window,
     node_id: i64,
 ) -> Result<String, String> {
-    operations::authorize_file(state.inner(), window, node_id)
+    nodes::authorize_file(state.inner(), window, node_id)
 }
 pub(crate) use database::{
     is_empty_database_file, prepare_new_database_file, validate_database_file,

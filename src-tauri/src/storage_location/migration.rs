@@ -1,18 +1,15 @@
-//! 保存先移行、SQLite検証、データファイルの指紋計算を管理する。
+//! 保存先データファイルの移行、原子配置、指紋計算を管理する。
 
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::Path,
-    time::Duration,
 };
 
-use rusqlite::{backup::Backup, types::Value, Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
-use super::pointer::temporary_path;
-use super::{DATA_FILES, PROJECT_TREE_FILE};
+use super::paths::{temporary_path, DATA_FILES, PROJECT_TREE_FILE};
 
 /// source に存在する3ファイルだけを、既存ファイルを上書きせず target へ複製する。
 pub(super) fn migrate_data_files(
@@ -121,7 +118,7 @@ pub(super) fn migrate_data_files(
 /// JSON ファイルはバイト列、SQLite は DB 内容を比較して移行の再試行を判定する。
 fn data_files_match(file_name: &str, source: &Path, target: &Path) -> Result<bool, String> {
     if file_name == PROJECT_TREE_FILE {
-        return sqlite_contents_match(source, target);
+        return super::sqlite::sqlite_contents_match(source, target);
     }
     let source_bytes = fs::read(source)
         .map_err(|error| format!("移行元を読み込めません ({}): {error}", source.display()))?;
@@ -134,7 +131,7 @@ fn data_files_match(file_name: &str, source: &Path, target: &Path) -> Result<boo
 fn copy_data_file(file_name: &str, source: &Path, target: &Path) -> Result<(), String> {
     let temporary_path = temporary_path(target, "migration");
     let result = if file_name == PROJECT_TREE_FILE {
-        backup_database(source, &temporary_path)
+        super::sqlite::backup_database(source, &temporary_path)
     } else {
         copy_file_to_temporary(source, &temporary_path)
     };
@@ -148,32 +145,6 @@ fn copy_data_file(file_name: &str, source: &Path, target: &Path) -> Result<(), S
         let _ = fs::remove_file(&temporary_path);
     }
     install_result
-}
-
-/// SQLite Backup API を使い、複製後に integrity_check を通す。
-pub(super) fn backup_database(source: &Path, temporary_target: &Path) -> Result<(), String> {
-    let source_connection = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| format!("SQLite 移行元を開けません: {error}"))?;
-    let mut target_connection = Connection::open(temporary_target)
-        .map_err(|error| format!("SQLite 一時 DB を作成できません: {error}"))?;
-    {
-        let backup = Backup::new(&source_connection, &mut target_connection)
-            .map_err(|error| format!("SQLite バックアップを開始できません: {error}"))?;
-        backup
-            .run_to_completion(64, Duration::from_millis(5), None)
-            .map_err(|error| format!("SQLite をバックアップできません: {error}"))?;
-    }
-    let integrity: String = target_connection
-        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .map_err(|error| format!("SQLite 移行先を検証できません: {error}"))?;
-    if integrity != "ok" {
-        return Err(format!(
-            "SQLite 移行先の整合性検査に失敗しました: {integrity}"
-        ));
-    }
-    drop(target_connection);
-    drop(source_connection);
-    Ok(())
 }
 
 /// JSON ファイルを同じ移行先フォルダ内の一時ファイルへ同期して書き込む。
@@ -224,133 +195,6 @@ pub(super) fn install_temporary_file(
     }
 }
 
-/// 保存先の初回起動では空 DB を原子的に準備し、再起動時も安全に再利用できるようにする。
-pub(super) fn ensure_project_tree_database(database_path: &Path) -> Result<(), String> {
-    match fs::symlink_metadata(database_path) {
-        Ok(metadata) if metadata.file_type().is_file() => {
-            crate::project_tree::validate_database_file(database_path)
-        }
-        Ok(_) => Err(format!(
-            "プロジェクトツリー DB が通常ファイルではありません: {}",
-            database_path.display()
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let temporary_path = temporary_path(database_path, "new-database");
-            if let Err(error) = crate::project_tree::prepare_new_database_file(&temporary_path) {
-                let _ = fs::remove_file(&temporary_path);
-                return Err(error);
-            }
-            if let Err(error) = install_temporary_file(&temporary_path, database_path) {
-                let _ = fs::remove_file(&temporary_path);
-                if crate::project_tree::is_empty_database_file(database_path).unwrap_or(false) {
-                    return Ok(());
-                }
-                return Err(error);
-            }
-            crate::project_tree::validate_database_file(database_path)
-        }
-        Err(error) => Err(format!(
-            "プロジェクトツリー DB を確認できません ({}): {error}",
-            database_path.display()
-        )),
-    }
-}
-
-/// SQLite のスキーマとテーブル内容が一致するか調べ、中断移行の同一 DB を判定する。
-pub(super) fn sqlite_contents_match(source: &Path, target: &Path) -> Result<bool, String> {
-    let source_connection = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| format!("SQLite 移行元を開けません: {error}"))?;
-    let target_connection = Connection::open_with_flags(target, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| format!("SQLite 移行先を開けません: {error}"))?;
-    let source_integrity = integrity_check(&source_connection)?;
-    let target_integrity = integrity_check(&target_connection)?;
-    if source_integrity != "ok" || target_integrity != "ok" {
-        return Ok(false);
-    }
-    Ok(database_contents(&source_connection)? == database_contents(&target_connection)?)
-}
-
-/// SQLite の論理内容を、表定義・全行・autoincrement 状態の順に取得する。
-fn database_contents(connection: &Connection) -> Result<DatabaseContents, String> {
-    let mut object_statement = connection
-        .prepare(
-            "SELECT type, name, sql FROM sqlite_master
-             WHERE type IN ('table', 'index', 'trigger', 'view')
-               AND name NOT LIKE 'sqlite_%'
-             ORDER BY type, name",
-        )
-        .map_err(|error| format!("SQLite スキーマを読み込めません: {error}"))?;
-    let objects = object_statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        })
-        .map_err(|error| format!("SQLite スキーマを取得できません: {error}"))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|error| format!("SQLite スキーマを読み込めません: {error}"))?;
-
-    let mut tables = Vec::new();
-    for (kind, name, _) in &objects {
-        if kind != "table" {
-            continue;
-        }
-        let escaped_name = name.replace('"', "\"\"");
-        let mut statement = connection
-            .prepare(&format!("SELECT * FROM \"{escaped_name}\" ORDER BY rowid"))
-            .map_err(|error| format!("SQLite テーブルを読み込めません ({name}): {error}"))?;
-        let column_count = statement.column_count();
-        let rows = statement
-            .query_map([], |row| {
-                (0..column_count)
-                    .map(|index| row.get::<_, Value>(index))
-                    .collect::<rusqlite::Result<Vec<_>>>()
-            })
-            .map_err(|error| format!("SQLite テーブルを取得できません ({name}): {error}"))?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|error| format!("SQLite テーブルを読み込めません ({name}): {error}"))?;
-        tables.push((name.clone(), rows));
-    }
-
-    let sequence = match connection.prepare("SELECT name, seq FROM sqlite_sequence ORDER BY name") {
-        Ok(mut statement) => statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })
-            .map_err(|error| format!("SQLite ID 採番状態を取得できません: {error}"))?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|error| format!("SQLite ID 採番状態を読み込めません: {error}"))?,
-        Err(rusqlite::Error::SqliteFailure(error, _))
-            if error.code == rusqlite::ErrorCode::Unknown =>
-        {
-            Vec::new()
-        }
-        Err(error) => return Err(format!("SQLite ID 採番状態を確認できません: {error}")),
-    };
-
-    Ok(DatabaseContents {
-        objects,
-        tables,
-        sequence,
-    })
-}
-
-/// DB が読み取り可能で整合しているかを調べる。
-fn integrity_check(connection: &Connection) -> Result<String, String> {
-    connection
-        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .map_err(|error| format!("SQLite 整合性を検査できません: {error}"))
-}
-
-#[derive(Debug, PartialEq)]
-struct DatabaseContents {
-    objects: Vec<(String, String, Option<String>)>,
-    tables: Vec<(String, Vec<Vec<Value>>)>,
-    sequence: Vec<(String, i64)>,
-}
-
 /// 移行元の対象ファイルを SHA-256 で記録し、移行後に外部変更を検知する。
 pub(super) fn fingerprint_data_files(directory: &Path) -> Result<BTreeMap<String, String>, String> {
     let mut fingerprints = BTreeMap::new();
@@ -393,8 +237,9 @@ pub(super) fn fingerprint_file(path: &Path) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::paths::{DATA_FILES, PREFERENCES_FILE, PROJECT_TREE_FILE, RECOVERY_FILE};
+    use super::super::sqlite::sqlite_contents_match;
     use super::super::test_support::TestDirectory;
-    use super::super::{DATA_FILES, PREFERENCES_FILE, PROJECT_TREE_FILE, RECOVERY_FILE};
     use super::*;
     use rusqlite::{params, Connection};
     use std::fs;
@@ -457,19 +302,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    /// DB は通常接続を開く前に Backup API で複製され、論理内容が保たれる。
-    #[test]
-    fn sqlite_backup_preserves_database_contents() {
-        let test_directory = TestDirectory::new();
-        let source = test_directory.path().join(PROJECT_TREE_FILE);
-        let target = test_directory.path().join("copied.sqlite3");
-        create_test_database(&source);
-
-        backup_database(&source, &target).unwrap();
-
-        assert!(sqlite_contents_match(&source, &target).unwrap());
     }
 
     /// 移行元にない名前でも移行先に既存ファイルがあれば予約を失敗させる。

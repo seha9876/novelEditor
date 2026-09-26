@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { EditorStatistics } from './editorStatistics'
+import type { EditorStatistics } from './statisticsCalculation'
 import type { TextCounts } from './textStatistics'
 
 defineProps<{ statistics: EditorStatistics }>()

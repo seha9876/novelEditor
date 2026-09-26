@@ -1,0 +1,41 @@
+/* ステータスバー、統計表示、保存先起動画面の領域を定義する。 */
+.status-bar { flex: none; height: var(--status-bar-height, 36px); min-height: var(--status-bar-height, 36px); max-height: var(--status-bar-height, 36px); flex-wrap: nowrap; padding-inline: var(--status-bar-padding, 12px); color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: var(--status-font-size, 0.75rem); }
+.statistics-status { width: 100%; min-width: 0; container-type: inline-size; }
+.statistics-inline { height: var(--status-bar-height, 36px); display: flex; align-items: center; justify-content: flex-end; flex-wrap: nowrap; gap: var(--status-gap, 16px); white-space: nowrap; overflow: hidden; }
+.statistics-total, .statistics-selection { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.statistics-position, .statistics-warning, .statistics-button { flex: none; }
+.statistics-button.v-btn { min-height: var(--status-button-height, 28px); height: var(--status-button-height, 28px); padding-inline: var(--status-button-padding, 12px); --v-btn-height: var(--status-button-height, 28px); --v-btn-size: var(--status-button-font-size, 0.75rem); font-size: var(--status-button-font-size, 0.75rem); }
+.statistics-button .v-icon { font-size: var(--status-button-icon-size, 18px); }
+.statistics-warning, .statistics-error { color: rgb(var(--v-theme-error)); }
+.statistics-table { width: 100%; border-collapse: collapse; margin-block: 8px 16px; }
+.statistics-table th, .statistics-table td { padding: 6px 4px; text-align: right; }
+.statistics-table th:first-child { text-align: left; }
+.statistics-table tbody th { font-weight: 500; }
+.statistics-details { margin-block: 12px; }
+.statistics-help { margin-block-start: 12px; font-size: 0.75rem; line-height: 1.6; }
+.storage-startup-titlebar { flex: none; }
+.storage-startup-main { min-height: 0; display: flex; align-items: safe center; overflow-y: auto; }
+.storage-startup-container { width: 100%; padding: 24px; }
+.storage-startup-message { margin-block: 16px; }
+.storage-startup-description { margin-block: 16px; line-height: 1.6; }
+.storage-startup-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-block-start: 20px; }
+.storage-location-label { margin-block-start: 12px; }
+.storage-location-path { overflow-wrap: anywhere; user-select: text; }
+
+/* 高さを変えず、優先度の低い位置・全文を順に省略する。詳細は常に統計から開ける。 */
+@container (max-width: 620px) {
+  .statistics-position { display: none; }
+}
+@container (max-width: 460px) {
+  .statistics-total { display: none; }
+  .statistics-inline { gap: min(var(--status-gap, 16px), 8px); }
+}
+@media (max-width: 650px) {
+  .menu-bar { padding-inline: min(var(--menu-bar-padding, 8px), 4px); }
+  .menu-heading.v-btn { padding-inline: min(var(--menu-button-padding, 12px), 5px); }
+  .window-controls .v-btn.v-btn--icon { width: min(var(--window-control-width, 46px), 40px); min-width: min(var(--window-control-width, 46px), 40px); }
+  .editor-host { --editor-side-padding: 22px; }
+  .editor-host .cm-content { padding-top: 28px; padding-bottom: 50px; }
+  .project-tree-header { padding-inline: 6px; }
+  .project-tree-toolbar .v-btn { font-size: 0.68rem; }
+}

@@ -40,6 +40,40 @@ test('プロジェクトツリー設定は旧データを補完し、保存幅�
   assert.deepEqual(preferences.normalizeApplicationPreferences({ ui: { projectTree: { width: 'wide', detached: 'yes' } } }).ui.projectTree, { width: 280, detached: false })
 })
 
+test('ステータスバー設定は旧データを既定値で補完し、不正値と重複だけを除去する', () => {
+  const preferences = loadSourceModule('src/appPreferenceSchema.ts')
+  const defaults = preferences.createDefaultApplicationPreferences().ui.statusBar
+  assert.deepEqual(defaults.items, ['documentCharacters', 'selectionCharacters', 'position', 'statistics'])
+  assert.deepEqual(
+    preferences.normalizeApplicationPreferences({ schemaVersion: 1, ui: { toolbar: { visible: true } } }).ui.statusBar,
+    defaults,
+  )
+  assert.deepEqual(
+    preferences.normalizeStatusBarItems(['fontFamily', 'fontFamily', 'not-an-item', 'lineCount', null]),
+    ['fontFamily', 'lineCount'],
+  )
+  assert.deepEqual(preferences.normalizeStatusBarItems(['statistics', 'fontFamily']), ['statistics', 'fontFamily'])
+  assert.deepEqual(preferences.normalizeStatusBarItems([]), [])
+
+  const source = { items: ['fontSize', 'wrapMode'] }
+  const cloned = preferences.cloneStatusBarPreferences(source)
+  cloned.items.push('statistics')
+  assert.deepEqual(source.items, ['fontSize', 'wrapMode'])
+  assert.deepEqual(preferences.resetStatusBarPreferences(), defaults)
+})
+
+test('ステータスバーの設定一覧は表示順を反転し、操作結果を保存順へ戻す', () => {
+  const { getStatusBarSettingsItems, getStatusBarStoredItems, insertStatusBarItemAtSettingsIndex, removeStatusBarItemAtSettingsIndex, moveStatusBarItemAtSettingsIndex, reorderStatusBarItemsAtSettingsIndex } = loadSourceModule('src/statusBarOrdering.ts')
+  const stored = ['documentCharacters', 'selectionCharacters', 'position']
+  assert.deepEqual(getStatusBarSettingsItems(stored), ['position', 'selectionCharacters', 'documentCharacters'])
+  assert.deepEqual(getStatusBarStoredItems(['position', 'selectionCharacters', 'documentCharacters']), stored)
+  assert.deepEqual(insertStatusBarItemAtSettingsIndex(stored, 'statistics', 0), ['documentCharacters', 'selectionCharacters', 'position', 'statistics'])
+  assert.deepEqual(removeStatusBarItemAtSettingsIndex(stored, 0), ['documentCharacters', 'selectionCharacters'])
+  assert.deepEqual(moveStatusBarItemAtSettingsIndex(stored, 0, 1), ['documentCharacters', 'position', 'selectionCharacters'])
+  assert.deepEqual(moveStatusBarItemAtSettingsIndex(stored, 2, -1), ['selectionCharacters', 'documentCharacters', 'position'])
+  assert.deepEqual(reorderStatusBarItemsAtSettingsIndex(stored, 0, 2), ['position', 'documentCharacters', 'selectionCharacters'])
+})
+
 test('バーサイズ設定は旧データを中サイズで補完し、項目ごとの不正値だけを補正する', () => {
   const preferences = loadSourceModule('src/appPreferenceSchema.ts')
   const presentation = loadSourceModule('src/interfaceBarPresentation.ts')
@@ -96,8 +130,10 @@ test('バーサイズ設定の保存はStoreへ正規化済みの実値を書き
     initialization.preferences.editor,
     initialization.preferences.ui.toolbar,
     { menu: 'large', toolbar: 'not-a-size', status: 'small' },
+    { items: ['fontFamily', 'fontSize', 'statistics'] },
   )
   assert.deepEqual(storedValue.ui.barSizes, { menu: 'large', toolbar: 'medium', status: 'small' })
+  assert.deepEqual(storedValue.ui.statusBar.items, ['fontFamily', 'fontSize', 'statistics'])
   assert.ok(setCount >= 2)
   assert.equal(schema.normalizeInterfaceSize('not-a-size'), 'medium')
 })

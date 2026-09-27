@@ -11,10 +11,12 @@ import {
   createDefaultApplicationPreferences,
   normalizeApplicationPreferences,
   normalizeInterfaceBarSizes,
+  normalizeStatusBarPreferences,
   normalizeToolbarItems,
   type ApplicationPreferencesV1,
   type InterfaceBarSizes,
   type ProjectTreePreferences,
+  type StatusBarPreferences,
   type ToolbarPreferences,
 } from './appPreferenceSchema'
 
@@ -122,11 +124,12 @@ async function writePreferences(targetStore: Store, preferences: ApplicationPref
   await targetStore.save()
 }
 
-/** エディター・ツールバー・バーサイズの現在値を一つのStore更新として保存する。 */
+/** エディター・ツールバー・ステータスバー・バーサイズの現在値を一つのStore更新として保存する。 */
 export function saveSettingsPreferences(
   editor: EditorSettings,
   toolbar: ToolbarPreferences,
   barSizes: InterfaceBarSizes,
+  statusBar?: StatusBarPreferences,
 ): Promise<void> {
   return savePreferenceUpdate((current) => ({
     ...current,
@@ -137,6 +140,7 @@ export function saveSettingsPreferences(
         visible: toolbar.visible,
         items: normalizeToolbarItems(toolbar.items),
       },
+      statusBar: statusBar ? normalizeStatusBarPreferences(statusBar) : current.ui.statusBar,
       barSizes: normalizeInterfaceBarSizes(barSizes),
     },
   }))

@@ -14,6 +14,7 @@ test('設定履歴moduleはセッション・上限・Undo/Redoを独立して�
   const base = {
     editor: { ...defaults.editor },
     toolbar: { ...defaults.ui.toolbar, items: defaults.ui.toolbar.items.map((item) => ({ ...item })) },
+    statusBar: { ...defaults.ui.statusBar, items: [...defaults.ui.statusBar.items] },
     barSizes: { ...defaults.ui.barSizes },
   }
   const changed = { ...base, editor: { ...base.editor, fontSize: base.editor.fontSize + 1 } }
@@ -138,7 +139,7 @@ test('設定Controllerは変更を履歴化し、Undo/Redoと直列保存を実�
   let commandHandler
   const mocks = {
     './appPreferences': {
-      async saveSettingsPreferences(editor, toolbar, barSizes) { saved.push({ editor, toolbar, barSizes }) },
+      async saveSettingsPreferences(editor, toolbar, barSizes, statusBar) { saved.push({ editor, toolbar, barSizes, statusBar }) },
     },
     '@tauri-apps/api/event': {
       async emitTo() {},
@@ -167,9 +168,58 @@ test('設定Controllerは変更を履歴化し、Undo/Redoと直列保存を実�
   assert.equal(controller.editorSettings.value.fontSize, originalSize)
   commandHandler({ payload: { type: 'redo' } })
   assert.equal(controller.editorSettings.value.fontSize, originalSize + 1)
+  commandHandler({ payload: { type: 'change', statusBar: { items: ['fontFamily', 'fontSize'] } } })
+  assert.deepEqual(controller.displayedStatusBarItems.value, ['fontFamily', 'fontSize'])
+  commandHandler({ payload: { type: 'undo' } })
+  assert.deepEqual(controller.displayedStatusBarItems.value, ['documentCharacters', 'selectionCharacters', 'position', 'statistics'])
+  commandHandler({ payload: { type: 'redo' } })
+  assert.deepEqual(controller.displayedStatusBarItems.value, ['fontFamily', 'fontSize'])
   await controller.flush()
   assert.equal(saved.at(-1).editor.fontSize, originalSize + 1)
+  assert.deepEqual(saved.at(-1).statusBar.items, ['fontFamily', 'fontSize'])
   assert.deepEqual(notices, [])
+  await controller.dispose()
+})
+
+test('設定Controllerはステータスバー保存失敗時に直近の保存値へ戻す', async () => {
+  const preferences = loadSourceModule('src/appPreferenceSchema.ts')
+  let commandHandler
+  let rejectSave = false
+  const mocks = {
+    './appPreferences': {
+      async saveSettingsPreferences() {
+        if (rejectSave) throw new Error('ステータスバー保存失敗')
+      },
+    },
+    '@tauri-apps/api/event': {
+      async emitTo() {},
+      async listen(_event, handler) { commandHandler = handler; return () => {} },
+    },
+    '@tauri-apps/api/webviewWindow': {
+      WebviewWindow: class {
+        static async getByLabel() { return null }
+      },
+    },
+  }
+  const { useSettingsController } = loadSourceModule('src/useSettingsController.ts', mocks, new Map())
+  const notices = []
+  const controller = useSettingsController({
+    initialPreferences: preferences.createDefaultApplicationPreferences(),
+    showPersistenceNotice: (text) => notices.push(text),
+    showError: async () => {},
+  })
+
+  await controller.setup()
+  commandHandler({ payload: { type: 'ready' } })
+  commandHandler({ payload: { type: 'change', statusBar: { items: ['fontFamily'] } } })
+  await controller.flush()
+  assert.deepEqual(controller.displayedStatusBarItems.value, ['fontFamily'])
+
+  rejectSave = true
+  commandHandler({ payload: { type: 'change', statusBar: { items: [] } } })
+  await controller.flush()
+  assert.deepEqual(controller.displayedStatusBarItems.value, ['fontFamily'])
+  assert.match(notices.at(-1), /直近の保存内容へ戻しました/)
   await controller.dispose()
 })
 

@@ -7,15 +7,15 @@
 .project-tree-resize-handle:hover, .project-tree-resize-handle:focus-visible { background: rgba(var(--v-theme-primary), 0.18); outline: none; }
 .project-tree-resize-handle:focus-visible { box-shadow: inset -2px 0 rgb(var(--v-theme-primary)); }
 .project-tree-sidebar { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.project-tree-header { flex: none; padding: 14px 10px 8px; border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
-.project-tree-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin: 0 0 4px 4px; }
-.project-tree-heading { margin: 0; font-size: 0.8rem; font-weight: 600; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); }
-.project-tree-detach { flex: none; }
-.project-tree-project-row { display: flex; align-items: center; gap: 2px; }
-.project-tree-select { min-width: 0; flex: 1 1 auto; }
-.project-tree-select .v-field__input { min-height: 36px; padding-block: 5px; font-size: 0.875rem; }
-.project-tree-toolbar { display: flex; gap: 2px; margin-block-start: 6px; }
-.project-tree-toolbar .v-btn { padding-inline: 6px; }
+.project-tree-header { flex: none; min-width: 0; padding: 6px 8px; border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.project-tree-heading-row { min-width: 0; display: flex; align-items: center; gap: 1px; }
+.project-tree-heading { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-inline: 2px 3px; font-size: 0.82rem; font-weight: 600; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); }
+.project-tree-heading.is-empty { font-weight: 500; }
+.project-tree-header-action, .project-tree-detach, .project-menu-activator { flex: none; }
+.project-tree-header .v-btn.v-btn--icon { width: 32px; min-width: 32px; height: 32px; }
+.project-tree-header .v-icon { font-size: 19px; }
+.project-menu-list { max-width: min(320px, calc(100vw - 16px)); }
+.project-menu-switch-list { overflow-y: auto; }
 .project-tree-origin { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 6px 10px; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: 0.75rem; border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
 .project-tree-origin > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-tree-origin .v-btn { flex: none; padding-inline: 4px; }

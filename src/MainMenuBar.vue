@@ -3,6 +3,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, toRefs } from 'vue'
 import type { CommandId } from './appCommands'
 import type { EditorSettings } from './editorSettings'
+import type { ProjectTreeProject } from './projectTreeModel'
+import ProjectMenu from './ProjectMenu.vue'
 
 type MainMenuBarProps = {
   toolbarVisible: boolean
@@ -14,12 +16,19 @@ type MainMenuBarProps = {
   alwaysOnTop: boolean
   isCommandDisabled: (commandId: CommandId) => boolean
   getCommandShortcut: (commandId: CommandId) => string | undefined
+  projects: readonly ProjectTreeProject[]
+  activeProjectId: number | null
+  projectMenuDisabled: boolean
 }
 
 const props = defineProps<MainMenuBarProps>()
 const emit = defineEmits<{
   command: [commandId: CommandId]
   'toggle-maximize': []
+  'project-create': []
+  'project-select': [projectId: number]
+  'project-rename': []
+  'project-delete': []
 }>()
 
 const {
@@ -32,11 +41,15 @@ const {
   alwaysOnTop,
   isCommandDisabled,
   getCommandShortcut,
+  projects,
+  activeProjectId,
+  projectMenuDisabled,
 } = toRefs(props)
 
 type OpenMenu = 'file' | 'edit' | 'settings' | 'display' | 'window' | null
 const openMenu = ref<OpenMenu>(null)
 const settingsSubmenuOpen = ref(false)
+const projectMenu = ref<{ closeMenus: () => void } | null>(null)
 
 const displayMenuOpen = computed({
   get: (): boolean => openMenu.value === 'display',
@@ -99,6 +112,7 @@ function onKeydown(event: KeyboardEvent): void {
 function closeMenus(): void {
   openMenu.value = null
   settingsSubmenuOpen.value = false
+  projectMenu.value?.closeMenus()
 }
 
 onMounted(() => window.addEventListener('keydown', onKeydown, true))
@@ -141,6 +155,17 @@ defineExpose({ closeMenus })
         </VListItem>
       </VList>
     </VMenu>
+    <ProjectMenu
+      ref="projectMenu"
+      mode="text"
+      :projects="projects"
+      :active-project-id="activeProjectId"
+      :disabled="projectMenuDisabled"
+      @create="emit('project-create')"
+      @select="emit('project-select', $event)"
+      @rename="emit('project-rename')"
+      @delete="emit('project-delete')"
+    />
     <VMenu v-model="settingsMenuOpen" :close-on-content-click="false" :transition="false">
       <template #activator="{ props: settingsMenuProps }">
         <VBtn v-bind="settingsMenuProps" class="menu-heading" size="small" variant="text">設定</VBtn>

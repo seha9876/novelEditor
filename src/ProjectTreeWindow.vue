@@ -27,6 +27,8 @@ let unlistenClose: (() => void) | undefined
 let pendingOpenRequestId: string | null = null
 let dockAfterOpenRequest = false
 const dockWaitingForOpenResult = ref(false)
+let mounted = false
+let lifecycleGeneration = 0
 
 /** ウィンドウIDを付けて要求を送信し、古い分離ウィンドウの操作と区別する。 */
 async function sendCommand(command: ProjectTreeWindowCommandPayload): Promise<boolean> {
@@ -111,14 +113,28 @@ async function handleOpenResultApplied(requestId: string): Promise<void> {
 
 onMounted(async () => {
   if (!windowId) return
-  unlistenState = await listen<ProjectTreeWindowState>(PROJECT_TREE_WINDOW_STATE_EVENT, (event) => {
+  mounted = true
+  const generation = ++lifecycleGeneration
+  const lateUnlistenState = await listen<ProjectTreeWindowState>(PROJECT_TREE_WINDOW_STATE_EVENT, (event) => {
     receiveState(event.payload)
   })
-  unlistenClose = await getCurrentWindow().onCloseRequested(requestDockOnClose)
+  if (!mounted || generation !== lifecycleGeneration) {
+    lateUnlistenState()
+    return
+  }
+  unlistenState = lateUnlistenState
+  const lateUnlistenClose = await getCurrentWindow().onCloseRequested(requestDockOnClose)
+  if (!mounted || generation !== lifecycleGeneration) {
+    lateUnlistenClose()
+    return
+  }
+  unlistenClose = lateUnlistenClose
   await sendCommand({ type: 'ready' })
 })
 
 onBeforeUnmount(() => {
+  mounted = false
+  lifecycleGeneration += 1
   unlistenState?.()
   unlistenClose?.()
 })

@@ -285,6 +285,142 @@ test('ツリーの複数選択メニューは一括解除だけを表示し、�
   assert.match(selection, /const displayedSelection = validSelection\.filter\(\(id\) => visibleIds\.has\(id\)\)/)
 })
 
+test('ツリーヘッダーは幅を消費する選択欄を持たず、追加操作をアイコンと説明へ集約する', () => {
+  const sidebar = readFileSync(resolve(projectRoot, 'src/ProjectTreeSidebar.vue'), 'utf8')
+  const styles = readFileSync(resolve(projectRoot, 'src/styles/project-tree.css'), 'utf8')
+  assert.doesNotMatch(sidebar, /<VSelect/)
+  assert.doesNotMatch(sidebar, /class="project-tree-toolbar"/)
+  assert.match(sidebar, /mdi-folder-plus-outline/)
+  assert.match(sidebar, /mdi-file-plus-outline/)
+  assert.match(sidebar, /aria-label="フォルダを追加"/)
+  assert.match(sidebar, /aria-label="TXTを登録"/)
+  assert.match(sidebar, /プロジェクトなし/)
+  assert.match(styles, /\.project-tree-heading-row[\s\S]*display: flex/)
+  assert.match(styles, /\.project-tree-heading[\s\S]*text-overflow: ellipsis/)
+})
+
+test('プロジェクトメニューはSidebarとメニューバーで共通利用し、切替一覧をスクロール可能にする', () => {
+  const menu = readFileSync(resolve(projectRoot, 'src/ProjectMenu.vue'), 'utf8')
+  const mainMenu = readFileSync(resolve(projectRoot, 'src/MainMenuBar.vue'), 'utf8')
+  const sidebar = readFileSync(resolve(projectRoot, 'src/ProjectTreeSidebar.vue'), 'utf8')
+  assert.match(mainMenu, /<ProjectMenu[\s\S]*mode="text"/)
+  assert.match(sidebar, /<ProjectMenu/)
+  assert.match(menu, /新しいプロジェクト/)
+  assert.match(menu, /プロジェクトを切り替え/)
+  assert.match(menu, /名前を変更/)
+  assert.match(menu, /プロジェクトを削除/)
+  assert.match(menu, /max-height="320"/)
+  assert.match(menu, /aria-checked/)
+  assert.ok((menu.match(/:disabled="props\.disabled"/g) ?? []).length >= 2)
+})
+
+test('プロジェクト操作Composableは作成後自動選択、同一選択の無操作、名称変更、出自解除を実行する', async () => {
+  const { ref } = require('vue')
+  const calls = []
+  const detached = []
+  const snapshot = ref({
+    projects: [{ id: 1, name: '主作品' }],
+    nodes: [],
+    activeProjectId: 1,
+  })
+  const actionsModule = loadSourceModule('src/useProjectTreeProjectActions.ts', {
+    '@tauri-apps/plugin-dialog': { ask: async () => true },
+    './projectTreeClient': {
+      createProject: async (name) => { snapshot.value.projects.push({ id: 2, name }) },
+      renameProject: async (projectId, name) => { snapshot.value.projects.find((project) => project.id === projectId).name = name },
+      selectProject: async (projectId) => { snapshot.value.activeProjectId = projectId },
+      deleteProject: async (projectId) => { snapshot.value.projects = snapshot.value.projects.filter((project) => project.id !== projectId); snapshot.value.activeProjectId = null },
+    },
+  })
+  let clearSelectionCount = 0
+  const actions = actionsModule.useProjectTreeProjectActions({
+    snapshot,
+    isBusy: () => false,
+    runMutation: async (action) => { calls.push('mutation'); await action(); return true },
+    documentOrigin: () => ({ nodeId: 11, projectId: 2 }),
+    clearNodeSelection: () => { clearSelectionCount += 1 },
+    onOriginDetached: (nodeId) => { detached.push(nodeId) },
+  })
+
+  actions.requestProjectCreate()
+  actions.projectDialogValue.value = '副作品'
+  await actions.saveProjectDialog()
+  assert.equal(snapshot.value.activeProjectId, 2)
+  assert.equal(clearSelectionCount, 1)
+  const mutationCountAfterCreate = calls.length
+  await actions.changeProject(2)
+  assert.equal(calls.length, mutationCountAfterCreate)
+
+  actions.requestProjectRename()
+  actions.projectDialogValue.value = '副作品・改'
+  await actions.saveProjectDialog()
+  assert.equal(snapshot.value.projects.find((project) => project.id === 2).name, '副作品・改')
+
+  await actions.requestProjectDelete()
+  assert.deepEqual(detached, [11])
+})
+
+test('プロジェクトControllerは購読失敗後も初期読込を続け、破棄中の遅着読込を反映しない', async () => {
+  const { ref } = require('vue')
+  let loadCount = 0
+  const controllerModule = loadSourceModule('src/useProjectTreeProjectController.ts', {
+    '@tauri-apps/api/event': {
+      listen: async () => { throw new Error('購読失敗') },
+    },
+    './projectTreeClient': {
+      loadProjectTreeSnapshot: async () => { loadCount += 1; return { projects: [{ id: 1, name: '読込済み' }], nodes: [], activeProjectId: 1 } },
+      notifyProjectTreeChanged: async () => {},
+    },
+    '@tauri-apps/plugin-dialog': { ask: async () => false },
+  })
+  const controller = controllerModule.useProjectTreeProjectController({
+    disabled: ref(false),
+    documentOrigin: ref(null),
+    showError: async () => {},
+    onOriginDetached: () => {},
+  })
+  const loggedErrors = []
+  const previousConsoleError = globalThis.console.error
+  globalThis.console.error = (...args) => { loggedErrors.push(args) }
+  try {
+    await controller.setup()
+  } finally {
+    globalThis.console.error = previousConsoleError
+  }
+  assert.equal(loadCount, 1)
+  assert.equal(controller.activeProjectId.value, 1)
+  assert.equal(loggedErrors.length, 1)
+  controller.dispose()
+
+  const snapshotDeferred = deferred()
+  const listeners = []
+  let unlistenCount = 0
+  const lateControllerModule = loadSourceModule('src/useProjectTreeProjectController.ts', {
+    '@tauri-apps/api/event': {
+      listen: async (_event, handler) => { listeners.push(handler); return () => { unlistenCount += 1 } },
+    },
+    './projectTreeClient': {
+      loadProjectTreeSnapshot: async () => snapshotDeferred.promise,
+      notifyProjectTreeChanged: async () => {},
+    },
+    '@tauri-apps/plugin-dialog': { ask: async () => false },
+  })
+  const lateController = lateControllerModule.useProjectTreeProjectController({
+    disabled: ref(false),
+    documentOrigin: ref(null),
+    showError: async () => {},
+    onOriginDetached: () => {},
+  })
+  const setup = lateController.setup()
+  await Promise.resolve()
+  lateController.dispose()
+  snapshotDeferred.release({ projects: [{ id: 2, name: '遅着' }], nodes: [], activeProjectId: 2 })
+  await setup
+  assert.equal(lateController.projects.value.length, 0)
+  assert.equal(listeners.length, 1)
+  assert.equal(unlistenCount, 1)
+})
+
 test('複数TXTのドロップ登録は一部が失敗しても残りを続行する', async () => {
   const invocations = []
   const tree = loadSourceModule('src/projectTreeClient.ts', {
@@ -413,7 +549,9 @@ test('ドラッグ開始時は未実行の幅保存だけを取り消し、終�
 })
 
 test('プロジェクトツリーStoreは初期読込と更新後再取得を実動作で直列化する', async () => {
-  const { useProjectTreeStore } = loadSourceModule('src/useProjectTreeStore.ts')
+  const { useProjectTreeStore } = loadSourceModule('src/useProjectTreeStore.ts', {
+    './projectTreeClient': { notifyProjectTreeChanged: async () => {} },
+  })
   const snapshots = [
     { projects: [], nodes: [], activeProjectId: null },
     { projects: [{ id: 1, name: '作品' }], nodes: [], activeProjectId: 1 },
@@ -440,8 +578,144 @@ test('プロジェクトツリーStoreは初期読込と更新後再取得を実
   assert.deepEqual(errors, [])
 })
 
+test('プロジェクトツリーStoreは変更通知を発信元ごとに無視し、連続通知を最新読込へ集約する', async () => {
+  const listeners = []
+  let unlistenCount = 0
+  let loadCount = 0
+  const refreshDeferred = deferred()
+  const store = loadSourceModule('src/useProjectTreeStore.ts', {
+    '@tauri-apps/api/event': {
+      listen: async (_event, handler) => {
+        listeners.push(handler)
+        return () => { unlistenCount += 1 }
+      },
+    },
+    './projectTreeClient': {
+      notifyProjectTreeChanged: async () => {},
+    },
+  }).useProjectTreeStore({
+    sourceId: 'self',
+    loadSnapshot: async () => {
+      loadCount += 1
+      return loadCount === 1 ? { projects: [], nodes: [], activeProjectId: null } : refreshDeferred.promise
+    },
+    canMutate: () => true,
+    showError: async () => {},
+  })
+
+  await store.setup()
+  await store.initializeTree()
+  assert.equal(listeners.length, 1)
+  listeners[0]({ payload: { sourceId: 'self', revision: 1 } })
+  assert.equal(loadCount, 1)
+  listeners[0]({ payload: { sourceId: 'other', revision: 1 } })
+  listeners[0]({ payload: { sourceId: 'other', revision: 2 } })
+  assert.equal(loadCount, 2)
+  refreshDeferred.release({ projects: [{ id: 2, name: '最新' }], nodes: [], activeProjectId: 2 })
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 0))
+  assert.equal(store.snapshot.value.activeProjectId, 2)
+  store.dispose()
+  assert.equal(unlistenCount, 1)
+})
+
+test('プロジェクトツリーStoreは古い読込結果を反映せず、最新通知の結果だけを表示する', async () => {
+  const listeners = []
+  const stale = deferred()
+  const latest = deferred()
+  let loadCount = 0
+  const store = loadSourceModule('src/useProjectTreeStore.ts', {
+    '@tauri-apps/api/event': {
+      listen: async (_event, handler) => {
+        listeners.push(handler)
+        return () => {}
+      },
+    },
+    './projectTreeClient': { notifyProjectTreeChanged: async () => {} },
+  }).useProjectTreeStore({
+    sourceId: 'self',
+    loadSnapshot: async () => {
+      loadCount += 1
+      if (loadCount === 1) return { projects: [{ id: 1, name: '初期' }], nodes: [], activeProjectId: 1 }
+      if (loadCount === 2) return stale.promise
+      return latest.promise
+    },
+    canMutate: () => true,
+    showError: async () => {},
+  })
+
+  await store.setup()
+  await store.initializeTree()
+  listeners[0]({ payload: { sourceId: 'other', revision: 1 } })
+  listeners[0]({ payload: { sourceId: 'other', revision: 2 } })
+  stale.release({ projects: [{ id: 2, name: '古い結果' }], nodes: [], activeProjectId: 2 })
+  await Promise.resolve()
+  assert.equal(store.snapshot.value.activeProjectId, 1)
+  latest.release({ projects: [{ id: 3, name: '最新結果' }], nodes: [], activeProjectId: 3 })
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 0))
+  assert.equal(store.snapshot.value.activeProjectId, 3)
+  store.dispose()
+})
+
+test('プロジェクトツリーStoreは古いrefreshの失敗を捨て、Mutation中に要求された最新refreshを完了する', async () => {
+  const listeners = []
+  let rejectRefreshA
+  let rejectLatestRefresh
+  const refreshA = { promise: new Promise((_resolve, reject) => { rejectRefreshA = reject }) }
+  const refreshB = deferred()
+  const refreshLatestError = { promise: new Promise((_resolve, reject) => { rejectLatestRefresh = reject }) }
+  const notifications = []
+  const errors = []
+  let loadCount = 0
+  const store = loadSourceModule('src/useProjectTreeStore.ts', {
+    '@tauri-apps/api/event': {
+      listen: async (_event, handler) => {
+        listeners.push(handler)
+        return () => {}
+      },
+    },
+    './projectTreeClient': {
+      notifyProjectTreeChanged: async (...args) => { notifications.push(args) },
+    },
+  }).useProjectTreeStore({
+    sourceId: 'self',
+    loadSnapshot: async () => {
+      loadCount += 1
+      if (loadCount === 1) return { projects: [{ id: 1, name: '初期' }], nodes: [], activeProjectId: 1 }
+      if (loadCount === 2) return refreshA.promise
+      if (loadCount === 3) return refreshB.promise
+      return refreshLatestError.promise
+    },
+    canMutate: () => true,
+    showError: async (error) => { errors.push(error) },
+  })
+
+  await store.setup()
+  await store.initializeTree()
+  listeners[0]({ payload: { sourceId: 'other', revision: 1 } })
+  const mutation = store.runMutation(async () => {})
+  await Promise.resolve()
+  rejectRefreshA(new Error('古いrefreshの失敗'))
+  await Promise.resolve()
+  assert.equal(store.treeError.value, '')
+  refreshB.release({ projects: [{ id: 2, name: '最新' }], nodes: [], activeProjectId: 2 })
+  assert.equal(await mutation, true)
+  assert.equal(store.snapshot.value.activeProjectId, 2)
+  assert.equal(store.treeError.value, '')
+  assert.equal(notifications.length, 1)
+  assert.deepEqual(errors, [])
+
+  const latestMutation = store.runMutation(async () => {})
+  await Promise.resolve()
+  rejectLatestRefresh(new Error('最新refreshの失敗'))
+  assert.equal(await latestMutation, false)
+  assert.equal(store.treeError.value, 'Error: 最新refreshの失敗')
+  assert.deepEqual(errors.map(String), ['Error: 最新refreshの失敗'])
+  store.dispose()
+})
+
 test('プロジェクトツリーStoreは破棄後の遅着DB結果と進捗表示を画面へ反映しない', async () => {
-  const { useProjectTreeStore } = loadSourceModule('src/useProjectTreeStore.ts')
+  const storeMocks = { './projectTreeClient': { notifyProjectTreeChanged: async () => {} } }
+  const { useProjectTreeStore } = loadSourceModule('src/useProjectTreeStore.ts', storeMocks)
   const snapshotDeferred = deferred()
   const refreshed = []
   const errors = []

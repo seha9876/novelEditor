@@ -1,13 +1,21 @@
 // プロジェクトツリーのTauriコマンドを型付き関数としてまとめる。
 import { invoke } from '@tauri-apps/api/core'
+import { emit } from '@tauri-apps/api/event'
 import type {
   ProjectTreePlacement,
   ProjectTreeSnapshot,
 } from './projectTreeModel'
+import { PROJECT_TREE_CHANGED_EVENT, type ProjectTreeChangedEvent } from './projectTreeWindow'
 
 export interface ProjectTreeFileRegistrationFailure {
   path: string
   error: string
+}
+
+/** プロジェクト操作後の再読込を他のツリー画面へ通知する。 */
+export function notifyProjectTreeChanged(sourceId: string, revision: number): Promise<void> {
+  const payload: ProjectTreeChangedEvent = { sourceId, revision }
+  return emit(PROJECT_TREE_CHANGED_EVENT, payload)
 }
 
 /** 保存済みのプロジェクトとノードを読み込む。 */

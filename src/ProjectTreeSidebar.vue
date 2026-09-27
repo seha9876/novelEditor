@@ -6,6 +6,8 @@ import { fileName } from './textFile'
 import type { ProjectTreeOpenRequest, ProjectTreeOpenResult } from './projectTreeWindow'
 import type { ProjectTreeNode, ProjectTreeSnapshot } from './projectTreeModel'
 import { moveProjectNode, loadProjectTreeSnapshot } from './projectTreeClient'
+import ProjectMenu from './ProjectMenu.vue'
+import ProjectNameDialog from './ProjectNameDialog.vue'
 import { useProjectTreeActions } from './useProjectTreeActions'
 import { useProjectTreeDragAndDrop } from './useProjectTreeDragAndDrop'
 import { useProjectTreeSelection } from './useProjectTreeSelection'
@@ -118,7 +120,7 @@ const actions = useProjectTreeActions({
   onOriginDetached: (nodeId) => emit('origin-detached', nodeId),
 })
 const actionController: ActionsController = actions
-isDialogOpen = () => actionController.dialogOpen.value
+isDialogOpen = () => actionController.dialogOpen.value || actionController.projectDialogOpen.value
 requestNodeRemove = () => { void actionController.requestNodeRemove() }
 closeNodeMenu = () => { actionController.nodeMenuOpen.value = false }
 
@@ -137,7 +139,6 @@ const {
   contextNode,
   nodeMenuOpen,
   nodeMenuTarget,
-  projectMenuOpen,
   dialogOpen,
   dialogTitle,
   dialogValue,
@@ -146,6 +147,10 @@ const {
   requestProjectCreate,
   requestProjectRename,
   requestProjectDelete,
+  projectDialogOpen,
+  projectDialogTitle,
+  projectDialogValue,
+  saveProjectDialog,
   registerFile,
   registerDroppedFiles,
   requestFolderCreate,
@@ -201,8 +206,9 @@ async function returnToOriginProject(): Promise<void> {
   await changeProject(currentOriginProject.value.id)
 }
 
-onMounted(() => {
-  void initializeTree()
+onMounted(async () => {
+  await store.setup()
+  await initializeTree()
 })
 onBeforeUnmount(() => {
   store.dispose()
@@ -220,52 +226,41 @@ watch(() => props.openResult, (result) => { void applyOpenResult(result) })
   <aside class="project-tree-sidebar" :class="{ 'is-reordering': dragNodeId !== null }" aria-label="プロジェクトツリー">
     <header class="project-tree-header">
       <div class="project-tree-heading-row">
-        <div class="project-tree-heading">プロジェクト</div>
-        <VBtn
-          class="project-tree-detach"
-          icon
-          size="x-small"
-          variant="text"
-          :aria-label="detached ? 'メイン画面へ戻す' : '別ウィンドウで表示'"
-          :title="detached ? 'メイン画面へ戻す' : '別ウィンドウで表示'"
-          @click="emit('detach-request')"
-        >
-          <VIcon :icon="detached ? 'mdi-dock-left' : 'mdi-dock-window'" aria-hidden="true" />
-        </VBtn>
-      </div>
-      <div class="project-tree-project-row">
-        <VSelect
-          class="project-tree-select"
-          :model-value="snapshot.activeProjectId"
-          :items="snapshot.projects"
-          item-title="name"
-          item-value="id"
-          density="compact"
-          variant="outlined"
-          hide-details
-          :disabled="isBusy || snapshot.projects.length === 0"
-          aria-label="表示するプロジェクト"
-          placeholder="プロジェクトを選択"
-          @update:model-value="changeProject"
-        />
-        <VBtn icon size="small" variant="text" aria-label="プロジェクトを作成" title="プロジェクトを作成" :disabled="isBusy" @click="requestProjectCreate">
-          <VIcon icon="mdi-plus" aria-hidden="true" />
-        </VBtn>
-        <VMenu v-model="projectMenuOpen" location="bottom end" :disabled="isBusy || !activeProject">
-          <template #activator="{ props: menuProps }">
-            <VBtn v-bind="menuProps" icon size="small" variant="text" aria-label="プロジェクト操作" title="プロジェクト操作" :disabled="isBusy || !activeProject">
-              <VIcon icon="mdi-dots-vertical" aria-hidden="true" />
+        <VTooltip :text="activeProject?.name ?? 'プロジェクトなし'" location="bottom">
+          <template #activator="{ props: tooltipProps }">
+            <span v-bind="tooltipProps" class="project-tree-heading" :class="{ 'is-empty': !activeProject }">{{ activeProject?.name ?? 'プロジェクトなし' }}</span>
+          </template>
+        </VTooltip>
+        <VTooltip text="フォルダを追加" location="bottom">
+          <template #activator="{ props: tooltipProps }">
+            <VBtn v-bind="tooltipProps" class="project-tree-header-action" icon size="small" variant="text" aria-label="フォルダを追加" title="フォルダを追加" :disabled="isBusy || !activeProject" @click="requestFolderCreate()">
+              <VIcon icon="mdi-folder-plus-outline" aria-hidden="true" />
             </VBtn>
           </template>
-          <VList density="compact" min-width="190" role="menu" aria-label="プロジェクト操作">
-            <VListItem role="menuitem" title="名前を変更" prepend-icon="mdi-pencil-outline" @click="requestProjectRename" />
-            <VListItem role="menuitem" title="プロジェクトを削除" prepend-icon="mdi-delete-outline" @click="requestProjectDelete" />
-          </VList>
-        </VMenu>
-      </div>
-      <div class="project-tree-toolbar">
-        <VBtn size="x-small" variant="text" prepend-icon="mdi-folder-plus-outline" :disabled="isBusy || !activeProject" @click="requestFolderCreate()">フォルダ</VBtn>
-        <VBtn size="x-small" variant="text" prepend-icon="mdi-file-plus-outline" :disabled="isBusy || !activeProject" @click="registerFile()">TXTを登録</VBtn>
+        </VTooltip>
+        <VTooltip text="TXTを登録" location="bottom">
+          <template #activator="{ props: tooltipProps }">
+            <VBtn v-bind="tooltipProps" class="project-tree-header-action" icon size="small" variant="text" aria-label="TXTを登録" title="TXTを登録" :disabled="isBusy || !activeProject" @click="registerFile()">
+              <VIcon icon="mdi-file-plus-outline" aria-hidden="true" />
+            </VBtn>
+          </template>
+        </VTooltip>
+        <ProjectMenu
+          :projects="snapshot.projects"
+          :active-project-id="snapshot.activeProjectId"
+          :disabled="isBusy"
+          @create="requestProjectCreate"
+          @select="changeProject"
+          @rename="requestProjectRename"
+          @delete="requestProjectDelete"
+        />
+        <VTooltip :text="detached ? 'メイン画面へ戻す' : '別ウィンドウで表示'" location="bottom">
+          <template #activator="{ props: tooltipProps }">
+            <VBtn v-bind="tooltipProps" class="project-tree-detach" icon size="small" variant="text" :aria-label="detached ? 'メイン画面へ戻す' : '別ウィンドウで表示'" :title="detached ? 'メイン画面へ戻す' : '別ウィンドウで表示'" @click="emit('detach-request')">
+              <VIcon :icon="detached ? 'mdi-dock-left' : 'mdi-dock-window'" aria-hidden="true" />
+            </VBtn>
+          </template>
+        </VTooltip>
       </div>
     </header>
 
@@ -373,6 +368,15 @@ watch(() => props.openResult, (result) => { void applyOpenResult(result) })
         </template>
       </VList>
     </VMenu>
+
+    <ProjectNameDialog
+      v-model="projectDialogOpen"
+      :title="projectDialogTitle"
+      :value="projectDialogValue"
+      :disabled="isBusy"
+      @update:value="projectDialogValue = $event"
+      @save="saveProjectDialog"
+    />
 
     <VDialog v-model="dialogOpen" max-width="420" @keydown.enter="saveNameDialog">
       <VCard>

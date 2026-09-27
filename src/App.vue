@@ -1,10 +1,11 @@
 <script setup lang="ts">
 // 各Controllerを組み合わせ、横断処理とメイン画面のレイアウト配置を担う。
-import { onMounted, onBeforeUnmount, ref } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
 import { message } from '@tauri-apps/plugin-dialog'
 import EditorPane from './EditorPane.vue'
 import ProjectTreeSidebar from './ProjectTreeSidebar.vue'
 import MainAppBar from './MainAppBar.vue'
+import ProjectNameDialog from './ProjectNameDialog.vue'
 import StatisticsStatus from './StatisticsStatus.vue'
 import { appCommandDefinitions, findShortcutCommand, type AppCommand, type CommandId } from './appCommands'
 import { confirmStorageStartup } from './storageLocation'
@@ -13,6 +14,7 @@ import type { ApplicationPreferencesV1 } from './appPreferenceSchema'
 import { useDocumentSession, type DocumentEditorHandle } from './useDocumentSession'
 import { useMainWindowController } from './useMainWindowController'
 import { useProjectTreeWindowController } from './useProjectTreeWindowController'
+import { useProjectTreeProjectController } from './useProjectTreeProjectController'
 import { useSearchController } from './useSearchController'
 import { useSettingsController } from './useSettingsController'
 
@@ -72,6 +74,13 @@ const projectTreeControllerInstance = useProjectTreeWindowController({
   onOriginDetached: documentSession.detachDocumentOrigin,
 })
 projectTreeController = projectTreeControllerInstance
+const projectControllerDisabled = computed(() => mainCloseInProgress.value || documentSession.busy.value)
+const projectController = useProjectTreeProjectController({
+  disabled: projectControllerDisabled,
+  documentOrigin: documentSession.documentOrigin,
+  showError: (error) => showError('プロジェクト操作', error),
+  onOriginDetached: documentSession.detachDocumentOrigin,
+})
 const mainWindowController = useMainWindowController({
   mainCloseInProgress,
   showError,
@@ -153,6 +162,22 @@ const {
   flush: flushProjectTreePreferences,
   dispose: disposeProjectTreeWindowController,
 } = projectTreeController
+const {
+  projects: projectMenuProjects,
+  activeProjectId: projectMenuActiveProjectId,
+  busy: projectControllerBusy,
+  projectDialogOpen,
+  projectDialogTitle,
+  projectDialogValue,
+  projectDialogSave,
+  requestProjectCreate,
+  requestProjectRename,
+  requestProjectDelete,
+  changeProject: changeMenuProject,
+  setup: setupProjectController,
+  dispose: disposeProjectController,
+} = projectController
+const projectMenuDisabled = computed(() => projectControllerDisabled.value || projectControllerBusy.value)
 const {
   open: openSearchWindow,
   close: closeSearchWindow,
@@ -299,6 +324,8 @@ onMounted(async () => {
   if (!isAppLifecycleActive(generation)) return
   await settingsController.setup()
   if (!isAppLifecycleActive(generation)) return
+  await setupProjectController()
+  if (!isAppLifecycleActive(generation)) return
   await setupSearchController()
   if (!isAppLifecycleActive(generation)) return
   await setupProjectTreeWindowController()
@@ -331,6 +358,7 @@ onBeforeUnmount(() => {
   disposeMainWindowController()
   void settingsController.dispose()
   void disposeSearchController()
+  disposeProjectController()
 })
 </script>
 
@@ -353,11 +381,26 @@ onBeforeUnmount(() => {
       :is-command-checked="isCommandChecked"
       :get-command-label="getCommandLabel"
       :get-command-shortcut="getCommandShortcut"
+      :projects="projectMenuProjects"
+      :active-project-id="projectMenuActiveProjectId"
+      :project-menu-disabled="projectMenuDisabled"
       @command="executeCommand"
       @toggle-maximize="toggleMaximizeWindow"
+      @project-create="requestProjectCreate"
+      @project-select="changeMenuProject"
+      @project-rename="requestProjectRename"
+      @project-delete="requestProjectDelete"
       @update-font-family="updateToolbarFontFamily"
       @update-typography-number="updateToolbarTypographyNumber"
       @adjust-font-size="adjustToolbarFontSize"
+    />
+    <ProjectNameDialog
+      v-model="projectDialogOpen"
+      :title="projectDialogTitle"
+      :value="projectDialogValue"
+      :disabled="projectMenuDisabled"
+      @update:value="projectDialogValue = $event"
+      @save="projectDialogSave"
     />
     <VSnackbar v-model="persistenceNoticeOpen" timeout="9000" location="bottom">
       {{ persistenceNotice }}

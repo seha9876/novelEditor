@@ -1,42 +1,17 @@
 <!-- 保存先の異なる TXT と仮想フォルダを、実ファイルを動かさず管理する。 -->
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { getCurrentWindow } from '@tauri-apps/api/window'
-import { ask, message } from '@tauri-apps/plugin-dialog'
-import { chooseTextFile, fileName } from './textFile'
+import { message } from '@tauri-apps/plugin-dialog'
+import { fileName } from './textFile'
 import type { ProjectTreeOpenRequest, ProjectTreeOpenResult } from './projectTreeWindow'
-import {
-  createProject,
-  createProjectFolder,
-  deleteProject,
-  hasProjectTreePointerDragStarted,
-  loadProjectTreeSnapshot,
-  moveProjectNode,
-  projectTreeAutoScrollStep,
-  projectTreeExternalDropDestination,
-  projectTreePhysicalToViewport,
-  projectTreeRowPlacement,
-  projectTreeSelectionAfterClick,
-  projectTreeSelectionAfterContextMenu,
-  projectTreeSelectionForNodes,
-  registerProjectFile,
-  registerDroppedProjectFiles,
-  relinkProjectFile,
-  removeProjectNodes,
-  renameProject,
-  renameProjectFolder,
-  selectProject,
-  shouldSuppressProjectTreeClick,
-  type ProjectTreeNode,
-  type ProjectTreePlacement,
-  type ProjectTreeSnapshot,
-} from './projectTree'
+import type { ProjectTreeNode, ProjectTreeSnapshot } from './projectTreeModel'
+import { moveProjectNode, loadProjectTreeSnapshot } from './projectTreeClient'
+import { useProjectTreeActions } from './useProjectTreeActions'
+import { useProjectTreeDragAndDrop } from './useProjectTreeDragAndDrop'
+import { useProjectTreeSelection } from './useProjectTreeSelection'
+import { useProjectTreeStore } from './useProjectTreeStore'
 
 type DocumentOrigin = { nodeId: number; projectId: number }
-type DialogMode = 'project-create' | 'project-rename' | 'folder-create' | 'folder-rename'
-type VisibleTreeRow = { node: ProjectTreeNode; depth: number }
-type PointerTreeDrag = { nodeId: number; pointerId: number; startX: number; startY: number; started: boolean }
-type TreeDropTarget = { nodeId: number | null; placement: ProjectTreePlacement; parentId: number | null }
 
 const props = withDefaults(defineProps<{
   disabled: boolean
@@ -61,171 +36,19 @@ const emit = defineEmits<{
   'detach-request': []
 }>()
 
-const snapshot = ref<ProjectTreeSnapshot>({ projects: [], nodes: [], activeProjectId: null })
-const loading = ref(true)
-const mutationPending = ref(false)
-const delayedProgress = ref(false)
-const treeError = ref('')
-const expandedFolders = ref(new Set<number>(props.expandedFolderIds))
-const unavailableNodes = ref(new Set<number>(props.unavailableNodeIds))
-const selectedNodeIds = ref(new Set<number>())
-const selectionAnchorNodeId = ref<number | null>(null)
-const treeScrollElement = ref<HTMLElement | null>(null)
-const dragNodeId = ref<number | null>(null)
-const dropIndicator = ref<{ nodeId: number | null; placement: ProjectTreePlacement } | null>(null)
-const pointerTreeDrag = ref<PointerTreeDrag | null>(null)
-const externalDropActive = ref(false)
-const nodeMenuOpen = ref(false)
-const nodeMenuTarget = ref<[number, number]>([0, 0])
-const contextNodeId = ref<number | null>(null)
-const projectMenuOpen = ref(false)
-const dialogOpen = ref(false)
-const dialogMode = ref<DialogMode>('project-create')
-const dialogTitle = ref('')
-const dialogValue = ref('')
-const dialogProjectId = ref<number | null>(null)
-const dialogParentId = ref<number | null>(null)
-const dialogNodeId = ref<number | null>(null)
 const pendingOpenRequest = ref<ProjectTreeOpenRequest | null>(null)
-let applyingUnavailableNodeProps = false
-let unlistenNativeDrop: (() => void) | null = null
-let nativeDropSetupCancelled = false
-let autoScrollFrame: number | null = null
-let latestPointerPosition = { x: 0, y: 0 }
-let suppressPointerGeneratedClick = false
+type SelectionController = ReturnType<typeof useProjectTreeSelection>
+type ActionsController = ReturnType<typeof useProjectTreeActions>
+let selectionController: SelectionController | null = null
+let isDialogOpen = (): boolean => false
+let requestNodeRemove = (): void => {}
+let closeNodeMenu = (): void => {}
 
-const activeProject = computed(() => snapshot.value.projects.find((project) => project.id === snapshot.value.activeProjectId) ?? null)
-const contextNode = computed(() => snapshot.value.nodes.find((node) => node.id === contextNodeId.value) ?? null)
-const currentOriginProject = computed(() => props.documentOrigin
-  ? snapshot.value.projects.find((project) => project.id === props.documentOrigin?.projectId) ?? null
-  : null)
-const showOriginNotice = computed(() => Boolean(
-  props.documentOrigin && currentOriginProject.value && currentOriginProject.value.id !== snapshot.value.activeProjectId,
-))
-const selectedNodes = computed(() => snapshot.value.nodes.filter((node) => selectedNodeIds.value.has(node.id)
-  && node.projectId === snapshot.value.activeProjectId))
-const isBusy = computed(() => props.disabled || loading.value || mutationPending.value || Boolean(treeError.value) || Boolean(pendingOpenRequest.value))
-
-/** 保存順を保ったまま、選択中プロジェクトの展開済み行を階層順に並べる。 */
-const visibleRows = computed<VisibleTreeRow[]>(() => {
-  const children = new Map<number | null, ProjectTreeNode[]>()
-  for (const node of snapshot.value.nodes) {
-    if (node.projectId !== snapshot.value.activeProjectId) continue
-    const group = children.get(node.parentId) ?? []
-    group.push(node)
-    children.set(node.parentId, group)
-  }
-
-  const rows: VisibleTreeRow[] = []
-  const appendChildren = (parentId: number | null, depth: number): void => {
-    for (const node of children.get(parentId) ?? []) {
-      rows.push({ node, depth })
-      if (node.kind === 'folder' && expandedFolders.value.has(node.id)) appendChildren(node.id, depth + 1)
-    }
-  }
-  appendChildren(null, 0)
-  return rows
-})
-
-/** ツリーの選択状態を置き換え、範囲選択の基準行も更新する。 */
-function setNodeSelection(nodeIds: number[], anchorNodeId: number | null = nodeIds.at(-1) ?? null): void {
-  selectedNodeIds.value = new Set(nodeIds)
-  selectionAnchorNodeId.value = anchorNodeId
-}
-
-/** ツリーの選択状態と範囲選択の基準行を空にする。 */
-function clearNodeSelection(): void {
-  setNodeSelection([])
-}
-
-/** 折りたたみや再読込で表示されなくなったノードを選択から外す。 */
-function pruneSelectionToVisibleRows(): void {
-  const visibleIds = new Set(visibleRows.value.map((row) => row.node.id))
-  const nextIds = [...selectedNodeIds.value].filter((id) => visibleIds.has(id))
-  if (nextIds.length === selectedNodeIds.value.size
-    && (selectionAnchorNodeId.value === null || visibleIds.has(selectionAnchorNodeId.value))) return
-  setNodeSelection(nextIds, selectionAnchorNodeId.value !== null && visibleIds.has(selectionAnchorNodeId.value)
-    ? selectionAnchorNodeId.value
-    : nextIds.at(-1) ?? null)
-}
-
-/** ツリーの表示行に対するクリック選択を適用する。 */
-function selectNodeFromClick(event: MouseEvent, node: ProjectTreeNode): boolean {
-  const change = projectTreeSelectionAfterClick(
-    visibleRows.value.map((row) => row.node.id),
-    selectedNodeIds.value,
-    selectionAnchorNodeId.value,
-    node.id,
-    { ctrlKey: event.ctrlKey || event.metaKey, shiftKey: event.shiftKey },
-  )
-  setNodeSelection(change.selectedNodeIds, change.anchorNodeId)
-  return event.ctrlKey || event.metaKey || event.shiftKey
-}
-
-/** 右クリック対象が未選択なら単独選択し、選択済みなら既存の選択を維持する。 */
-function selectNodeFromContextMenu(node: ProjectTreeNode): void {
-  const change = projectTreeSelectionAfterContextMenu(
-    visibleRows.value.map((row) => row.node.id),
-    selectedNodeIds.value,
-    node.id,
-  )
-  setNodeSelection(change.selectedNodeIds, change.anchorNodeId)
-}
-
-/** DB から最新のツリーを読み込み、削除済みノードに対する一時エラーを整理する。 */
-async function refreshSnapshot(): Promise<void> {
-  snapshot.value = await loadProjectTreeSnapshot()
-  const validIds = new Set(snapshot.value.nodes.map((node) => node.id))
-  unavailableNodes.value = new Set([...unavailableNodes.value].filter((id) => validIds.has(id)))
-  const validSelection = projectTreeSelectionForNodes(
-    selectedNodeIds.value,
-    snapshot.value.nodes,
-    snapshot.value.activeProjectId,
-  )
-  // snapshot.value の更新後に visibleRows を参照すると、新しい階層に基づいて再計算される。
-  const visibleIds = new Set(visibleRows.value.map((row) => row.node.id))
-  const displayedSelection = validSelection.filter((id) => visibleIds.has(id))
-  setNodeSelection(displayedSelection, displayedSelection.includes(selectionAnchorNodeId.value ?? -1)
-    ? selectionAnchorNodeId.value
-    : displayedSelection.at(-1) ?? null)
-  if (props.documentOrigin && !snapshot.value.projects.some((project) => project.id === props.documentOrigin?.projectId)) {
+/** DBから受け取ったツリーを選択状態へ反映し、文書の出自だけSidebarで同期する。 */
+function handleSnapshotRefreshed(nextSnapshot: ProjectTreeSnapshot): void {
+  selectionController?.handleSnapshotRefreshed(nextSnapshot)
+  if (props.documentOrigin && !nextSnapshot.projects.some((project) => project.id === props.documentOrigin?.projectId)) {
     emit('origin-detached', props.documentOrigin.nodeId)
-  }
-  treeError.value = ''
-}
-
-/** 初回表示時に保存済みプロジェクトとツリーを読み込む。 */
-async function initializeTree(): Promise<void> {
-  loading.value = true
-  treeError.value = ''
-  try {
-    await refreshSnapshot()
-  } catch (error) {
-    treeError.value = String(error)
-  } finally {
-    loading.value = false
-  }
-}
-
-/** DB 更新を直列化し、成功後に保存済み状態を再取得する。 */
-async function runMutation(action: () => Promise<void>): Promise<boolean> {
-  if (isBusy.value) return false
-  mutationPending.value = true
-  const progressTimer = setTimeout(() => { delayedProgress.value = true }, 250)
-  let mutationSucceeded = false
-  try {
-    await action()
-    mutationSucceeded = true
-    await refreshSnapshot()
-    return true
-  } catch (error) {
-    if (mutationSucceeded) treeError.value = String(error)
-    await showTreeError(error)
-    return false
-  } finally {
-    clearTimeout(progressTimer)
-    delayedProgress.value = false
-    mutationPending.value = false
   }
 }
 
@@ -237,162 +60,120 @@ async function showTreeError(error: unknown): Promise<void> {
   })
 }
 
-/** 入力ダイアログを開き、必要な対象 ID を保持する。 */
-function openNameDialog(mode: DialogMode, title: string, initialValue: string, ids: { projectId?: number | null; parentId?: number | null; nodeId?: number | null } = {}): void {
-  dialogMode.value = mode
-  dialogTitle.value = title
-  dialogValue.value = initialValue
-  dialogProjectId.value = ids.projectId ?? null
-  dialogParentId.value = ids.parentId ?? null
-  dialogNodeId.value = ids.nodeId ?? null
-  dialogOpen.value = true
-}
+const store = useProjectTreeStore({
+  loadSnapshot: loadProjectTreeSnapshot,
+  canMutate: () => !props.disabled && !pendingOpenRequest.value,
+  showError: showTreeError,
+  onSnapshotRefreshed: handleSnapshotRefreshed,
+})
+const {
+  snapshot,
+  loading,
+  mutationPending,
+  delayedProgress,
+  treeError,
+  initializeTree,
+  runMutation,
+} = store
 
-/** 名前入力を検証し、対応するプロジェクトまたは仮想フォルダを保存する。 */
-async function saveNameDialog(): Promise<void> {
-  const name = dialogValue.value.trim()
-  if (!name || isBusy.value) return
-  const previousNodeIds = new Set(snapshot.value.nodes.map((node) => node.id))
-  const previousProjectIds = new Set(snapshot.value.projects.map((project) => project.id))
+const selection = useProjectTreeSelection({
+  snapshot,
+  expandedFolderIds: props.expandedFolderIds,
+  unavailableNodeIds: props.unavailableNodeIds,
+  onExpandedChange: (nodeIds) => emit('expanded-change', nodeIds),
+  onUnavailableChange: (nodeIds) => emit('unavailable-change', nodeIds),
+  isDialogOpen: () => isDialogOpen(),
+  onDeleteSelection: () => requestNodeRemove(),
+  onEscape: () => closeNodeMenu(),
+})
+selectionController = selection
 
-  if (dialogMode.value === 'project-create') {
-    if (!await runMutation(() => createProject(name))) return
-    dialogOpen.value = false
-    const created = snapshot.value.projects.find((project) => !previousProjectIds.has(project.id))
-    if (created && snapshot.value.activeProjectId !== created.id) {
-      await runMutation(() => selectProject(created.id))
-    }
-    return
-  }
+const activeProject = computed(() => snapshot.value.projects.find((project) => project.id === snapshot.value.activeProjectId) ?? null)
+const currentOriginProject = computed(() => props.documentOrigin
+  ? snapshot.value.projects.find((project) => project.id === props.documentOrigin?.projectId) ?? null
+  : null)
+const showOriginNotice = computed(() => Boolean(
+  props.documentOrigin && currentOriginProject.value && currentOriginProject.value.id !== snapshot.value.activeProjectId,
+))
+const selectedNodes = computed(() => snapshot.value.nodes.filter((node) => selection.selectedNodeIds.value.has(node.id)
+  && node.projectId === snapshot.value.activeProjectId))
+const isBusy = computed(() => props.disabled || loading.value || mutationPending.value || Boolean(treeError.value) || Boolean(pendingOpenRequest.value))
 
-  let action: () => Promise<void>
-  if (dialogMode.value === 'project-rename' && dialogProjectId.value !== null) {
-    action = () => renameProject(dialogProjectId.value!, name)
-  } else if (dialogMode.value === 'folder-create' && snapshot.value.activeProjectId !== null) {
-    action = () => createProjectFolder(snapshot.value.activeProjectId!, dialogParentId.value, name)
-  } else if (dialogMode.value === 'folder-rename' && dialogNodeId.value !== null) {
-    action = () => renameProjectFolder(dialogNodeId.value!, name)
-  } else {
-    return
-  }
+const actions = useProjectTreeActions({
+  snapshot,
+  pendingOpenRequest,
+  documentOrigin: () => props.documentOrigin,
+  selectedNodes: () => selectedNodes.value,
+  unavailableNodeIds: () => [...selection.unavailableNodes.value],
+  isBusy: () => isBusy.value,
+  runMutation,
+  showTreeError,
+  setUnavailableNodeIds: (nodeIds) => selection.setUnavailableNodeIds(nodeIds),
+  clearNodeSelection: selection.clearNodeSelection,
+  selectNodeFromContextMenu: selection.selectNodeFromContextMenu,
+  expandFolderPath: selection.expandFolderPath,
+  containsNode: selection.containsNode,
+  onOpenFile: (request) => emit('open-file', request),
+  onOpenResultApplied: (requestId) => emit('open-result-applied', requestId),
+  onOriginDetached: (nodeId) => emit('origin-detached', nodeId),
+})
+const actionController: ActionsController = actions
+isDialogOpen = () => actionController.dialogOpen.value
+requestNodeRemove = () => { void actionController.requestNodeRemove() }
+closeNodeMenu = () => { actionController.nodeMenuOpen.value = false }
 
-  if (await runMutation(action)) {
-    dialogOpen.value = false
-    if (dialogMode.value === 'folder-create') {
-      const createdFolder = snapshot.value.nodes.find((node) => !previousNodeIds.has(node.id)
-        && node.kind === 'folder' && node.name === name
-        && node.parentId === dialogParentId.value && node.projectId === snapshot.value.activeProjectId)
-      if (createdFolder) expandFolderPath(createdFolder.id)
-    }
-  }
-}
+const {
+  expandedFolders,
+  unavailableNodes,
+  selectedNodeIds,
+  visibleRows,
+  setNodeSelection,
+  selectNodeFromClick,
+  toggleFolder,
+  handleTreeKeydown,
+  handleTreeBackgroundClick,
+} = selection
+const {
+  contextNode,
+  nodeMenuOpen,
+  nodeMenuTarget,
+  projectMenuOpen,
+  dialogOpen,
+  dialogTitle,
+  dialogValue,
+  saveNameDialog,
+  changeProject,
+  requestProjectCreate,
+  requestProjectRename,
+  requestProjectDelete,
+  registerFile,
+  registerDroppedFiles,
+  requestFolderCreate,
+  openNameDialog,
+  openNodeMenu,
+  openTreeFile,
+  applyOpenResult,
+  requestRelink,
+} = actions
 
-/** プロジェクト選択を保存してから表示を切り替える。 */
-async function changeProject(projectId: number | null): Promise<void> {
-  if (projectId === null || projectId === snapshot.value.activeProjectId) return
-  clearNodeSelection()
-  await runMutation(() => selectProject(projectId))
-}
-
-/** 新しいプロジェクトを作成するための入力を求める。 */
-function requestProjectCreate(): void {
-  openNameDialog('project-create', 'プロジェクトを作成', '')
-}
-
-/** 選択中プロジェクト名の変更を求める。 */
-function requestProjectRename(): void {
-  if (!activeProject.value) return
-  projectMenuOpen.value = false
-  openNameDialog('project-rename', 'プロジェクト名を変更', activeProject.value.name, { projectId: activeProject.value.id })
-}
-
-/** 選択中プロジェクトと登録情報だけを確認後に削除する。 */
-async function requestProjectDelete(): Promise<void> {
-  const project = activeProject.value
-  if (!project || isBusy.value) return
-  projectMenuOpen.value = false
-  if (!await ask(`「${project.name}」と配下の登録を削除します。実ファイルは削除されません。続けますか？`, {
-    title: 'プロジェクトの削除', kind: 'warning', okLabel: '削除', cancelLabel: 'キャンセル',
-  })) return
-
-  const origin = props.documentOrigin
-  if (await runMutation(() => deleteProject(project.id)) && origin?.projectId === project.id) {
-    emit('origin-detached', origin.nodeId)
-  }
-}
-
-/** ルートまたは選択フォルダへ TXT を登録する。選択ダイアログ取消時は状態を変えない。 */
-async function registerFile(parentId: number | null = null): Promise<void> {
-  const projectId = snapshot.value.activeProjectId
-  if (projectId === null || isBusy.value) return
-  const path = await chooseTextFile()
-  if (!path) return
-  if (await runMutation(() => registerProjectFile(projectId, parentId, path))) expandFolderPath(parentId)
-}
-
-/** 外部からドロップされた複数パスを個別に登録し、失敗分だけまとめて通知する。 */
-async function registerDroppedFiles(paths: string[], parentId: number | null): Promise<void> {
-  const projectId = snapshot.value.activeProjectId
-  if (!paths.length || isBusy.value) return
-  if (projectId === null) {
-    await message('TXTを登録するプロジェクトを先に作成してください。', {
-      title: 'TXTのドロップ登録', kind: 'warning',
-    })
-    return
-  }
-
-  mutationPending.value = true
-  const progressTimer = setTimeout(() => { delayedProgress.value = true }, 250)
-  let registeredCount = 0
-  let failures: { path: string; error: string }[] = []
-  let refreshError: unknown = null
-  try {
-    const result = await registerDroppedProjectFiles(projectId, parentId, paths)
-    registeredCount = result.registeredCount
-    failures = result.failures
-    await refreshSnapshot()
-    if (registeredCount > 0) expandFolderPath(parentId)
-  } catch (error) {
-    treeError.value = String(error)
-    refreshError = error
-  } finally {
-    clearTimeout(progressTimer)
-    delayedProgress.value = false
-    mutationPending.value = false
-  }
-
-  if (refreshError) {
-    await showTreeError(refreshError)
-    return
-  }
-  if (failures.length === 0) return
-
-  const details = failures.slice(0, 5).map(({ path, error }) => `・${fileName(path)}: ${error}`)
-  if (failures.length > details.length) details.push(`・ほか${failures.length - details.length}件`)
-  const summary = registeredCount > 0
-    ? `TXTを${registeredCount}件登録しました。${failures.length}件は登録できませんでした。`
-    : `TXTを登録できませんでした（${failures.length}件）。`
-  await message(`${summary}\n${details.join('\n')}`, {
-    title: 'TXTのドロップ登録', kind: registeredCount > 0 ? 'warning' : 'error',
-  })
-}
-
-/** ルートまたは指定フォルダへ仮想フォルダを作成する。 */
-function requestFolderCreate(parentId: number | null = null): void {
-  if (snapshot.value.activeProjectId === null) return
-  nodeMenuOpen.value = false
-  openNameDialog('folder-create', '仮想フォルダを作成', '', { parentId })
-}
-
-/** ノードの操作メニューをポインター位置へ開く。 */
-function openNodeMenu(event: MouseEvent, node: ProjectTreeNode): void {
-  event.preventDefault()
-  event.stopPropagation()
-  selectNodeFromContextMenu(node)
-  contextNodeId.value = node.id
-  nodeMenuTarget.value = [event.clientX, event.clientY]
-  nodeMenuOpen.value = true
-}
+const {
+  treeScrollElement,
+  dragNodeId,
+  dropIndicator,
+  externalDropActive,
+  startPointerTreeDrag,
+  cancelPointerTreeDrag,
+  shouldSuppressGeneratedClick,
+} = useProjectTreeDragAndDrop({
+  snapshot,
+  isBusy: () => isBusy.value,
+  setNodeSelection,
+  runMutation,
+  moveProjectNode,
+  registerDroppedFiles,
+})
+// テンプレートの ref 属性から composable が所有するスクロール要素へ接続する。
+void treeScrollElement
 
 /** ファイル・フォルダ行を選択し、ファイルなら既存エディターで開く要求を送る。 */
 async function activateNode(node: ProjectTreeNode): Promise<void> {
@@ -403,344 +184,15 @@ async function activateNode(node: ProjectTreeNode): Promise<void> {
   await openTreeFile(node)
 }
 
-/** 登録ファイルをメイン画面へ開くよう依頼し、参照先の検証と読み込み結果を待つ。 */
-async function openTreeFile(node: ProjectTreeNode): Promise<void> {
-  if (isBusy.value) return
-  const request = { requestId: crypto.randomUUID(), nodeId: node.id, projectId: node.projectId }
-  pendingOpenRequest.value = request
-  emit('open-file', request)
-}
-
-/** メイン画面から返された開く結果を反映し、失敗した行へ再指定の目印を付ける。 */
-async function applyOpenResult(result: ProjectTreeOpenResult | null | undefined): Promise<void> {
-  if (!result || result.requestId !== pendingOpenRequest.value?.requestId) return
-  pendingOpenRequest.value = null
-  try {
-    const next = new Set(unavailableNodes.value)
-    if (result.error) {
-      if (result.unavailable) next.add(result.nodeId)
-      unavailableNodes.value = next
-      await showTreeError(result.error)
-    } else {
-      next.delete(result.nodeId)
-      unavailableNodes.value = next
-    }
-  } catch (error) {
-    console.error('プロジェクトツリーのエラー通知を表示できませんでした。', error)
-  } finally {
-    emit('open-result-applied', result.requestId)
-  }
-}
-
-/** フォルダの展開状態を切り替える。 */
-function toggleFolder(nodeId: number): void {
-  const next = new Set(expandedFolders.value)
-  if (next.has(nodeId)) next.delete(nodeId)
-  else next.add(nodeId)
-  setExpandedFolders(next)
-}
-
-/** 展開状態を更新し、分離・復帰先へ渡す同期用スナップショットを送る。 */
-function setExpandedFolders(folderIds: Set<number>): void {
-  expandedFolders.value = folderIds
-  pruneSelectionToVisibleRows()
-  emit('expanded-change', [...folderIds].sort((left, right) => left - right))
-}
-
-/** 追加先のフォルダと全ての祖先を展開し、新規項目がツリー上で見えるようにする。 */
-function expandFolderPath(folderId: number | null): void {
-  const next = new Set(expandedFolders.value)
-  const visited = new Set<number>()
-  let currentId = folderId
-  while (currentId !== null && !visited.has(currentId)) {
-    visited.add(currentId)
-    const folder = snapshot.value.nodes.find((node) => node.id === currentId)
-    if (!folder || folder.kind !== 'folder') break
-    next.add(folder.id)
-    currentId = folder.parentId
-  }
-  setExpandedFolders(next)
-}
-
-/** 選択ファイルを再指定し、成功後にそのノードの出自紐付けを解除する。 */
-async function requestRelink(): Promise<void> {
-  const node = contextNode.value
-  if (!node || node.kind !== 'file' || isBusy.value) return
-  nodeMenuOpen.value = false
-  const path = await chooseTextFile()
-  if (!path) return
-  if (await runMutation(() => relinkProjectFile(node.id, path))) {
-    const next = new Set(unavailableNodes.value)
-    next.delete(node.id)
-    unavailableNodes.value = next
-    if (props.documentOrigin?.nodeId === node.id) emit('origin-detached', node.id)
-  }
-}
-
-/** 選択したノードと配下の登録情報を確認後に一括削除し、対象文書の出自だけを解除する。 */
-async function requestNodeRemove(): Promise<void> {
-  const nodes = selectedNodes.value
-  if (!nodes.length || isBusy.value) return
-  nodeMenuOpen.value = false
-  const count = nodes.length
-  const description = count === 1
-    ? `「${nodes[0].name}」の${nodes[0].kind === 'folder' ? '仮想フォルダと配下の登録' : 'ファイルの登録'}`
-    : `選択した${count}件の登録`
-  if (!await ask(`${description}を解除します。実ファイルは削除されません。続けますか？`, {
-    title: '登録の解除', kind: 'warning', okLabel: '登録解除', cancelLabel: 'キャンセル',
-  })) return
-
-  const originNodeId = props.documentOrigin?.nodeId
-  const removeOrigin = originNodeId !== undefined && nodes.some((node) => containsNode(node.id, originNodeId))
-  const nodeIds = nodes.map((node) => node.id)
-  if (await runMutation(() => removeProjectNodes(nodeIds))) {
-    clearNodeSelection()
-    if (removeOrigin) emit('origin-detached', originNodeId)
-  }
-}
-
-/** ノード自身または仮想フォルダ配下に指定ノードがあるか調べる。 */
-function containsNode(parentId: number, candidateId: number): boolean {
-  if (parentId === candidateId) return true
-  let node = snapshot.value.nodes.find((item) => item.id === candidateId)
-  while (node?.parentId !== null && node?.parentId !== undefined) {
-    if (node.parentId === parentId) return true
-    node = snapshot.value.nodes.find((item) => item.id === node?.parentId)
-  }
-  return false
-}
-
-/** ツリー表示領域上の位置から、内部移動または外部登録の追加先を決める。 */
-function treeDropTargetAt(clientX: number, clientY: number, external: boolean): TreeDropTarget | null {
-  const scroll = treeScrollElement.value
-  const scrollBounds = scroll?.getBoundingClientRect()
-  if (!scroll || !scrollBounds) return null
-  const isWithinTree = clientX >= scrollBounds.left && clientX <= scrollBounds.right
-    && clientY >= scrollBounds.top && clientY <= scrollBounds.bottom
-  const row = isWithinTree
-    ? document.elementFromPoint(clientX, clientY)?.closest<HTMLElement>('.project-tree-row')
-    : null
-  const nodeId = row && scroll.contains(row) ? Number(row.dataset.nodeId) : null
-  const node = nodeId === null ? null : snapshot.value.nodes.find((item) => item.id === nodeId) ?? null
-
-  if (external) {
-    const destination = projectTreeExternalDropDestination(isWithinTree, node)
-    if (!destination.accepted) return null
-    if (destination.parentId !== null && node) {
-      return { nodeId: node.id, placement: 'inside', parentId: destination.parentId }
-    }
-    return { nodeId: null, placement: 'root_end', parentId: null }
-  }
-
-  if (!isWithinTree) return null
-  if (node && node.id !== dragNodeId.value) {
-    const rowBounds = row!.getBoundingClientRect()
-    const placement = projectTreeRowPlacement(node.kind, clientY, rowBounds.top, rowBounds.height)
-    return { nodeId: node.id, placement, parentId: node.parentId }
-  }
-  if (node) return null
-  return { nodeId: null, placement: 'root_end', parentId: null }
-}
-
-/** ドラッグ中のポインター位置に応じて自動スクロールを続ける。 */
-function continueTreeAutoScroll(): void {
-  if (autoScrollFrame !== null) return
-  const scrollFrame = (): void => {
-    autoScrollFrame = null
-    if (!pointerTreeDrag.value?.started) return
-    const scroll = treeScrollElement.value
-    if (!scroll) return
-    const bounds = scroll.getBoundingClientRect()
-    const scrollStep = projectTreeAutoScrollStep(latestPointerPosition, bounds)
-    if (scrollStep === 0) return
-    const previousTop = scroll.scrollTop
-    scroll.scrollTop += scrollStep
-    if (scroll.scrollTop === previousTop) return
-    updateInternalDropTarget(latestPointerPosition.x, latestPointerPosition.y)
-    autoScrollFrame = window.requestAnimationFrame(scrollFrame)
-  }
-  autoScrollFrame = window.requestAnimationFrame(scrollFrame)
-}
-
-/** 内部移動の開始後にマウス・ペン・タッチの移動を追跡する。 */
-function startPointerTreeDrag(event: PointerEvent, node: ProjectTreeNode): void {
-  suppressPointerGeneratedClick = false
-  if (event.button !== 0 || isBusy.value) return
-  pointerTreeDrag.value = {
-    nodeId: node.id,
-    pointerId: event.pointerId,
-    startX: event.clientX,
-    startY: event.clientY,
-    started: false,
-  }
-  try {
-    ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
-  } catch {
-    // 要素が先に破棄された場合も、ウィンドウのポインターイベントで追跡する。
-  }
-}
-
-/** ドラッグ中に表示する移動先を更新する。 */
-function updateInternalDropTarget(clientX: number, clientY: number): void {
-  const target = treeDropTargetAt(clientX, clientY, false)
-  dropIndicator.value = target ? { nodeId: target.nodeId, placement: target.placement } : null
-}
-
-/** 内部移動を開始してから、行の位置表示と端の自動スクロールを更新する。 */
-function trackPointerTreeDrag(event: PointerEvent): void {
-  const gesture = pointerTreeDrag.value
-  if (!gesture || gesture.pointerId !== event.pointerId) return
-  if (!gesture.started && !hasProjectTreePointerDragStarted(
-    { x: gesture.startX, y: gesture.startY }, { x: event.clientX, y: event.clientY },
-  )) return
-  if (isBusy.value) {
-    clearDragState()
-    return
-  }
-  gesture.started = true
-  setNodeSelection([gesture.nodeId], gesture.nodeId)
-  dragNodeId.value = gesture.nodeId
-  event.preventDefault()
-  latestPointerPosition = { x: event.clientX, y: event.clientY }
-  externalDropActive.value = false
-  updateInternalDropTarget(event.clientX, event.clientY)
-  continueTreeAutoScroll()
-}
-
-/** ポインターを放した場所へノードを移動し、通常の行クリックと区別する。 */
-function finishPointerTreeDrag(event: PointerEvent): void {
-  const gesture = pointerTreeDrag.value
-  if (!gesture || gesture.pointerId !== event.pointerId) return
-  if (!gesture.started) {
-    pointerTreeDrag.value = null
-    return
-  }
-  latestPointerPosition = { x: event.clientX, y: event.clientY }
-  const target = treeDropTargetAt(event.clientX, event.clientY, false)
-  const sourceId = gesture.nodeId
-  const canMove = Boolean(target) && (target?.nodeId === null || target?.nodeId !== sourceId) && !isBusy.value
-  suppressPointerGeneratedClick = true
-  clearDragState()
-  if (canMove && target) {
-    void runMutation(() => moveProjectNode(sourceId, target.nodeId, target.placement))
-  }
-}
-
-/** ポインター取消時に、移動予約を行わず表示だけを初期化する。 */
-function cancelPointerTreeDrag(event: PointerEvent): void {
-  if (pointerTreeDrag.value?.pointerId !== event.pointerId) return
-  clearDragState()
-}
-
 /** ドラッグ直後の合成クリックだけを抑え、通常クリックではノードを開く。 */
 function activateNodeFromClick(event: MouseEvent, node: ProjectTreeNode): void {
-  if (shouldSuppressProjectTreeClick(suppressPointerGeneratedClick, event.detail)) {
-    suppressPointerGeneratedClick = false
+  if (shouldSuppressGeneratedClick(event.detail)) {
     event.preventDefault()
     event.stopPropagation()
     return
   }
   if (selectNodeFromClick(event, node)) return
   void activateNode(node)
-}
-
-/** ツリー内のキーボード選択操作と一括解除を処理する。 */
-function handleTreeKeydown(event: KeyboardEvent): void {
-  if (dialogOpen.value) return
-  const target = event.target instanceof HTMLElement ? event.target : null
-  if (target?.closest('input, textarea, [contenteditable="true"], [role="combobox"]')) return
-
-  if (event.key === 'Escape') {
-    event.preventDefault()
-    clearNodeSelection()
-    nodeMenuOpen.value = false
-    return
-  }
-
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
-    event.preventDefault()
-    const ids = visibleRows.value.map((row) => row.node.id)
-    setNodeSelection(ids, ids[0] ?? null)
-    return
-  }
-
-  if (event.key === 'Delete' && selectedNodes.value.length > 0) {
-    event.preventDefault()
-    void requestNodeRemove()
-  }
-}
-
-/** 行以外のツリー空白をクリックしたときに選択を解除する。 */
-function handleTreeBackgroundClick(event: MouseEvent): void {
-  const target = event.target instanceof Element ? event.target : null
-  if (!target?.closest('.project-tree-row')) clearNodeSelection()
-}
-
-/** 物理座標で届くTauriのドロップ位置を、CSSピクセルのツリー要素へ変換する。 */
-function viewportPosition(position: { x: number; y: number }): { x: number; y: number } {
-  return projectTreePhysicalToViewport(position, window.devicePixelRatio || 1)
-}
-
-/** 外部ファイルのネイティブドロップ位置を表示し、TXT登録先を明示する。 */
-function updateExternalDropTarget(position: { x: number; y: number }): void {
-  if (isBusy.value) {
-    externalDropActive.value = false
-    dropIndicator.value = null
-    return
-  }
-  const point = viewportPosition(position)
-  const target = treeDropTargetAt(point.x, point.y, true)
-  externalDropActive.value = target !== null
-  dropIndicator.value = target ? { nodeId: target.nodeId, placement: target.placement } : null
-}
-
-/** Tauriネイティブのファイルドロップをツリー領域だけで受け付ける。 */
-function handleNativeDropEvent(payload: import('@tauri-apps/api/webview').DragDropEvent): void {
-  if (payload.type === 'leave') {
-    externalDropActive.value = false
-    if (!pointerTreeDrag.value?.started) dropIndicator.value = null
-    return
-  }
-  const point = viewportPosition(payload.position)
-  const target = treeDropTargetAt(point.x, point.y, true)
-  if (payload.type === 'drop') {
-    externalDropActive.value = false
-    dropIndicator.value = null
-    if (target) void registerDroppedFiles(payload.paths, target.parentId)
-    return
-  }
-  updateExternalDropTarget(payload.position)
-}
-
-/** ドラッグ終了時にポインター追跡・自動スクロール・移動表示を片付ける。 */
-function clearDragState(): void {
-  pointerTreeDrag.value = null
-  dragNodeId.value = null
-  dropIndicator.value = null
-  if (autoScrollFrame !== null) window.cancelAnimationFrame(autoScrollFrame)
-  autoScrollFrame = null
-}
-
-/** 現在のウィンドウでOSからのファイルドロップを購読する。 */
-function listenForNativeDrops(): void {
-  nativeDropSetupCancelled = false
-  void getCurrentWindow().onDragDropEvent(({ payload }) => handleNativeDropEvent(payload)).then((unlisten) => {
-    if (nativeDropSetupCancelled) unlisten()
-    else unlistenNativeDrop = unlisten
-  }).catch((error: unknown) => {
-    console.error('TXTのドロップを受け付けられません。', error)
-  })
-}
-
-/** ウィンドウイベントとネイティブドロップ購読を解除し、自動スクロールを停止する。 */
-function disposeTreePointerHandlers(): void {
-  nativeDropSetupCancelled = true
-  unlistenNativeDrop?.()
-  unlistenNativeDrop = null
-  window.removeEventListener('pointermove', trackPointerTreeDrag)
-  window.removeEventListener('pointerup', finishPointerTreeDrag)
-  window.removeEventListener('pointercancel', cancelPointerTreeDrag)
-  clearDragState()
 }
 
 /** 別プロジェクト由来の文書を開いている場合、そのプロジェクトを表示する。 */
@@ -750,26 +202,17 @@ async function returnToOriginProject(): Promise<void> {
 }
 
 onMounted(() => {
-  window.addEventListener('pointermove', trackPointerTreeDrag, { passive: false })
-  window.addEventListener('pointerup', finishPointerTreeDrag)
-  window.addEventListener('pointercancel', cancelPointerTreeDrag)
-  listenForNativeDrops()
   void initializeTree()
 })
-onBeforeUnmount(disposeTreePointerHandlers)
+onBeforeUnmount(() => {
+  store.dispose()
+})
 watch(() => props.expandedFolderIds, (folderIds) => {
-  expandedFolders.value = new Set(folderIds)
-  pruneSelectionToVisibleRows()
+  selection.syncExpandedFolderIds(folderIds)
 }, { deep: true, immediate: true })
 watch(() => props.unavailableNodeIds, (nodeIds) => {
-  applyingUnavailableNodeProps = true
-  unavailableNodes.value = new Set(nodeIds)
-  applyingUnavailableNodeProps = false
-}, { deep: true, immediate: true, flush: 'sync' })
-watch(unavailableNodes, (nodeIds) => {
-  if (applyingUnavailableNodeProps) return
-  emit('unavailable-change', [...nodeIds].sort((left, right) => left - right))
-}, { deep: true, flush: 'sync' })
+  selection.syncUnavailableNodeIds(nodeIds)
+}, { deep: true, immediate: true })
 watch(() => props.openResult, (result) => { void applyOpenResult(result) })
 </script>
 

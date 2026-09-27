@@ -2,7 +2,7 @@
 import { nextTick, ref, watch } from 'vue'
 import SettingExpansionSection from './SettingExpansionSection.vue'
 import { appCommandDefinitions, getToolbarCommandDefinitions, type CommandId } from './appCommands'
-import type { ToolbarItem, ToolbarPreferences } from './appPreferences'
+import type { ToolbarItem, ToolbarPreferences } from './appPreferenceSchema'
 import type { SettingsSectionDefinition, SettingsSectionId } from './settingsDefinitions'
 
 const props = defineProps<{

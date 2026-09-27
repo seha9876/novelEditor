@@ -1,0 +1,19 @@
+/* 本文領域とCodeMirror本文表示の寸法を定義する。 */
+.writing-area { min-height: 0; overflow: hidden; }
+.editor-host { height: 100%; --editor-side-padding: 44px; }
+.editor-host .cm-content {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 42px var(--editor-side-padding) 64px;
+}
+.editor-host[data-wrap-mode="columns"] .cm-content {
+  width: calc(var(--wrap-column-width) + var(--editor-side-padding) + var(--editor-side-padding));
+  flex-grow: 0;
+  margin: 0 auto;
+}
+.editor-host[data-wrap-mode="columns"][data-narrow-wrap-behavior="scroll"] .cm-content { flex-shrink: 0; }
+.editor-host[data-wrap-mode="columns"][data-narrow-wrap-behavior="fit"] .cm-content { max-width: 100%; }
+.editor-host[data-wrap-mode="none"] .cm-content { width: max-content; min-width: 100%; }
+.editor-host .cm-searchMatch { background-color: #fff1a8; outline: 1px solid #d4bc55; }
+.editor-host .cm-searchMatch-selected { background-color: #ffcc80; outline: 2px solid #a56300; }

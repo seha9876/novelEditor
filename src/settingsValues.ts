@@ -3,7 +3,7 @@ import {
   cloneInterfaceBarSizes,
   type InterfaceBarSizes,
   type ToolbarPreferences,
-} from './appPreferences'
+} from './appPreferenceSchema'
 import type { EditorSettings } from './editorSettings'
 
 export type SettingsValues = {

@@ -1,10 +1,11 @@
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, toRefs } from 'vue'
+import { onBeforeUnmount, onMounted, ref, toRefs } from 'vue'
 import type { CommandId } from './appCommands'
 import type { EditorSettings } from './editorSettings'
 import type { ProjectTreeProject } from './projectTreeModel'
 import ProjectMenu from './ProjectMenu.vue'
+import { useMainMenuState } from './useMainMenuState'
 
 type MainMenuBarProps = {
   toolbarVisible: boolean
@@ -46,47 +47,27 @@ const {
   projectMenuDisabled,
 } = toRefs(props)
 
-type OpenMenu = 'file' | 'edit' | 'settings' | 'display' | 'window' | null
-const openMenu = ref<OpenMenu>(null)
-const settingsSubmenuOpen = ref(false)
-const projectMenu = ref<{ closeMenus: () => void } | null>(null)
-
-const displayMenuOpen = computed({
-  get: (): boolean => openMenu.value === 'display',
-  set: (value: boolean): void => {
-    openMenu.value = value ? 'display' : (openMenu.value === 'display' ? null : openMenu.value)
-  },
+const projectMenu = ref<{ closeMenus: () => void; closeSubmenu: () => boolean } | null>(null)
+const menuState = useMainMenuState({
+  closeProjectSubmenu: () => projectMenu.value?.closeSubmenu() ?? false,
+  closeProjectMenus: () => { projectMenu.value?.closeMenus() },
 })
-const fileMenuOpen = computed({
-  get: (): boolean => openMenu.value === 'file',
-  set: (value: boolean): void => {
-    openMenu.value = value ? 'file' : (openMenu.value === 'file' ? null : openMenu.value)
-  },
-})
-const editMenuOpen = computed({
-  get: (): boolean => openMenu.value === 'edit',
-  set: (value: boolean): void => {
-    openMenu.value = value ? 'edit' : (openMenu.value === 'edit' ? null : openMenu.value)
-  },
-})
-const settingsMenuOpen = computed({
-  get: (): boolean => openMenu.value === 'settings',
-  set: (value: boolean): void => {
-    if (!value) settingsSubmenuOpen.value = false
-    openMenu.value = value ? 'settings' : (openMenu.value === 'settings' ? null : openMenu.value)
-  },
-})
-const windowMenuOpen = computed({
-  get: (): boolean => openMenu.value === 'window',
-  set: (value: boolean): void => {
-    openMenu.value = value ? 'window' : (openMenu.value === 'window' ? null : openMenu.value)
-  },
-})
+const {
+  settingsSubmenuOpen,
+  fileMenuOpen,
+  editMenuOpen,
+  projectMenuOpen,
+  settingsMenuOpen,
+  displayMenuOpen,
+  windowMenuOpen,
+  closeMenus,
+  runProjectAction,
+  handleEscape,
+} = menuState
 
 /** メニュー項目から親画面の共通コマンドを実行する。 */
 function runMenuCommand(commandId: CommandId): void {
-  openMenu.value = null
-  settingsSubmenuOpen.value = false
+  closeMenus()
   emit('command', commandId)
 }
 
@@ -97,22 +78,9 @@ function executeCommand(commandId: CommandId): void {
 
 /** Escでメニューを閉じ、通常のショートカットは親画面へ委ねる。 */
 function onKeydown(event: KeyboardEvent): void {
-  if (event.key === 'Escape' && settingsSubmenuOpen.value) {
+  if (event.key === 'Escape' && handleEscape()) {
     event.preventDefault()
-    settingsSubmenuOpen.value = false
-    return
   }
-  if (event.key === 'Escape' && openMenu.value) {
-    event.preventDefault()
-    openMenu.value = null
-  }
-}
-
-/** ツールバーのコンテキストメニューを開く前に、メニューバーの表示中メニューを閉じる。 */
-function closeMenus(): void {
-  openMenu.value = null
-  settingsSubmenuOpen.value = false
-  projectMenu.value?.closeMenus()
 }
 
 onMounted(() => window.addEventListener('keydown', onKeydown, true))
@@ -157,14 +125,15 @@ defineExpose({ closeMenus })
     </VMenu>
     <ProjectMenu
       ref="projectMenu"
+      v-model="projectMenuOpen"
       mode="text"
       :projects="projects"
       :active-project-id="activeProjectId"
       :disabled="projectMenuDisabled"
-      @create="emit('project-create')"
-      @select="emit('project-select', $event)"
-      @rename="emit('project-rename')"
-      @delete="emit('project-delete')"
+      @create="runProjectAction(() => emit('project-create'))"
+      @select="runProjectAction(() => emit('project-select', $event))"
+      @rename="runProjectAction(() => emit('project-rename'))"
+      @delete="runProjectAction(() => emit('project-delete'))"
     />
     <VMenu v-model="settingsMenuOpen" :close-on-content-click="false" :transition="false">
       <template #activator="{ props: settingsMenuProps }">

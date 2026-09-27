@@ -1,51 +1,50 @@
 <!-- Sidebarとメニューバーで共通利用するプロジェクト操作メニュー。 -->
 <script setup lang="ts">
-import { ref } from 'vue'
+import { toRef } from 'vue'
 import type { ProjectTreeProject } from './projectTreeModel'
+import { useProjectMenuState } from './useProjectMenuState'
 
 const props = withDefaults(defineProps<{
   projects: readonly ProjectTreeProject[]
   activeProjectId: number | null
   disabled?: boolean
   mode?: 'icon' | 'text'
+  modelValue?: boolean
 }>(), {
   disabled: false,
   mode: 'icon',
 })
 
 const emit = defineEmits<{
+  'update:modelValue': [value: boolean]
   create: []
   select: [projectId: number]
   rename: []
   delete: []
 }>()
 
-const menuOpen = ref(false)
-const switchMenuOpen = ref(false)
-
-/** メニューを閉じ、プロジェクト操作を親のControllerへ渡す。 */
-function runAction(action: () => void): void {
-  switchMenuOpen.value = false
-  menuOpen.value = false
-  action()
-}
-
-/** 外側のメニューバーが閉じるとき、プロジェクトのサブメニューも閉じる。 */
-function closeMenus(): void {
-  switchMenuOpen.value = false
-  menuOpen.value = false
-}
+const menuState = useProjectMenuState({
+  modelValue: toRef(props, 'modelValue'),
+  onUpdateModelValue: (value) => emit('update:modelValue', value),
+})
+const { menuOpen, switchMenuOpen, runAction, closeMenus, closeSubmenu } = menuState
 
 /** 現在のプロジェクトを選択済みとして表示する。 */
 function isActive(projectId: number): boolean {
   return projectId === props.activeProjectId
 }
 
-defineExpose({ closeMenus })
+defineExpose({ closeMenus, closeSubmenu })
 </script>
 
 <template>
-  <VMenu v-model="menuOpen" location="bottom start" :disabled="props.disabled" :close-on-content-click="false">
+  <VMenu
+    v-model="menuOpen"
+    :location="props.mode === 'icon' ? 'bottom start' : undefined"
+    :transition="props.mode === 'text' ? false : undefined"
+    :disabled="props.disabled"
+    :close-on-content-click="false"
+  >
     <template #activator="{ props: menuProps }">
       <VBtn
         v-if="props.mode === 'icon'"
@@ -62,7 +61,7 @@ defineExpose({ closeMenus })
       </VBtn>
       <VBtn v-else v-bind="menuProps" class="menu-heading" size="small" variant="text" :disabled="props.disabled">プロジェクト</VBtn>
     </template>
-    <VList class="project-menu-list" min-width="220" role="menu" aria-label="プロジェクト">
+    <VList class="project-menu-list" density="compact" min-width="220" role="menu" aria-label="プロジェクト">
       <VListItem role="menuitem" title="新しいプロジェクト" prepend-icon="mdi-plus" :disabled="props.disabled" @click="runAction(() => emit('create'))" />
       <VMenu v-model="switchMenuOpen" location="end" :close-on-content-click="false">
         <template #activator="{ props: switchMenuProps }">

@@ -314,6 +314,99 @@ test('プロジェクトメニューはSidebarとメニューバーで共通利�
   assert.ok((menu.match(/:disabled="props\.disabled"/g) ?? []).length >= 2)
 })
 
+test('プロジェクトのトップメニューは他のメニューと同じ表示属性と排他開閉を使う', () => {
+  const menu = readFileSync(resolve(projectRoot, 'src/ProjectMenu.vue'), 'utf8')
+  const mainMenu = readFileSync(resolve(projectRoot, 'src/MainMenuBar.vue'), 'utf8')
+  const projectState = readFileSync(resolve(projectRoot, 'src/useProjectMenuState.ts'), 'utf8')
+  const mainState = readFileSync(resolve(projectRoot, 'src/useMainMenuState.ts'), 'utf8')
+
+  assert.match(menu, /useProjectMenuState/)
+  assert.match(menu, /modelValue: toRef\(props, 'modelValue'\)/)
+  assert.match(menu, /defineExpose\(\{ closeMenus, closeSubmenu \}\)/)
+  assert.match(menu, /:location="props\.mode === 'icon' \? 'bottom start' : undefined"/)
+  assert.match(menu, /:transition="props\.mode === 'text' \? false : undefined"/)
+  assert.match(menu, /<VList class="project-menu-list" density="compact"/)
+
+  assert.match(mainMenu, /useMainMenuState/)
+  assert.match(mainMenu, /closeSubmenu: \(\) => boolean/)
+  assert.match(mainMenu, /v-model="projectMenuOpen"/)
+  assert.match(mainState, /function runProjectAction\(action: \(\) => void\)/)
+  assert.match(mainMenu, /@create="runProjectAction\(/)
+  assert.match(mainMenu, /@select="runProjectAction\(/)
+  assert.match(mainMenu, /@rename="runProjectAction\(/)
+  assert.match(mainMenu, /@delete="runProjectAction\(/)
+  assert.match(mainMenu, /if \(event\.key === 'Escape' && handleEscape\(\)\)/)
+  assert.match(mainState, /if \(openMenu\.value === 'project' && options\.closeProjectSubmenu\(\)\) return true/)
+  assert.match(projectState, /function closeSubmenu\(\): boolean/)
+})
+
+test('プロジェクトメニューとメニューバーの開閉状態を実動作で二段階制御する', async () => {
+  const { ref, nextTick } = require('vue')
+  const projectStateModule = loadSourceModule('src/useProjectMenuState.ts')
+  const mainStateModule = loadSourceModule('src/useMainMenuState.ts')
+
+  const uncontrolled = projectStateModule.useProjectMenuState()
+  uncontrolled.menuOpen.value = true
+  uncontrolled.switchMenuOpen.value = true
+  assert.equal(uncontrolled.menuOpen.value, true)
+  assert.equal(uncontrolled.closeSubmenu(), true)
+  assert.equal(uncontrolled.switchMenuOpen.value, false)
+  assert.equal(uncontrolled.closeSubmenu(), false)
+
+  const controlledValue = ref(false)
+  const controlled = projectStateModule.useProjectMenuState({
+    modelValue: controlledValue,
+    onUpdateModelValue: (value) => { controlledValue.value = value },
+  })
+  controlled.menuOpen.value = true
+  assert.equal(controlledValue.value, true)
+  assert.equal(controlled.menuOpen.value, true)
+  await nextTick()
+  controlled.switchMenuOpen.value = true
+  controlledValue.value = false
+  await nextTick()
+  assert.equal(controlled.switchMenuOpen.value, false)
+
+  const project = projectStateModule.useProjectMenuState()
+  const main = mainStateModule.useMainMenuState({
+    closeProjectSubmenu: project.closeSubmenu,
+    closeProjectMenus: project.closeMenus,
+  })
+
+  main.fileMenuOpen.value = true
+  assert.equal(main.fileMenuOpen.value, true)
+  main.projectMenuOpen.value = true
+  assert.equal(main.fileMenuOpen.value, false)
+  assert.equal(main.projectMenuOpen.value, true)
+  project.switchMenuOpen.value = true
+  main.settingsMenuOpen.value = true
+  assert.equal(main.projectMenuOpen.value, false)
+  assert.equal(main.settingsMenuOpen.value, true)
+  assert.equal(project.switchMenuOpen.value, false)
+
+  main.projectMenuOpen.value = true
+  project.switchMenuOpen.value = true
+  assert.equal(main.handleEscape(), true)
+  assert.equal(project.switchMenuOpen.value, false)
+  assert.equal(main.projectMenuOpen.value, true)
+  assert.equal(main.handleEscape(), true)
+  assert.equal(main.projectMenuOpen.value, false)
+
+  main.projectMenuOpen.value = true
+  project.switchMenuOpen.value = true
+  let actionCalled = false
+  main.runProjectAction(() => { actionCalled = true })
+  assert.equal(actionCalled, true)
+  assert.equal(main.projectMenuOpen.value, false)
+  assert.equal(project.switchMenuOpen.value, false)
+
+  main.projectMenuOpen.value = true
+  project.switchMenuOpen.value = true
+  main.closeMenus()
+  assert.equal(main.projectMenuOpen.value, false)
+  assert.equal(project.switchMenuOpen.value, false)
+})
+
 test('プロジェクト操作Composableは作成後自動選択、同一選択の無操作、名称変更、出自解除を実行する', async () => {
   const { ref } = require('vue')
   const calls = []

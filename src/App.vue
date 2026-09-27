@@ -29,6 +29,8 @@ const editor = ref<DocumentEditorHandle | null>(null)
 const persistenceNotice = ref('')
 const persistenceNoticeOpen = ref(false)
 const mainCloseInProgress = ref(false)
+const statusBarContextMenuOpen = ref(false)
+const statusBarContextMenuTarget = ref<[number, number]>([0, 0])
 let appLifecycleGeneration = 0
 let appMounted = false
 
@@ -41,6 +43,18 @@ function isAppLifecycleActive(generation: number): boolean {
 function showPersistenceNotice(text: string): void {
   persistenceNotice.value = text
   persistenceNoticeOpen.value = true
+}
+
+/** 右クリック位置へステータスバーの操作メニューを開く。 */
+function openStatusBarContextMenu(event: MouseEvent): void {
+  event.preventDefault()
+  statusBarContextMenuTarget.value = [event.clientX, event.clientY]
+  statusBarContextMenuOpen.value = true
+}
+
+/** ステータスバーの設定ページを開く。 */
+function openStatusBarSettings(): void {
+  void openSettingsWindow('appearance.statusBar')
 }
 
 /** 操作名と発生した例外を利用者へ示す。Tauri のエラーダイアログを開く。 */
@@ -447,12 +461,17 @@ onBeforeUnmount(() => {
     <VMain class="writing-area" aria-label="本文編集領域">
       <EditorPane ref="editor" :settings="editorSettings" :read-only="documentLocked" @change="onChange" @statistics="statistics = $event" @search-status="onSearchStatus" @search-navigate="onSearchNavigate" />
     </VMain>
-    <VFooter app class="status-bar" :height="interfaceBarMetrics.status.height">
+    <VFooter app class="status-bar" :height="interfaceBarMetrics.status.height" @contextmenu="openStatusBarContextMenu">
       <StatisticsStatus
         :statistics="statistics"
         :items="displayedStatusBarItems"
         :editor-settings="editorSettings"
       />
     </VFooter>
+    <VMenu v-model="statusBarContextMenuOpen" :target="statusBarContextMenuTarget" location="bottom start" :close-on-content-click="true">
+      <VList density="compact" min-width="240" role="menu" aria-label="ステータスバー操作">
+        <VListItem role="menuitem" title="ステータスバーをカスタマイズ…" @click="openStatusBarSettings" />
+      </VList>
+    </VMenu>
   </VApp>
 </template>

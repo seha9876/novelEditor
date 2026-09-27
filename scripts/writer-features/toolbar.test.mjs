@@ -95,6 +95,22 @@ test('ステータスバー項目は保存順に描画し、設定画面だけ�
   assert.doesNotMatch(styles, /\.statistics-total\s*\{\s*display:\s*none/)
 })
 
+test('ステータスバーの右クリックメニューから設定ページを開ける', () => {
+  const app = readFileSync(resolve(projectRoot, 'src/App.vue'), 'utf8')
+  const readme = readFileSync(resolve(projectRoot, 'README.md'), 'utf8')
+
+  assert.match(app, /const statusBarContextMenuOpen = ref\(false\)/)
+  assert.match(app, /const statusBarContextMenuTarget = ref<\[number, number\]>\(\[0, 0\]\)/)
+  assert.match(app, /function openStatusBarContextMenu\(event: MouseEvent\): void \{[\s\S]*?event\.preventDefault\(\)[\s\S]*?statusBarContextMenuTarget\.value = \[event\.clientX, event\.clientY\]/)
+  assert.match(app, /function openStatusBarContextMenu\(event: MouseEvent\): void \{[\s\S]*?statusBarContextMenuOpen\.value = true/)
+  assert.match(app, /class="status-bar"[^>]*@contextmenu="openStatusBarContextMenu"/)
+  assert.match(app, /<VMenu v-model="statusBarContextMenuOpen" :target="statusBarContextMenuTarget" location="bottom start"/)
+  assert.match(app, /<VList density="compact" min-width="240" role="menu" aria-label="ステータスバー操作">/)
+  assert.match(app, /<VListItem role="menuitem" title="ステータスバーをカスタマイズ…" @click="openStatusBarSettings" \/>/)
+  assert.match(app, /void openSettingsWindow\('appearance\.statusBar'\)/)
+  assert.match(readme, /ステータスバーを右クリックして「ステータスバーをカスタマイズ…」を選ぶと/)
+})
+
 test('バーサイズの初期化範囲は全設定とツールバー構成で分離される', () => {
   const settings = readFileSync(resolve(projectRoot, 'src/SettingsApp.vue'), 'utf8')
   const settingsController = readFileSync(resolve(projectRoot, 'src/useSettingsController.ts'), 'utf8')

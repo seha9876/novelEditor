@@ -6,10 +6,14 @@ import WrappingSettingsPage from './WrappingSettingsPage.vue'
 import TypographySettingsPage from './TypographySettingsPage.vue'
 import StorageSettingsPage from './StorageSettingsPage.vue'
 import BarSizeSettingsPage from './BarSizeSettingsPage.vue'
+import StatusBarSettingsPage from './StatusBarSettingsPage.vue'
 import {
   resetToolbarPreferences,
+  resetStatusBarPreferences,
   resetInterfaceBarSizes,
   type InterfaceBarSizes,
+  type StatusBarItemId,
+  type StatusBarPreferences,
   type ToolbarItem,
   type ToolbarPreferences,
 } from './appPreferenceSchema'
@@ -43,8 +47,11 @@ const activeView = ref<SettingsViewId>('editor.wrapping')
 const openedGroups = ref(['editor', 'appearance', 'application'])
 const openedSectionIds = ref<SettingsSectionId[]>([...allSettingsSectionIds])
 const toolbarDragResetRevision = ref(0)
+const statusBarDragResetRevision = ref(0)
 const toolbarResetDialog = ref(false)
+const statusBarResetDialog = ref(false)
 const allResetDialog = ref(false)
+const resetDialogOpen = computed(() => toolbarResetDialog.value || statusBarResetDialog.value || allResetDialog.value)
 const errorSnackbarOpen = computed({
   get: () => errorMessage.value.length > 0,
   set: (value: boolean) => { if (!value) errorMessage.value = '' },
@@ -99,9 +106,11 @@ function toggleSection(sectionId: SettingsSectionId, expanded: boolean): void {
 
 watch(activeView, () => {
   toolbarDragResetRevision.value += 1
+  statusBarDragResetRevision.value += 1
 })
 watch(openedSectionIds, (sectionIds) => {
   if (!sectionIds.includes('appearance.toolbar.configuration')) toolbarDragResetRevision.value += 1
+  if (!sectionIds.includes('appearance.statusBar.configuration')) statusBarDragResetRevision.value += 1
 })
 
 const {
@@ -155,6 +164,20 @@ function changeToolbar(value: Partial<ToolbarPreferences> & { items?: ToolbarIte
   void sendCommand({ type: 'change', toolbar: value, flush })
 }
 
+/** ステータスバーの現在値を画面へ反映し、自動保存要求へ送る。 */
+function changeStatusBar(value: Partial<StatusBarPreferences> & { items?: StatusBarItemId[] }, flush = false): void {
+  if (!snapshot.value) return
+  snapshot.value = {
+    ...snapshot.value,
+    statusBar: {
+      ...snapshot.value.statusBar,
+      ...value,
+      items: value.items ? [...value.items] : snapshot.value.statusBar.items,
+    },
+  }
+  void sendCommand({ type: 'change', statusBar: value, flush })
+}
+
 /** 各バーのサイズを画面へ反映し、共通のUndo・自動保存経路へ送る。 */
 function changeBarSizes(value: Partial<InterfaceBarSizes>, flush = false): void {
   if (!snapshot.value) return
@@ -181,6 +204,19 @@ function confirmToolbarDefaults(): void {
   changeToolbar({ items: toolbar.items }, true)
 }
 
+/** ステータスバー初期化の確認画面を開く。 */
+function restoreStatusBarDefaults(): void {
+  statusBarResetDialog.value = true
+}
+
+/** 確認後にステータスバー構成を初期値へ戻して即時保存する。 */
+function confirmStatusBarDefaults(): void {
+  statusBarResetDialog.value = false
+  if (!snapshot.value) return
+  const statusBar = resetStatusBarPreferences()
+  changeStatusBar({ items: statusBar.items }, true)
+}
+
 /** 全設定初期化の確認画面を開く。 */
 function restoreAllDefaults(): void {
   allResetDialog.value = true
@@ -191,18 +227,21 @@ function confirmAllDefaults(): void {
   allResetDialog.value = false
   if (!snapshot.value) return
   const toolbar = { ...resetToolbarPreferences(snapshot.value.toolbar), visible: true }
+  const statusBar = resetStatusBarPreferences()
   const barSizes = resetInterfaceBarSizes()
   resetDrafts()
   snapshot.value = {
     ...snapshot.value,
     editor: { ...defaultEditorSettings },
     toolbar,
+    statusBar,
     barSizes,
   }
   void sendCommand({
     type: 'change',
     editor: { ...defaultEditorSettings },
     toolbar,
+    statusBar,
     barSizes,
     flush: true,
   })
@@ -220,7 +259,7 @@ function isTextEditingTarget(target: EventTarget | null): boolean {
 function onKeydown(event: KeyboardEvent): void {
   if (activeView.value === 'application.storage') return
   if (!event.ctrlKey || event.altKey || event.isComposing || isTextEditingTarget(event.target)) return
-  if (toolbarResetDialog.value || allResetDialog.value) return
+  if (resetDialogOpen.value) return
 
   const key = event.key.toLowerCase()
   const isUndo = key === 'z' && !event.shiftKey
@@ -260,7 +299,7 @@ onBeforeUnmount(() => {
                 <VBtn
                   icon="mdi-undo"
                   variant="text"
-                  :disabled="!snapshot?.history.canUndo || activeView === 'application.storage'"
+                  :disabled="!snapshot?.history.canUndo || activeView === 'application.storage' || resetDialogOpen"
                   aria-label="元に戻す"
                   aria-keyshortcuts="Control+Z"
                   @click="sendCommand({ type: 'undo' })"
@@ -274,7 +313,7 @@ onBeforeUnmount(() => {
                 <VBtn
                   icon="mdi-redo"
                   variant="text"
-                  :disabled="!snapshot?.history.canRedo || activeView === 'application.storage'"
+                  :disabled="!snapshot?.history.canRedo || activeView === 'application.storage' || resetDialogOpen"
                   aria-label="やり直す"
                   aria-keyshortcuts="Control+Y Control+Shift+Z"
                   @click="sendCommand({ type: 'redo' })"
@@ -366,6 +405,18 @@ onBeforeUnmount(() => {
             @reset-toolbar="restoreToolbarDefaults"
             @toggle-section="toggleSection"
           />
+          <StatusBarSettingsPage
+            v-else-if="page.id === 'appearance.statusBar'"
+            :key="`${page.id}-${activeView}`"
+            :status-bar="snapshot.statusBar"
+            :heading-level="activeView === 'all' ? 4 : 2"
+            :sections="page.sections"
+            :expanded-section-ids="openedSectionIds"
+            :drag-reset-revision="statusBarDragResetRevision"
+            @update-status-bar="changeStatusBar"
+            @reset-status-bar="restoreStatusBarDefaults"
+            @toggle-section="toggleSection"
+          />
           <BarSizeSettingsPage
             v-else-if="page.id === 'appearance.bars'"
             :key="`${page.id}-${activeView}`"
@@ -399,9 +450,19 @@ onBeforeUnmount(() => {
         </VCardActions>
       </VCard>
     </VDialog>
+    <VDialog v-model="statusBarResetDialog" max-width="440">
+      <VCard title="ステータスバーを初期状態に戻しますか？">
+        <VCardText>ステータスバーの表示項目と順序を初期状態に変更し、自動保存します。</VCardText>
+        <VCardActions>
+          <VSpacer />
+          <VBtn variant="text" @click="statusBarResetDialog = false">戻る</VBtn>
+          <VBtn color="primary" @click="confirmStatusBarDefaults">初期状態に戻す</VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
     <VDialog v-model="allResetDialog" max-width="440">
       <VCard title="すべての設定を初期値に戻しますか？">
-        <VCardText>本文表示、折り返し、ツールバー、各バーのサイズを初期値へ変更し、自動保存します。データ保存先は変更しません。</VCardText>
+        <VCardText>本文表示、折り返し、ツールバー、ステータスバー、各バーのサイズを初期値へ変更し、自動保存します。データ保存先は変更しません。</VCardText>
         <VCardActions>
           <VSpacer />
           <VBtn variant="text" @click="allResetDialog = false">戻る</VBtn>

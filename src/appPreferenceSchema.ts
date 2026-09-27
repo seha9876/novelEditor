@@ -16,6 +16,43 @@ export type ToolbarPreferences = {
   items: ToolbarItem[]
 }
 
+/** ステータスバーへ配置できる表示項目を識別する。 */
+export type StatusBarItemId =
+  | 'documentCharacters'
+  | 'selectionCharacters'
+  | 'position'
+  | 'lineCount'
+  | 'fontFamily'
+  | 'fontSize'
+  | 'lineHeight'
+  | 'wrapMode'
+  | 'statistics'
+
+/** ステータスバーの表示項目を実表示の左端から右端の順で保持する。 */
+export type StatusBarPreferences = {
+  items: StatusBarItemId[]
+}
+
+/** ステータスバー設定画面と表示側で共有する項目の表示情報。 */
+export type StatusBarItemDefinition = {
+  id: StatusBarItemId
+  label: string
+  icon: string
+}
+
+/** ステータスバーへ追加できる項目を表示名・アイコンとともに列挙する。 */
+export const statusBarItemDefinitions: ReadonlyArray<StatusBarItemDefinition> = [
+  { id: 'documentCharacters', label: '全文文字数', icon: 'mdi-format-letter-case' },
+  { id: 'selectionCharacters', label: '選択文字数', icon: 'mdi-selection-ellipse' },
+  { id: 'position', label: '現在位置（行・列）', icon: 'mdi-crosshairs-gps' },
+  { id: 'lineCount', label: '総行数', icon: 'mdi-format-list-numbered' },
+  { id: 'fontFamily', label: 'フォント名', icon: 'mdi-format-font' },
+  { id: 'fontSize', label: '文字サイズ', icon: 'mdi-format-size' },
+  { id: 'lineHeight', label: '行間', icon: 'mdi-format-line-spacing' },
+  { id: 'wrapMode', label: '折り返し方式', icon: 'mdi-wrap' },
+  { id: 'statistics', label: '統計ボタン', icon: 'mdi-chart-box-outline' },
+]
+
 /** メニュー・ツール・ステータスバーへ適用する表示サイズの段階。 */
 export type InterfaceSize = 'small' | 'medium' | 'large'
 
@@ -35,6 +72,12 @@ const defaultToolbarItems: ToolbarItem[] = [
   { type: 'separator', id: 'separator-1' },
   { type: 'command', commandId: 'settings.open' },
 ]
+const defaultStatusBarItems: StatusBarItemId[] = [
+  'documentCharacters',
+  'selectionCharacters',
+  'position',
+  'statistics',
+]
 
 export type ProjectTreePreferences = {
   width: number
@@ -46,6 +89,7 @@ export type ApplicationPreferencesV1 = {
   editor: EditorSettings
   ui: {
     toolbar: ToolbarPreferences
+    statusBar: StatusBarPreferences
     barSizes: InterfaceBarSizes
     projectTree: ProjectTreePreferences
   }
@@ -61,6 +105,7 @@ export function createDefaultApplicationPreferences(): ApplicationPreferencesV1 
         visible: true,
         items: createDefaultToolbarItems(),
       },
+      statusBar: createDefaultStatusBarPreferences(),
       barSizes: createDefaultInterfaceBarSizes(),
       projectTree: { width: defaultProjectTreeWidth, detached: false },
     },
@@ -85,6 +130,26 @@ export function resetInterfaceBarSizes(): InterfaceBarSizes {
 /** ツールバーの表示状態を保ったまま、項目構成だけを初期値へ戻す。 */
 export function resetToolbarPreferences(value: ToolbarPreferences): ToolbarPreferences {
   return { visible: value.visible, items: createDefaultToolbarItems() }
+}
+
+/** 既定ステータスバー構成を独立した設定値として返す。 */
+export function createDefaultStatusBarPreferences(): StatusBarPreferences {
+  return { items: createDefaultStatusBarItems() }
+}
+
+/** 既定ステータスバー項目を独立した配列として返す。 */
+export function createDefaultStatusBarItems(): StatusBarItemId[] {
+  return [...defaultStatusBarItems]
+}
+
+/** ステータスバー構成を履歴や設定画面から独立した値として複製する。 */
+export function cloneStatusBarPreferences(value: StatusBarPreferences): StatusBarPreferences {
+  return { items: [...value.items] }
+}
+
+/** ステータスバーの構成だけを既定値へ戻す。空配列は利用者の有効な設定として保持する。 */
+export function resetStatusBarPreferences(): StatusBarPreferences {
+  return createDefaultStatusBarPreferences()
 }
 
 /** 文字列のバーサイズを検査し、不正値を中サイズへ補正する。 */
@@ -141,6 +206,32 @@ export function normalizeToolbarItems(value: unknown): ToolbarItem[] {
   return normalized.length > 0 ? normalized : createDefaultToolbarItems()
 }
 
+/** ステータスバー項目のIDを検査する。 */
+export function isStatusBarItemId(value: unknown): value is StatusBarItemId {
+  return typeof value === 'string' && statusBarItemDefinitions.some((item) => item.id === value)
+}
+
+/** ステータスバー構成を検査し、不正IDと重複IDだけを除去する。 */
+export function normalizeStatusBarItems(value: unknown): StatusBarItemId[] {
+  if (!Array.isArray(value)) return createDefaultStatusBarItems()
+  if (value.length === 0) return []
+
+  const seen = new Set<StatusBarItemId>()
+  const normalized: StatusBarItemId[] = []
+  for (const candidate of value) {
+    if (!isStatusBarItemId(candidate) || seen.has(candidate)) continue
+    seen.add(candidate)
+    normalized.push(candidate)
+  }
+  return normalized
+}
+
+/** 外部データのステータスバー設定を検査し、旧設定では既定構成を補完する。 */
+export function normalizeStatusBarPreferences(value: unknown): StatusBarPreferences {
+  const raw = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  return { items: normalizeStatusBarItems(raw.items) }
+}
+
 /** 外部データをセクション単位で検査し、利用可能な設定へ正規化する。 */
 export function normalizeApplicationPreferences(value: unknown): ApplicationPreferencesV1 {
   if (!value || typeof value !== 'object') return createDefaultApplicationPreferences()
@@ -150,6 +241,9 @@ export function normalizeApplicationPreferences(value: unknown): ApplicationPref
   const rawToolbar = rawUi.toolbar && typeof rawUi.toolbar === 'object'
     ? rawUi.toolbar as Record<string, unknown>
     : {}
+  const rawStatusBar = rawUi.statusBar && typeof rawUi.statusBar === 'object'
+    ? rawUi.statusBar as Record<string, unknown>
+    : undefined
   const rawProjectTree = rawUi.projectTree && typeof rawUi.projectTree === 'object'
     ? rawUi.projectTree as Record<string, unknown>
     : {}
@@ -167,6 +261,7 @@ export function normalizeApplicationPreferences(value: unknown): ApplicationPref
         visible: typeof rawToolbar.visible === 'boolean' ? rawToolbar.visible : true,
         items: normalizeToolbarItems(rawToolbar.items),
       },
+      statusBar: normalizeStatusBarPreferences(rawStatusBar),
       barSizes: normalizeInterfaceBarSizes(rawBarSizes),
       projectTree: {
         width: Math.max(220, Math.min(480, projectTreeWidth)),
@@ -186,6 +281,7 @@ export function cloneApplicationPreferences(value: ApplicationPreferencesV1): Ap
         visible: value.ui.toolbar.visible,
         items: value.ui.toolbar.items.map((item) => ({ ...item })),
       },
+      statusBar: cloneStatusBarPreferences(value.ui.statusBar),
       barSizes: cloneInterfaceBarSizes(value.ui.barSizes),
       projectTree: { ...value.ui.projectTree },
     },

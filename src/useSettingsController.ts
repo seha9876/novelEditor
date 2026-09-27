@@ -12,9 +12,11 @@ import {
 } from './appPreferences'
 import {
   normalizeInterfaceBarSizes,
+  normalizeStatusBarPreferences,
   normalizeToolbarItems,
   type ApplicationPreferencesV1,
   type InterfaceBarSizes,
+  type StatusBarPreferences,
   type ToolbarPreferences,
 } from './appPreferenceSchema'
 import { cloneSettingsValues, type SettingsValues } from './settingsValues'
@@ -44,10 +46,14 @@ export function useSettingsController(options: SettingsControllerOptions) {
     visible: options.initialPreferences.ui.toolbar.visible,
     items: options.initialPreferences.ui.toolbar.items.map((item) => ({ ...item })),
   })
+  const statusBarPreferences = ref<StatusBarPreferences>({
+    items: normalizeStatusBarPreferences(options.initialPreferences.ui.statusBar).items,
+  })
   const barSizes = ref<InterfaceBarSizes>({ ...options.initialPreferences.ui.barSizes })
   const settingsPage = ref<SettingsViewId>('editor.wrapping')
   const displayedToolbarItems = computed(() => toolbarPreferences.value.items)
   const displayedToolbarVisible = computed(() => toolbarPreferences.value.visible)
+  const displayedStatusBarItems = computed(() => statusBarPreferences.value.items)
   const interfaceBarMetrics = computed(() => getInterfaceBarMetrics(barSizes.value))
   const interfaceBarStyle = computed(() => createInterfaceBarStyle(barSizes.value))
   const toolbarFontItems = computed(() => {
@@ -65,11 +71,17 @@ export function useSettingsController(options: SettingsControllerOptions) {
     return { visible: value.visible, items: value.items.map((item) => ({ ...item })) }
   }
 
+  /** ステータスバー設定を別画面へ渡す際の参照共有を避ける。 */
+  function cloneStatusBarPreferences(value: StatusBarPreferences): StatusBarPreferences {
+    return { items: [...value.items] }
+  }
+
   /** 現在の設定値を履歴・保存用スナップショットへ複製する。 */
   function cloneCurrentSettings(): SettingsValues {
     return cloneSettingsValues({
       editor: editorSettings.value,
       toolbar: toolbarPreferences.value,
+      statusBar: statusBarPreferences.value,
       barSizes: barSizes.value,
     })
   }
@@ -81,6 +93,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
     return {
       editor: { ...editorSettings.value },
       toolbar: cloneToolbarPreferences(toolbarPreferences.value),
+      statusBar: cloneStatusBarPreferences(statusBarPreferences.value),
       barSizes: { ...barSizes.value },
       page: settingsPage.value,
       history: {
@@ -107,6 +120,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
   function applySettingsRollback(snapshot: SettingsValues): void {
     editorSettings.value = { ...snapshot.editor }
     toolbarPreferences.value = cloneToolbarPreferences(snapshot.toolbar)
+    statusBarPreferences.value = normalizeStatusBarPreferences(snapshot.statusBar)
     barSizes.value = { ...snapshot.barSizes }
     settingsHistory.clear()
   }
@@ -126,7 +140,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
   const settingsPersistence = useSettingsPersistence<SettingsValues>({
     clone: cloneSettingsValues,
     getSnapshot: cloneCurrentSettings,
-    save: (snapshot) => saveSettingsPreferences(snapshot.editor, snapshot.toolbar, snapshot.barSizes),
+    save: (snapshot) => saveSettingsPreferences(snapshot.editor, snapshot.toolbar, snapshot.barSizes, snapshot.statusBar),
     applyRollback: applySettingsRollback,
     notifyRollback: notifySettingsRollback,
     notifyUnexpectedError: notifyUnexpectedSettingsSaveError,
@@ -140,6 +154,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
     flushImmediately = false,
     recordHistory = true,
     barSizesPatch?: Partial<InterfaceBarSizes>,
+    statusBarPatch?: Partial<StatusBarPreferences>,
   ): void {
     const nextEditor = normalizeEditorSettings({ ...editorSettings.value, ...editorPatch })
     const nextToolbar = {
@@ -150,9 +165,11 @@ export function useSettingsController(options: SettingsControllerOptions) {
         : toolbarPreferences.value.items.map((item) => ({ ...item })),
     }
     const nextBarSizes = normalizeInterfaceBarSizes({ ...barSizes.value, ...barSizesPatch })
+    const nextStatusBar = normalizeStatusBarPreferences({ ...statusBarPreferences.value, ...statusBarPatch })
     const hasChanged = JSON.stringify(nextEditor) !== JSON.stringify(editorSettings.value) ||
       JSON.stringify(nextToolbar) !== JSON.stringify(toolbarPreferences.value) ||
-      JSON.stringify(nextBarSizes) !== JSON.stringify(barSizes.value)
+      JSON.stringify(nextBarSizes) !== JSON.stringify(barSizes.value) ||
+      JSON.stringify(nextStatusBar) !== JSON.stringify(statusBarPreferences.value)
     if (!hasChanged) {
       if (flushImmediately) settingsPersistence.requestFlush(true)
       return
@@ -161,6 +178,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
     if (recordHistory) settingsHistory.push(cloneCurrentSettings())
     editorSettings.value = nextEditor
     toolbarPreferences.value = nextToolbar
+    statusBarPreferences.value = nextStatusBar
     barSizes.value = nextBarSizes
     settingsPersistence.markChanged()
     if (flushImmediately) settingsPersistence.requestFlush(true)
@@ -181,6 +199,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
     const previous = settingsHistory.undo(cloneCurrentSettings())
     if (!previous) return
     updateCurrentSettings(previous.editor, previous.toolbar, false, false, previous.barSizes)
+    updateCurrentSettings(undefined, undefined, false, false, undefined, previous.statusBar)
     void publishSettingsState()
   }
 
@@ -189,6 +208,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
     const next = settingsHistory.redo(cloneCurrentSettings())
     if (!next) return
     updateCurrentSettings(next.editor, next.toolbar, false, false, next.barSizes)
+    updateCurrentSettings(undefined, undefined, false, false, undefined, next.statusBar)
     void publishSettingsState()
   }
 
@@ -212,7 +232,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
       } else if (command.type === 'redo') {
         redoSettingsChange()
       } else if (command.type === 'change') {
-        updateCurrentSettings(command.editor, command.toolbar, command.flush ?? false, true, command.barSizes)
+        updateCurrentSettings(command.editor, command.toolbar, command.flush ?? false, true, command.barSizes, command.statusBar)
       }
     } catch (error) {
       if (!disposed) await settingsWindowBridge?.publishError(String(error))
@@ -283,6 +303,8 @@ export function useSettingsController(options: SettingsControllerOptions) {
     editorSettings,
     displayedToolbarItems,
     displayedToolbarVisible,
+    displayedStatusBarItems,
+    statusBarPreferences,
     interfaceBarMetrics,
     interfaceBarStyle,
     toolbarFontItems,

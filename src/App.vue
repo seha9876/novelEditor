@@ -126,6 +126,7 @@ const {
   editorSettings,
   displayedToolbarItems,
   displayedToolbarVisible,
+  displayedStatusBarItems,
   interfaceBarMetrics,
   interfaceBarStyle,
   toolbarFontItems,
@@ -446,6 +447,12 @@ onBeforeUnmount(() => {
     <VMain class="writing-area" aria-label="本文編集領域">
       <EditorPane ref="editor" :settings="editorSettings" :read-only="documentLocked" @change="onChange" @statistics="statistics = $event" @search-status="onSearchStatus" @search-navigate="onSearchNavigate" />
     </VMain>
-    <VFooter app class="status-bar" :height="interfaceBarMetrics.status.height"><StatisticsStatus :statistics="statistics" /></VFooter>
+    <VFooter app class="status-bar" :height="interfaceBarMetrics.status.height">
+      <StatisticsStatus
+        :statistics="statistics"
+        :items="displayedStatusBarItems"
+        :editor-settings="editorSettings"
+      />
+    </VFooter>
   </VApp>
 </template>

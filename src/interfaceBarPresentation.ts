@@ -1,8 +1,22 @@
 /** メニューバー・ツールバー・ステータスバーの表示寸法を設定値から導出する。 */
-import type { InterfaceBarSizes, InterfaceSize } from './appPreferenceSchema'
+import type { InterfaceBarSizes, InterfaceSize, ToolbarSize } from './appPreferenceSchema'
 
 /** 保存値の各サイズを、バーごとの外側寸法と内部コントロール寸法へ変換する。 */
 const interfaceBarSizePresets = {
+  'extra-small': {
+    toolbar: {
+      height: 32,
+      buttonHeight: 24,
+      buttonWidth: 24,
+      iconSize: 16,
+      fontSize: '0.625rem',
+      padding: 4,
+      gap: 2,
+      itemMargin: 0,
+      dividerHeight: 16,
+      dividerMargin: 2,
+    },
+  },
   small: {
     menu: {
       height: 28,
@@ -121,7 +135,7 @@ const interfaceBarSizePresets = {
 
 type InterfaceBarMetrics = {
   menu: typeof interfaceBarSizePresets[InterfaceSize]['menu']
-  toolbar: typeof interfaceBarSizePresets[InterfaceSize]['toolbar']
+  toolbar: typeof interfaceBarSizePresets[ToolbarSize]['toolbar']
   status: typeof interfaceBarSizePresets[InterfaceSize]['status']
 }
 
@@ -134,9 +148,11 @@ export function getInterfaceBarMetrics(sizes: InterfaceBarSizes): InterfaceBarMe
   }
 }
 
-/** 指定したバーとサイズの外側の高さを返す。 */
-export function getInterfaceBarHeight(bar: keyof InterfaceBarMetrics, size: InterfaceSize): number {
-  return interfaceBarSizePresets[size][bar].height
+/** 指定したバーとサイズの外側の高さを返す。極小はツールバーだけで有効とする。 */
+export function getInterfaceBarHeight(bar: keyof InterfaceBarMetrics, size: InterfaceSize | ToolbarSize): number {
+  if (bar === 'toolbar') return interfaceBarSizePresets[size].toolbar.height
+  const normalizedSize = size === 'extra-small' ? 'medium' : size
+  return interfaceBarSizePresets[normalizedSize][bar].height
 }
 
 /** レイアウトと内部コントロールへバーの寸法をCSSカスタムプロパティで渡す。 */

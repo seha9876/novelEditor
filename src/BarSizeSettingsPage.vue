@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import SettingExpansionSection from './SettingExpansionSection.vue'
 import { getInterfaceBarHeight } from './interfaceBarPresentation'
-import type { InterfaceBarSizes, InterfaceSize } from './appPreferenceSchema'
+import type { InterfaceBarSizes, InterfaceSize, ToolbarSize } from './appPreferenceSchema'
 import type { SettingsSectionDefinition, SettingsSectionId } from './settingsDefinitions'
 
 defineProps<{
@@ -21,20 +21,29 @@ const sizeOptions: ReadonlyArray<{ value: InterfaceSize; label: string }> = [
   { value: 'medium', label: '中' },
   { value: 'large', label: '大' },
 ]
+const toolbarSizeOptions: ReadonlyArray<{ value: ToolbarSize; label: string }> = [
+  { value: 'extra-small', label: '極小' },
+  ...sizeOptions,
+]
 
 /** 選択されたサイズ値が設定で扱える3段階か検査する。 */
 function isInterfaceSize(value: unknown): value is InterfaceSize {
   return value === 'small' || value === 'medium' || value === 'large'
 }
 
+/** ツールバーだけで選べる極小を含むサイズ値か検査する。 */
+function isToolbarSize(value: unknown): value is ToolbarSize {
+  return value === 'extra-small' || isInterfaceSize(value)
+}
+
 /** 指定したバーのサイズを即時反映し、メイン画面の自動保存経路へ渡す。 */
 function changeBarSize(bar: keyof InterfaceBarSizes, value: unknown): void {
-  if (!isInterfaceSize(value)) return
+  if (bar === 'toolbar' ? !isToolbarSize(value) : !isInterfaceSize(value)) return
   emit('updateBarSizes', { [bar]: value })
 }
 
 /** 選択肢に対応する高さを説明文へ表示する。px値の入力は受け付けない。 */
-function describeHeight(bar: keyof InterfaceBarSizes, size: InterfaceSize): string {
+function describeHeight(bar: keyof InterfaceBarSizes, size: InterfaceSize | ToolbarSize): string {
   return `${getInterfaceBarHeight(bar, size)}px`
 }
 </script>
@@ -82,7 +91,7 @@ function describeHeight(bar: keyof InterfaceBarSizes, size: InterfaceSize): stri
             :aria-label="`ツールバーのサイズ（現在: ${barSizes.toolbar}）`"
             @update:model-value="changeBarSize('toolbar', $event)"
           >
-            <VBtn v-for="option in sizeOptions" :key="option.value" :value="option.value">{{ option.label }}</VBtn>
+            <VBtn v-for="option in toolbarSizeOptions" :key="option.value" :value="option.value">{{ option.label }}</VBtn>
           </VBtnToggle>
         </div>
         <div class="bar-size-row">

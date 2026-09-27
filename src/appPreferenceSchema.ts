@@ -53,13 +53,16 @@ export const statusBarItemDefinitions: ReadonlyArray<StatusBarItemDefinition> = 
   { id: 'statistics', label: '統計ボタン', icon: 'mdi-chart-box-outline' },
 ]
 
-/** メニュー・ツール・ステータスバーへ適用する表示サイズの段階。 */
+/** メニュー・ツール・ステータスバーで共通利用する標準3段階の表示サイズ。 */
 export type InterfaceSize = 'small' | 'medium' | 'large'
+
+/** ツールバーだけで選べる極小サイズを含む表示サイズ。保存値の互換性を保つため、他のバーはInterfaceSizeを使う。 */
+export type ToolbarSize = InterfaceSize | 'extra-small'
 
 /** 各バーの表示サイズを個別に保持する。設定画面の選択値と保存値で共有する。 */
 export type InterfaceBarSizes = {
   menu: InterfaceSize
-  toolbar: InterfaceSize
+  toolbar: ToolbarSize
   status: InterfaceSize
 }
 
@@ -163,12 +166,17 @@ export function normalizeInterfaceSize(value: unknown): InterfaceSize {
   return value === 'small' || value === 'large' || value === 'medium' ? value : 'medium'
 }
 
+/** ツールバーのサイズを検査し、極小を含む有効値以外を中サイズへ補正する。 */
+export function normalizeToolbarSize(value: unknown): ToolbarSize {
+  return value === 'extra-small' || value === 'small' || value === 'large' || value === 'medium' ? value : 'medium'
+}
+
 /** 保存データのバーサイズを項目ごとに検査し、欠損値も中サイズへ補完する。 */
 export function normalizeInterfaceBarSizes(value: unknown): InterfaceBarSizes {
   const raw = value && typeof value === 'object' ? value as Record<string, unknown> : {}
   return {
     menu: normalizeInterfaceSize(raw.menu),
-    toolbar: normalizeInterfaceSize(raw.toolbar),
+    toolbar: normalizeToolbarSize(raw.toolbar),
     status: normalizeInterfaceSize(raw.status),
   }
 }

@@ -5,7 +5,7 @@ import type { InterfaceBarSizes, InterfaceSize } from './appPreferenceSchema'
 const interfaceBarSizePresets = {
   small: {
     menu: {
-      height: 40,
+      height: 28,
       controlHeight: 24,
       iconSize: 18,
       fontSize: '0.6875rem',
@@ -43,7 +43,7 @@ const interfaceBarSizePresets = {
   },
   medium: {
     menu: {
-      height: 48,
+      height: 32,
       controlHeight: 28,
       iconSize: 20,
       fontSize: '0.75rem',
@@ -81,7 +81,7 @@ const interfaceBarSizePresets = {
   },
   large: {
     menu: {
-      height: 56,
+      height: 40,
       controlHeight: 36,
       iconSize: 24,
       fontSize: '0.875rem',

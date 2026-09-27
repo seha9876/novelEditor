@@ -159,7 +159,7 @@ test('設定Controllerは変更を履歴化し、Undo/Redoと直列保存を実�
     showError: async () => {},
   })
 
-  assert.equal(controller.interfaceBarMetrics.value.menu.height, 48)
+  assert.equal(controller.interfaceBarMetrics.value.menu.height, 32)
   await controller.setup()
   commandHandler({ payload: { type: 'ready' } })
   const originalSize = controller.editorSettings.value.fontSize

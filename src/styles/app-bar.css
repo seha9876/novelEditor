@@ -1,7 +1,7 @@
 /* メニューバーとツールバーの構造・内部コントロールを定義する。 */
 .titlebar { z-index: 2; user-select: none; }
 .titlebar .v-toolbar__content { width: 100%; min-height: var(--menu-bar-height, 48px); height: var(--menu-bar-height, 48px); padding: 0; }
-.titlebar .v-toolbar__extension { width: 100%; min-height: var(--toolbar-bar-height, 60px); height: var(--toolbar-bar-height, 60px); padding: 0; }
+.titlebar .v-toolbar__extension { width: 100%; min-height: var(--toolbar-bar-height, 48px); height: var(--toolbar-bar-height, 48px); padding: 0; }
 .menu-bar { height: 100%; display: flex; flex: none; align-items: center; gap: var(--menu-bar-gap, 2px); padding-inline: var(--menu-bar-padding, 8px); }
 .menu-heading.v-btn { min-width: auto; min-height: var(--menu-control-height, 28px); height: var(--menu-control-height, 28px); padding-inline: var(--menu-button-padding, 12px); color: inherit; font-size: var(--menu-font-size, 0.875rem); --v-btn-height: var(--menu-control-height, 28px); --v-btn-size: var(--menu-font-size, 0.875rem); text-transform: none; letter-spacing: normal; }
 .menu-placeholder { cursor: default; }
@@ -15,18 +15,13 @@
 .window-controls .v-icon { font-size: var(--menu-icon-size, 20px); }
 .window-controls .window-close:hover { color: white; background: rgb(var(--v-theme-error)); }
 .toolbar-strip { width: 100%; min-width: 0; height: 100%; display: flex; flex: none; border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
-.toolbar-scroll { width: 100%; min-width: 0; height: 100%; display: flex; align-items: center; gap: var(--toolbar-bar-gap, 4px); overflow-x: auto; overflow-y: hidden; padding-inline: var(--toolbar-bar-padding, 8px); }
-.toolbar-command.v-btn.v-btn--icon { flex: none; width: var(--toolbar-button-width, 32px); height: var(--toolbar-button-height, 28px); min-width: var(--toolbar-button-width, 32px); color: inherit; font-size: var(--toolbar-font-size, 0.8rem); --v-btn-height: var(--toolbar-button-height, 28px); --v-btn-size: var(--toolbar-font-size, 0.8rem); }
+.toolbar-scroll { width: 100%; min-width: 0; height: 100%; display: flex; align-items: center; gap: var(--toolbar-bar-gap, 4px); overflow-x: auto; overflow-y: hidden; padding: var(--toolbar-bar-padding, 4px); }
+.toolbar-command.v-btn.v-btn--icon { flex: none; width: var(--toolbar-button-width, 40px); height: var(--toolbar-button-height, 40px); min-width: var(--toolbar-button-width, 40px); color: inherit; font-size: var(--toolbar-font-size, 0.8rem); --v-btn-height: var(--toolbar-button-height, 40px); --v-btn-size: var(--toolbar-font-size, 0.8rem); }
 .toolbar-command .v-icon { font-size: var(--toolbar-icon-size, 20px); }
-.toolbar-typography-font, .toolbar-typography-number { flex: none; margin-inline: var(--toolbar-item-margin, 2px); }
-.toolbar-typography-font { width: var(--toolbar-font-width, 136px); }
-.toolbar-typography-number { width: var(--toolbar-number-width, 126px); display: flex; align-items: center; gap: 0; }
-.toolbar-typography-number-field { min-width: 0; flex: 1 1 auto; }
-.toolbar-typography-number-menu.v-btn.v-btn--icon { width: var(--toolbar-number-menu-width, 30px); min-width: var(--toolbar-number-menu-width, 30px); height: var(--toolbar-button-height, 28px); --v-btn-height: var(--toolbar-button-height, 28px); }
-.toolbar-typography-font.v-input--density-compact .v-field, .toolbar-typography-number-field.v-input--density-compact .v-field { --v-input-control-height: var(--toolbar-control-height, 36px); min-height: var(--toolbar-control-height, 36px); height: var(--toolbar-control-height, 36px); }
-.toolbar-typography-font .v-field__input, .toolbar-typography-number .v-field__input { min-height: var(--toolbar-control-height, 36px); padding-block: 5px; font-size: var(--toolbar-input-font-size, 0.8rem); }
-.toolbar-typography-font .v-label, .toolbar-typography-number .v-label { font-size: var(--toolbar-label-font-size, 0.75rem); }
-.toolbar-font-size-adjust { height: var(--toolbar-control-height, 36px); display: flex; flex: none; align-items: center; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 4px; }
-.toolbar-font-size-adjust .v-btn.v-btn--icon { width: var(--toolbar-adjust-button-width, 32px); min-width: var(--toolbar-adjust-button-width, 32px); height: var(--toolbar-button-height, 28px); --v-btn-height: var(--toolbar-button-height, 28px); }
-.toolbar-font-size-adjust .v-icon { font-size: var(--toolbar-icon-size, 20px); }
+.toolbar-step-adjust { height: var(--toolbar-button-height, 40px); display: flex; flex: none; align-items: center; }
+.toolbar-step-adjust .v-btn.v-btn--icon { width: var(--toolbar-button-width, 40px); min-width: var(--toolbar-button-width, 40px); height: var(--toolbar-button-height, 40px); --v-btn-height: var(--toolbar-button-height, 40px); }
+.toolbar-step-adjust .v-icon { font-size: var(--toolbar-icon-size, 20px); }
+.toolbar-composite-icon { position: relative; display: inline-flex; flex: none; width: var(--toolbar-icon-size, 20px); height: var(--toolbar-icon-size, 20px); align-items: center; justify-content: center; }
+.toolbar-composite-icon .toolbar-step-primary-icon.v-icon { font-size: var(--toolbar-icon-size, 20px); }
+.toolbar-composite-icon .toolbar-step-badge.v-icon { position: absolute; right: calc(var(--toolbar-icon-size, 20px) * -0.12); bottom: calc(var(--toolbar-icon-size, 20px) * -0.12); display: inline-flex; width: calc(var(--toolbar-icon-size, 20px) * 0.72); height: calc(var(--toolbar-icon-size, 20px) * 0.72); min-width: 0; align-items: center; justify-content: center; border-radius: 50%; color: rgb(var(--v-theme-on-surface)); background: rgb(var(--v-theme-surface)); font-size: calc(var(--toolbar-icon-size, 20px) * 0.68); line-height: 1; }
 .toolbar-divider { height: var(--toolbar-divider-height, 24px); margin-inline: var(--toolbar-divider-margin, 4px); }

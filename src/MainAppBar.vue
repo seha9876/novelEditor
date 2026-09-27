@@ -13,7 +13,6 @@ const props = defineProps<{
   toolbarVisible: boolean
   toolbarItems: ToolbarItem[]
   editorSettings: EditorSettings
-  toolbarFontItems: { title: string; value: string }[]
   displayName: string
   documentPath: string | null
   dirty: boolean
@@ -31,9 +30,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   command: [commandId: CommandId]
   'toggle-maximize': []
-  'update-font-family': [value: unknown]
-  'update-typography-number': [field: 'fontSize' | 'lineHeight', value: number]
   'adjust-font-size': [direction: -1 | 1]
+  'adjust-line-height': [direction: -1 | 1]
   'project-create': []
   'project-select': [projectId: number]
   'project-rename': []
@@ -41,11 +39,6 @@ const emit = defineEmits<{
 }>()
 
 const mainMenuBar = ref<{ closeMenus: () => void } | null>(null)
-
-/** 子ツールバーの本文設定値変更を型付きイベントとして親へ渡す。 */
-function forwardTypographyNumber(field: 'fontSize' | 'lineHeight', value: number): void {
-  emit('update-typography-number', field, value)
-}
 
 /** ツールバーとメニューバーが同時に開かないよう、子コンポーネント間の表示状態を同期する。 */
 function closeMainMenusForToolbar(): void {
@@ -87,15 +80,13 @@ function closeMainMenusForToolbar(): void {
         v-if="props.toolbarVisible"
         :toolbar-items="props.toolbarItems"
         :editor-settings="props.editorSettings"
-        :toolbar-font-items="props.toolbarFontItems"
         :app-commands="props.appCommands"
         :is-command-disabled="props.isCommandDisabled"
         :is-command-checked="props.isCommandChecked"
         :get-command-label="props.getCommandLabel"
         @command="emit('command', $event)"
-        @update-font-family="emit('update-font-family', $event)"
-        @update-typography-number="forwardTypographyNumber"
         @adjust-font-size="emit('adjust-font-size', $event)"
+        @adjust-line-height="emit('adjust-line-height', $event)"
         @toolbar-context-menu="closeMainMenusForToolbar"
       />
     </template>

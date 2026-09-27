@@ -143,10 +143,8 @@ const {
   displayedStatusBarItems,
   interfaceBarMetrics,
   interfaceBarStyle,
-  toolbarFontItems,
-  updateToolbarFontFamily,
-  updateToolbarTypographyNumber,
   adjustToolbarFontSize,
+  adjustToolbarLineHeight,
   openSettingsWindow,
   toggleToolbarVisibility,
   chooseWrapMode,
@@ -232,8 +230,6 @@ const commandActions: Record<CommandId, () => Promise<void>> = {
   'window.maximizeHorizontal': () => maximizeWindowAxis('horizontal'),
   'window.alwaysOnTop': toggleAlwaysOnTop,
   'window.close': closeWindow,
-  'toolbar.typography.fontFamily': async () => openSettingsWindow('editor.typography'),
-  'toolbar.typography.fontSize': async () => openSettingsWindow('editor.typography'),
   'toolbar.typography.fontSizeAdjust': async () => openSettingsWindow('editor.typography'),
   'toolbar.typography.lineHeight': async () => openSettingsWindow('editor.typography'),
   'view.toolbar.toggle': toggleToolbarVisibility,
@@ -385,7 +381,6 @@ onBeforeUnmount(() => {
       :toolbar-visible="displayedToolbarVisible"
       :toolbar-items="displayedToolbarItems"
       :editor-settings="editorSettings"
-      :toolbar-font-items="toolbarFontItems"
       :display-name="displayName"
       :document-path="path"
       :dirty="dirty"
@@ -405,9 +400,8 @@ onBeforeUnmount(() => {
       @project-select="changeMenuProject"
       @project-rename="requestProjectRename"
       @project-delete="requestProjectDelete"
-      @update-font-family="updateToolbarFontFamily"
-      @update-typography-number="updateToolbarTypographyNumber"
       @adjust-font-size="adjustToolbarFontSize"
+      @adjust-line-height="adjustToolbarLineHeight"
     />
     <ProjectNameDialog
       v-model="projectDialogOpen"

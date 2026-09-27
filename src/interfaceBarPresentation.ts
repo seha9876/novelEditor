@@ -1,11 +1,25 @@
 /** メニューバー・ツールバー・ステータスバーの表示寸法を設定値から導出する。 */
-import type { InterfaceBarSizes, InterfaceSize } from './appPreferenceSchema'
+import type { InterfaceBarSizes, InterfaceSize, ToolbarSize } from './appPreferenceSchema'
 
 /** 保存値の各サイズを、バーごとの外側寸法と内部コントロール寸法へ変換する。 */
 const interfaceBarSizePresets = {
+  'extra-small': {
+    toolbar: {
+      height: 32,
+      buttonHeight: 24,
+      buttonWidth: 24,
+      iconSize: 16,
+      fontSize: '0.625rem',
+      padding: 4,
+      gap: 2,
+      itemMargin: 0,
+      dividerHeight: 16,
+      dividerMargin: 2,
+    },
+  },
   small: {
     menu: {
-      height: 40,
+      height: 28,
       controlHeight: 24,
       iconSize: 18,
       fontSize: '0.6875rem',
@@ -19,19 +33,12 @@ const interfaceBarSizePresets = {
       titlePadding: 8,
     },
     toolbar: {
-      height: 48,
-      controlHeight: 36,
+      height: 40,
       buttonHeight: 32,
       buttonWidth: 32,
-      adjustButtonWidth: 28,
       iconSize: 18,
       fontSize: '0.6875rem',
-      inputFontSize: '0.75rem',
-      labelFontSize: '0.6875rem',
-      fontWidth: 124,
-      numberWidth: 114,
-      numberMenuWidth: 26,
-      padding: 6,
+      padding: 4,
       gap: 3,
       itemMargin: 1,
       dividerHeight: 20,
@@ -50,7 +57,7 @@ const interfaceBarSizePresets = {
   },
   medium: {
     menu: {
-      height: 48,
+      height: 32,
       controlHeight: 28,
       iconSize: 20,
       fontSize: '0.75rem',
@@ -64,19 +71,12 @@ const interfaceBarSizePresets = {
       titlePadding: 12,
     },
     toolbar: {
-      height: 60,
-      controlHeight: 36,
+      height: 48,
       buttonHeight: 40,
       buttonWidth: 40,
-      adjustButtonWidth: 32,
       iconSize: 20,
       fontSize: '0.75rem',
-      inputFontSize: '0.8rem',
-      labelFontSize: '0.75rem',
-      fontWidth: 136,
-      numberWidth: 126,
-      numberMenuWidth: 30,
-      padding: 8,
+      padding: 4,
       gap: 4,
       itemMargin: 2,
       dividerHeight: 24,
@@ -95,7 +95,7 @@ const interfaceBarSizePresets = {
   },
   large: {
     menu: {
-      height: 56,
+      height: 40,
       controlHeight: 36,
       iconSize: 24,
       fontSize: '0.875rem',
@@ -109,19 +109,12 @@ const interfaceBarSizePresets = {
       titlePadding: 16,
     },
     toolbar: {
-      height: 72,
-      controlHeight: 44,
+      height: 56,
       buttonHeight: 48,
       buttonWidth: 48,
-      adjustButtonWidth: 40,
       iconSize: 24,
       fontSize: '0.875rem',
-      inputFontSize: '0.9rem',
-      labelFontSize: '0.875rem',
-      fontWidth: 148,
-      numberWidth: 138,
-      numberMenuWidth: 36,
-      padding: 12,
+      padding: 4,
       gap: 6,
       itemMargin: 3,
       dividerHeight: 32,
@@ -142,7 +135,7 @@ const interfaceBarSizePresets = {
 
 type InterfaceBarMetrics = {
   menu: typeof interfaceBarSizePresets[InterfaceSize]['menu']
-  toolbar: typeof interfaceBarSizePresets[InterfaceSize]['toolbar']
+  toolbar: typeof interfaceBarSizePresets[ToolbarSize]['toolbar']
   status: typeof interfaceBarSizePresets[InterfaceSize]['status']
 }
 
@@ -155,9 +148,11 @@ export function getInterfaceBarMetrics(sizes: InterfaceBarSizes): InterfaceBarMe
   }
 }
 
-/** 指定したバーとサイズの外側の高さを返す。 */
-export function getInterfaceBarHeight(bar: keyof InterfaceBarMetrics, size: InterfaceSize): number {
-  return interfaceBarSizePresets[size][bar].height
+/** 指定したバーとサイズの外側の高さを返す。極小はツールバーだけで有効とする。 */
+export function getInterfaceBarHeight(bar: keyof InterfaceBarMetrics, size: InterfaceSize | ToolbarSize): number {
+  if (bar === 'toolbar') return interfaceBarSizePresets[size].toolbar.height
+  const normalizedSize = size === 'extra-small' ? 'medium' : size
+  return interfaceBarSizePresets[normalizedSize][bar].height
 }
 
 /** レイアウトと内部コントロールへバーの寸法をCSSカスタムプロパティで渡す。 */
@@ -177,17 +172,10 @@ export function createInterfaceBarStyle(sizes: InterfaceBarSizes): Record<string
     '--menu-title-gap': `${metrics.menu.titleGap}px`,
     '--menu-title-padding': `${metrics.menu.titlePadding}px`,
     '--toolbar-bar-height': `${metrics.toolbar.height}px`,
-    '--toolbar-control-height': `${metrics.toolbar.controlHeight}px`,
     '--toolbar-button-height': `${metrics.toolbar.buttonHeight}px`,
     '--toolbar-button-width': `${metrics.toolbar.buttonWidth}px`,
-    '--toolbar-adjust-button-width': `${metrics.toolbar.adjustButtonWidth}px`,
     '--toolbar-icon-size': `${metrics.toolbar.iconSize}px`,
     '--toolbar-font-size': metrics.toolbar.fontSize,
-    '--toolbar-input-font-size': metrics.toolbar.inputFontSize,
-    '--toolbar-label-font-size': metrics.toolbar.labelFontSize,
-    '--toolbar-font-width': `${metrics.toolbar.fontWidth}px`,
-    '--toolbar-number-width': `${metrics.toolbar.numberWidth}px`,
-    '--toolbar-number-menu-width': `${metrics.toolbar.numberMenuWidth}px`,
     '--toolbar-bar-padding': `${metrics.toolbar.padding}px`,
     '--toolbar-bar-gap': `${metrics.toolbar.gap}px`,
     '--toolbar-item-margin': `${metrics.toolbar.itemMargin}px`,

@@ -1,7 +1,6 @@
 /** 設定値の適用と表示メトリクスをまとめ、保存・履歴・設定子窓へ橋渡しする。 */
 import { computed, ref } from 'vue'
 import {
-  editorFontOptions,
   isValidTypographyNumber,
   normalizeEditorSettings,
   type EditorSettings,
@@ -56,13 +55,6 @@ export function useSettingsController(options: SettingsControllerOptions) {
   const displayedStatusBarItems = computed(() => statusBarPreferences.value.items)
   const interfaceBarMetrics = computed(() => getInterfaceBarMetrics(barSizes.value))
   const interfaceBarStyle = computed(() => createInterfaceBarStyle(barSizes.value))
-  const toolbarFontItems = computed(() => {
-    const items: { title: string; value: string }[] = editorFontOptions.map((option) => ({ title: option.label, value: option.fontFamily }))
-    if (!items.some((item) => item.value === editorSettings.value.fontFamily)) {
-      items.push({ title: editorSettings.value.fontFamily, value: editorSettings.value.fontFamily })
-    }
-    return items
-  })
 
   let disposed = false
 
@@ -253,25 +245,16 @@ export function useSettingsController(options: SettingsControllerOptions) {
     void publishSettingsState()
   }
 
-  /** ツールバー設定を別画面へ送る共通更新経路へ渡す。 */
-  function updateToolbarFontFamily(value: unknown): void {
-    if (typeof value !== 'string') return
-    const option = editorFontOptions.find((candidate) => candidate.fontFamily === value)
-    updateCurrentSettings(option
-      ? { fontFamily: option.fontFamily, fontFallback: option.fontFallback }
-      : { fontFamily: value })
-  }
-
-  /** ツールバーの数値入力を本文設定の共通範囲で検証して保存する。 */
-  function updateToolbarTypographyNumber(field: 'fontSize' | 'lineHeight', value: number): void {
-    if (!isValidTypographyNumber(field, value)) return
-    updateCurrentSettings({ [field]: value })
-  }
-
   /** 本文文字サイズを1pxずつ調整し、12～48pxの範囲を超えないようにする。 */
   function adjustToolbarFontSize(direction: -1 | 1): void {
     const next = editorSettings.value.fontSize + direction
     if (isValidTypographyNumber('fontSize', next)) updateCurrentSettings({ fontSize: next })
+  }
+
+  /** 本文の行間を0.1倍ずつ調整し、1.0～3.0倍の範囲へ丸めて保存する。 */
+  function adjustToolbarLineHeight(direction: -1 | 1): void {
+    const next = Number((editorSettings.value.lineHeight + direction * 0.1).toFixed(1))
+    if (isValidTypographyNumber('lineHeight', next)) updateCurrentSettings({ lineHeight: next })
   }
 
   /** 設定変更を設定ウィンドウとメイン画面の共通自動保存経路へ送る。 */
@@ -307,12 +290,10 @@ export function useSettingsController(options: SettingsControllerOptions) {
     statusBarPreferences,
     interfaceBarMetrics,
     interfaceBarStyle,
-    toolbarFontItems,
     toggleToolbarVisibility,
     chooseWrapMode,
-    updateToolbarFontFamily,
-    updateToolbarTypographyNumber,
     adjustToolbarFontSize,
+    adjustToolbarLineHeight,
     openSettingsWindow,
     setup,
     flush,

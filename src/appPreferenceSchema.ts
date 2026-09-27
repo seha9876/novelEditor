@@ -53,13 +53,16 @@ export const statusBarItemDefinitions: ReadonlyArray<StatusBarItemDefinition> = 
   { id: 'statistics', label: '統計ボタン', icon: 'mdi-chart-box-outline' },
 ]
 
-/** メニュー・ツール・ステータスバーへ適用する表示サイズの段階。 */
+/** メニュー・ツール・ステータスバーで共通利用する標準3段階の表示サイズ。 */
 export type InterfaceSize = 'small' | 'medium' | 'large'
+
+/** ツールバーだけで選べる極小サイズを含む表示サイズ。保存値の互換性を保つため、他のバーはInterfaceSizeを使う。 */
+export type ToolbarSize = InterfaceSize | 'extra-small'
 
 /** 各バーの表示サイズを個別に保持する。設定画面の選択値と保存値で共有する。 */
 export type InterfaceBarSizes = {
   menu: InterfaceSize
-  toolbar: InterfaceSize
+  toolbar: ToolbarSize
   status: InterfaceSize
 }
 
@@ -78,6 +81,12 @@ const defaultStatusBarItems: StatusBarItemId[] = [
   'position',
   'statistics',
 ]
+
+/** 旧設定から取り除く、入力欄形式だったツールバー項目を識別する。 */
+const removedToolbarCommandIds = new Set([
+  'toolbar.typography.fontFamily',
+  'toolbar.typography.fontSize',
+])
 
 export type ProjectTreePreferences = {
   width: number
@@ -157,12 +166,17 @@ export function normalizeInterfaceSize(value: unknown): InterfaceSize {
   return value === 'small' || value === 'large' || value === 'medium' ? value : 'medium'
 }
 
+/** ツールバーのサイズを検査し、極小を含む有効値以外を中サイズへ補正する。 */
+export function normalizeToolbarSize(value: unknown): ToolbarSize {
+  return value === 'extra-small' || value === 'small' || value === 'large' || value === 'medium' ? value : 'medium'
+}
+
 /** 保存データのバーサイズを項目ごとに検査し、欠損値も中サイズへ補完する。 */
 export function normalizeInterfaceBarSizes(value: unknown): InterfaceBarSizes {
   const raw = value && typeof value === 'object' ? value as Record<string, unknown> : {}
   return {
     menu: normalizeInterfaceSize(raw.menu),
-    toolbar: normalizeInterfaceSize(raw.toolbar),
+    toolbar: normalizeToolbarSize(raw.toolbar),
     status: normalizeInterfaceSize(raw.status),
   }
 }
@@ -203,6 +217,12 @@ export function normalizeToolbarItems(value: unknown): ToolbarItem[] {
     }
   }
 
+  const containsOnlyRemovedCommands = value.every((candidate) => {
+    if (!candidate || typeof candidate !== 'object') return false
+    const item = candidate as Record<string, unknown>
+    return item.type === 'command' && typeof item.commandId === 'string' && removedToolbarCommandIds.has(item.commandId)
+  })
+  if (containsOnlyRemovedCommands) return []
   return normalized.length > 0 ? normalized : createDefaultToolbarItems()
 }
 

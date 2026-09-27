@@ -1,6 +1,13 @@
 /** プロジェクトツリー分離ウィンドウとメイン画面のイベント契約をまとめる。 */
 export const PROJECT_TREE_WINDOW_COMMAND_EVENT = 'project-tree-window:command'
 export const PROJECT_TREE_WINDOW_STATE_EVENT = 'project-tree-window:state'
+export const PROJECT_TREE_CHANGED_EVENT = 'project-tree:changed'
+
+/** プロジェクト情報の変更を各ツリー画面へ通知する変更通知イベント。 */
+export type ProjectTreeChangedEvent = {
+  sourceId: string
+  revision: number
+}
 
 export type ProjectTreeOpenResult = {
   requestId: string

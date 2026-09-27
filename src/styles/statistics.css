@@ -37,5 +37,4 @@
   .editor-host { --editor-side-padding: 22px; }
   .editor-host .cm-content { padding-top: 28px; padding-bottom: 50px; }
   .project-tree-header { padding-inline: 6px; }
-  .project-tree-toolbar .v-btn { font-size: 0.68rem; }
 }

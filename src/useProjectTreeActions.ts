@@ -1,24 +1,22 @@
 /** プロジェクトツリーの名前入力、DB操作、ファイル開閉結果を表示構成から分離する。 */
-import { computed, ref, type Ref } from 'vue'
+import { computed, ref, watch, type Ref } from 'vue'
 import { ask, message } from '@tauri-apps/plugin-dialog'
 import { chooseTextFile, fileName } from './textFile'
 import type { ProjectTreeOpenRequest, ProjectTreeOpenResult } from './projectTreeWindow'
 import {
-  createProject,
   createProjectFolder,
-  deleteProject,
   registerProjectFile,
   registerDroppedProjectFiles,
   relinkProjectFile,
   removeProjectNodes,
-  renameProject,
   renameProjectFolder,
-  selectProject,
 } from './projectTreeClient'
 import type { ProjectTreeNode, ProjectTreeSnapshot } from './projectTreeModel'
+import { useProjectTreeProjectActions } from './useProjectTreeProjectActions'
 
-type ProjectTreeDialogMode = 'project-create' | 'project-rename' | 'folder-create' | 'folder-rename'
+type ProjectTreeDialogMode = 'folder-create' | 'folder-rename'
 type ProjectTreeDocumentOrigin = { nodeId: number; projectId: number }
+type ProjectTreeContextTarget = { kind: 'root' } | { kind: 'node'; nodeId: number }
 
 type RunMutation = (action: () => Promise<void>, options?: { setErrorOnFailure?: boolean }) => Promise<boolean>
 
@@ -43,52 +41,53 @@ type ProjectTreeActionsOptions = {
 
 /** ツリー操作に必要なダイアログ・保留要求・DB更新を所有する。 */
 export function useProjectTreeActions(options: ProjectTreeActionsOptions) {
-  const activeProject = computed(() => options.snapshot.value.projects.find((project) => project.id === options.snapshot.value.activeProjectId) ?? null)
-  const contextNodeId = ref<number | null>(null)
-  const contextNode = computed(() => options.snapshot.value.nodes.find((node) => node.id === contextNodeId.value) ?? null)
+  const contextTarget = ref<ProjectTreeContextTarget>({ kind: 'root' })
+  const contextNode = computed(() => {
+    const target = contextTarget.value
+    return target.kind === 'node'
+      ? options.snapshot.value.nodes.find((node) => node.id === target.nodeId) ?? null
+      : null
+  })
   const nodeMenuOpen = ref(false)
   const nodeMenuTarget = ref<[number, number]>([0, 0])
-  const projectMenuOpen = ref(false)
+  /** アクティブプロジェクト切替時に古い対象の操作メニューを閉じる。 */
+  watch(() => options.snapshot.value.activeProjectId, () => {
+    nodeMenuOpen.value = false
+  })
   const dialogOpen = ref(false)
-  const dialogMode = ref<ProjectTreeDialogMode>('project-create')
+  const dialogMode = ref<ProjectTreeDialogMode>('folder-create')
   const dialogTitle = ref('')
   const dialogValue = ref('')
-  const dialogProjectId = ref<number | null>(null)
   const dialogParentId = ref<number | null>(null)
   const dialogNodeId = ref<number | null>(null)
 
+  const projectActions = useProjectTreeProjectActions({
+    snapshot: options.snapshot,
+    isBusy: options.isBusy,
+    runMutation: options.runMutation,
+    documentOrigin: options.documentOrigin,
+    clearNodeSelection: options.clearNodeSelection,
+    onOriginDetached: options.onOriginDetached,
+  })
+
   /** 入力ダイアログを開き、必要な対象 ID を保持する。 */
-  function openNameDialog(mode: ProjectTreeDialogMode, title: string, initialValue: string, ids: { projectId?: number | null; parentId?: number | null; nodeId?: number | null } = {}): void {
+  function openNameDialog(mode: ProjectTreeDialogMode, title: string, initialValue: string, ids: { parentId?: number | null; nodeId?: number | null } = {}): void {
     dialogMode.value = mode
     dialogTitle.value = title
     dialogValue.value = initialValue
-    dialogProjectId.value = ids.projectId ?? null
     dialogParentId.value = ids.parentId ?? null
     dialogNodeId.value = ids.nodeId ?? null
     dialogOpen.value = true
   }
 
-  /** 名前入力を検証し、対応するプロジェクトまたは仮想フォルダを保存する。 */
+  /** 名前入力を検証し、仮想フォルダを保存する。 */
   async function saveNameDialog(): Promise<void> {
     const name = dialogValue.value.trim()
     if (!name || options.isBusy()) return
     const previousNodeIds = new Set(options.snapshot.value.nodes.map((node) => node.id))
-    const previousProjectIds = new Set(options.snapshot.value.projects.map((project) => project.id))
-
-    if (dialogMode.value === 'project-create') {
-      if (!await options.runMutation(() => createProject(name))) return
-      dialogOpen.value = false
-      const created = options.snapshot.value.projects.find((project) => !previousProjectIds.has(project.id))
-      if (created && options.snapshot.value.activeProjectId !== created.id) {
-        await options.runMutation(() => selectProject(created.id))
-      }
-      return
-    }
 
     let action: () => Promise<void>
-    if (dialogMode.value === 'project-rename' && dialogProjectId.value !== null) {
-      action = () => renameProject(dialogProjectId.value!, name)
-    } else if (dialogMode.value === 'folder-create' && options.snapshot.value.activeProjectId !== null) {
+    if (dialogMode.value === 'folder-create' && options.snapshot.value.activeProjectId !== null) {
       action = () => createProjectFolder(options.snapshot.value.activeProjectId!, dialogParentId.value, name)
     } else if (dialogMode.value === 'folder-rename' && dialogNodeId.value !== null) {
       action = () => renameProjectFolder(dialogNodeId.value!, name)
@@ -104,40 +103,6 @@ export function useProjectTreeActions(options: ProjectTreeActionsOptions) {
           && node.parentId === dialogParentId.value && node.projectId === options.snapshot.value.activeProjectId)
         if (createdFolder) options.expandFolderPath(createdFolder.id)
       }
-    }
-  }
-
-  /** プロジェクト選択を保存してから表示を切り替える。 */
-  async function changeProject(projectId: number | null): Promise<void> {
-    if (projectId === null || projectId === options.snapshot.value.activeProjectId) return
-    options.clearNodeSelection()
-    await options.runMutation(() => selectProject(projectId))
-  }
-
-  /** 新しいプロジェクトを作成するための入力を求める。 */
-  function requestProjectCreate(): void {
-    openNameDialog('project-create', 'プロジェクトを作成', '')
-  }
-
-  /** 選択中プロジェクト名の変更を求める。 */
-  function requestProjectRename(): void {
-    if (!activeProject.value) return
-    projectMenuOpen.value = false
-    openNameDialog('project-rename', 'プロジェクト名を変更', activeProject.value.name, { projectId: activeProject.value.id })
-  }
-
-  /** 選択中プロジェクトと登録情報だけを確認後に削除する。 */
-  async function requestProjectDelete(): Promise<void> {
-    const project = activeProject.value
-    if (!project || options.isBusy()) return
-    projectMenuOpen.value = false
-    if (!await ask(`「${project.name}」と配下の登録を削除します。実ファイルは削除されません。続けますか？`, {
-      title: 'プロジェクトの削除', kind: 'warning', okLabel: '削除', cancelLabel: 'キャンセル',
-    })) return
-
-    const origin = options.documentOrigin()
-    if (await options.runMutation(() => deleteProject(project.id)) && origin?.projectId === project.id) {
-      options.onOriginDetached(origin.nodeId)
     }
   }
 
@@ -194,7 +159,18 @@ export function useProjectTreeActions(options: ProjectTreeActionsOptions) {
     event.preventDefault()
     event.stopPropagation()
     options.selectNodeFromContextMenu(node)
-    contextNodeId.value = node.id
+    contextTarget.value = { kind: 'node', nodeId: node.id }
+    nodeMenuTarget.value = [event.clientX, event.clientY]
+    nodeMenuOpen.value = true
+  }
+
+  /** ツリーの空欄を現在プロジェクトのルートとして操作メニューを開く。 */
+  function openRootMenu(event: MouseEvent): void {
+    event.preventDefault()
+    event.stopPropagation()
+    if (options.snapshot.value.activeProjectId === null) return
+    options.clearNodeSelection()
+    contextTarget.value = { kind: 'root' }
     nodeMenuTarget.value = [event.clientX, event.clientY]
     nodeMenuOpen.value = true
   }
@@ -261,23 +237,29 @@ export function useProjectTreeActions(options: ProjectTreeActionsOptions) {
   }
 
   return {
+    contextTarget,
     contextNode,
     nodeMenuOpen,
     nodeMenuTarget,
-    projectMenuOpen,
     dialogOpen,
     dialogTitle,
     dialogValue,
     openNameDialog,
     saveNameDialog,
-    changeProject,
-    requestProjectCreate,
-    requestProjectRename,
-    requestProjectDelete,
+    activeProject: projectActions.activeProject,
+    projectDialogOpen: projectActions.projectDialogOpen,
+    projectDialogTitle: projectActions.projectDialogTitle,
+    projectDialogValue: projectActions.projectDialogValue,
+    saveProjectDialog: projectActions.saveProjectDialog,
+    requestProjectCreate: projectActions.requestProjectCreate,
+    requestProjectRename: projectActions.requestProjectRename,
+    requestProjectDelete: projectActions.requestProjectDelete,
+    changeProject: projectActions.changeProject,
     registerFile,
     registerDroppedFiles,
     requestFolderCreate,
     openNodeMenu,
+    openRootMenu,
     openTreeFile,
     applyOpenResult,
     requestNodeRemove,

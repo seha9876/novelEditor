@@ -1,7 +1,6 @@
 
 <script setup lang="ts">
 import { ref, toRefs } from 'vue'
-import ToolbarTypographyNumber from './ToolbarTypographyNumber.vue'
 import type { AppCommand, CommandId } from './appCommands'
 import type { EditorSettings } from './editorSettings'
 import type { ToolbarItem } from './appPreferenceSchema'
@@ -9,7 +8,6 @@ import type { ToolbarItem } from './appPreferenceSchema'
 const props = defineProps<{
   toolbarItems: ToolbarItem[]
   editorSettings: EditorSettings
-  toolbarFontItems: { title: string; value: string }[]
   appCommands: Record<CommandId, AppCommand>
   isCommandDisabled: (commandId: CommandId) => boolean
   isCommandChecked: (commandId: CommandId) => boolean
@@ -18,14 +16,12 @@ const props = defineProps<{
 const emit = defineEmits<{
   command: [commandId: CommandId]
   'toolbar-context-menu': []
-  'update-font-family': [value: unknown]
-  'update-typography-number': [field: 'fontSize' | 'lineHeight', value: number]
   'adjust-font-size': [direction: -1 | 1]
+  'adjust-line-height': [direction: -1 | 1]
 }>()
 const {
   toolbarItems,
   editorSettings,
-  toolbarFontItems,
   appCommands,
   isCommandDisabled,
   isCommandChecked,
@@ -53,31 +49,7 @@ function openToolbarContextMenu(event: MouseEvent): void {
     <div class="toolbar-scroll">
       <template v-for="item in toolbarItems" :key="item.type === 'command' ? item.commandId : item.id">
         <VDivider v-if="item.type === 'separator'" class="toolbar-divider" vertical inset />
-        <VSelect
-          v-else-if="item.commandId === 'toolbar.typography.fontFamily'"
-          class="toolbar-typography-font"
-          :model-value="editorSettings.fontFamily"
-          :items="toolbarFontItems"
-          item-title="title"
-          item-value="value"
-          label="書体"
-          density="compact"
-          variant="outlined"
-          hide-details
-          :disabled="isCommandDisabled(item.commandId)"
-          aria-label="本文の書体"
-          @update:model-value="emit('update-font-family', $event)"
-        />
-        <ToolbarTypographyNumber
-          v-else-if="item.commandId === 'toolbar.typography.fontSize'"
-          :model-value="editorSettings.fontSize"
-          field="fontSize"
-          label="サイズ"
-          suffix="px"
-          :disabled="isCommandDisabled(item.commandId)"
-          @update:model-value="emit('update-typography-number', 'fontSize', $event)"
-        />
-        <div v-else-if="item.commandId === 'toolbar.typography.fontSizeAdjust'" class="toolbar-font-size-adjust" role="group" aria-label="文字サイズを1pxずつ変更">
+        <div v-else-if="item.commandId === 'toolbar.typography.fontSizeAdjust'" class="toolbar-step-adjust" role="group" aria-label="文字サイズを1pxずつ変更">
           <VBtn
             icon="mdi-format-font-size-decrease"
             size="small"
@@ -97,15 +69,38 @@ function openToolbarContextMenu(event: MouseEvent): void {
             @click="emit('adjust-font-size', 1)"
           />
         </div>
-        <ToolbarTypographyNumber
-          v-else-if="item.commandId === 'toolbar.typography.lineHeight'"
-          :model-value="editorSettings.lineHeight"
-          field="lineHeight"
-          label="行間"
-          suffix="倍"
-          :disabled="isCommandDisabled(item.commandId)"
-          @update:model-value="emit('update-typography-number', 'lineHeight', $event)"
-        />
+        <div v-else-if="item.commandId === 'toolbar.typography.lineHeight'" class="toolbar-step-adjust" role="group" aria-label="行間を0.1ずつ変更">
+          <VBtn
+            icon
+            class="toolbar-line-height-button"
+            size="small"
+            variant="text"
+            :disabled="isCommandDisabled(item.commandId) || editorSettings.lineHeight <= 1"
+            aria-label="行間を0.1狭くする"
+            title="行間を0.1狭くする"
+            @click="emit('adjust-line-height', -1)"
+          >
+            <span class="toolbar-composite-icon" aria-hidden="true">
+              <VIcon class="toolbar-step-primary-icon" icon="mdi-format-line-spacing" aria-hidden="true" />
+              <VIcon class="toolbar-step-badge" icon="mdi-minus" aria-hidden="true" />
+            </span>
+          </VBtn>
+          <VBtn
+            icon
+            class="toolbar-line-height-button"
+            size="small"
+            variant="text"
+            :disabled="isCommandDisabled(item.commandId) || editorSettings.lineHeight >= 3"
+            aria-label="行間を0.1広くする"
+            title="行間を0.1広くする"
+            @click="emit('adjust-line-height', 1)"
+          >
+            <span class="toolbar-composite-icon" aria-hidden="true">
+              <VIcon class="toolbar-step-primary-icon" icon="mdi-format-line-spacing" aria-hidden="true" />
+              <VIcon class="toolbar-step-badge" icon="mdi-plus" aria-hidden="true" />
+            </span>
+          </VBtn>
+        </div>
         <VTooltip v-else :text="getCommandLabel(item.commandId)" location="bottom">
           <template #activator="{ props: tooltipProps }">
             <VBtn

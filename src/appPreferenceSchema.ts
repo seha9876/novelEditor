@@ -79,6 +79,12 @@ const defaultStatusBarItems: StatusBarItemId[] = [
   'statistics',
 ]
 
+/** 旧設定から取り除く、入力欄形式だったツールバー項目を識別する。 */
+const removedToolbarCommandIds = new Set([
+  'toolbar.typography.fontFamily',
+  'toolbar.typography.fontSize',
+])
+
 export type ProjectTreePreferences = {
   width: number
   detached: boolean
@@ -203,6 +209,12 @@ export function normalizeToolbarItems(value: unknown): ToolbarItem[] {
     }
   }
 
+  const containsOnlyRemovedCommands = value.every((candidate) => {
+    if (!candidate || typeof candidate !== 'object') return false
+    const item = candidate as Record<string, unknown>
+    return item.type === 'command' && typeof item.commandId === 'string' && removedToolbarCommandIds.has(item.commandId)
+  })
+  if (containsOnlyRemovedCommands) return []
   return normalized.length > 0 ? normalized : createDefaultToolbarItems()
 }
 

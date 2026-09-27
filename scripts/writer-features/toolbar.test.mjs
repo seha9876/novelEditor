@@ -20,12 +20,14 @@ test('ショートカットはShiftとIME入力を正確に区別する', () => 
   assert.equal(findShortcutCommand({ ...base, isComposing: true }), undefined)
 })
 
-test('ツールバー数値入力はIME変換中のEnterを確定キーと誤認しない', () => {
-  const { shouldCommitTypographyInput } = loadSourceModule('src/editorSettings.ts')
-  assert.equal(shouldCommitTypographyInput({ key: 'Enter', isComposing: false, keyCode: 13 }), true)
-  assert.equal(shouldCommitTypographyInput({ key: 'Enter', isComposing: true, keyCode: 13 }), false)
-  assert.equal(shouldCommitTypographyInput({ key: 'Enter', isComposing: false, keyCode: 229 }), false)
-  assert.equal(shouldCommitTypographyInput({ key: 'Escape', isComposing: false, keyCode: 27 }), false)
+test('ツールバーの本文書式操作はアイコンボタンだけで構成される', () => {
+  const toolbar = readFileSync(resolve(projectRoot, 'src/EditorToolbar.vue'), 'utf8')
+  const commands = readFileSync(resolve(projectRoot, 'src/appCommands.ts'), 'utf8')
+  assert.doesNotMatch(toolbar, /VSelect|ToolbarTypographyNumber|toolbarFontItems|update-typography-number/)
+  assert.doesNotMatch(commands, /toolbar\.typography\.fontFamily|toolbar\.typography\.fontSize'/)
+  assert.match(toolbar, /class="toolbar-step-adjust" role="group" aria-label="行間を0\.1ずつ変更"/)
+  assert.match(toolbar, /@click="emit\('adjust-line-height', -1\)"/)
+  assert.match(toolbar, /@click="emit\('adjust-line-height', 1\)"/)
 })
 
 test('バーサイズ設定は設定画面・状態通信・メインレイアウトへ接続される', () => {
@@ -49,9 +51,8 @@ test('バーサイズ設定は設定画面・状態通信・メインレイア�
   assert.match(session, /barSizes\?: Partial<InterfaceBarSizes>/)
   assert.match(definitions, /appearance\.bars\.sizes/)
   assert.match(barPage, /mandatory/)
-  assert.match(styles, /--toolbar-control-height/)
-  assert.match(styles, /toolbar-typography-number-field\.v-input--density-compact \.v-field/)
-  assert.match(styles, /toolbar-typography-number-menu\.v-btn\.v-btn--icon/)
+  assert.match(styles, /toolbar-step-adjust \.v-btn\.v-btn--icon/)
+  assert.doesNotMatch(styles, /toolbar-(?:control-height|input-font-size|label-font-size|font-width|number-width|number-menu-width)/)
   assert.match(styles, /statistics-button\.v-btn/)
   assert.match(styles, /height: var\(--status-bar-height, 36px\)/)
 })
@@ -123,24 +124,38 @@ test('バーサイズの初期化範囲は全設定とツールバー構成で�
   assert.match(settingsController, /function cloneCurrentSettings\(\): SettingsValues/)
   assert.match(settingsController, /updateCurrentSettings\(previous\.editor, previous\.toolbar, false, false, previous\.barSizes\)/)
   assert.match(settingsController, /updateCurrentSettings\(next\.editor, next\.toolbar, false, false, next\.barSizes\)/)
-  assert.match(mediumPreset, /medium:\s*\{[\s\S]*?menu:\s*\{\s*height:\s*48,\s*controlHeight:\s*28[\s\S]*?toolbar:\s*\{\s*height:\s*60,\s*controlHeight:\s*36,\s*buttonHeight:\s*40,\s*buttonWidth:\s*40/)
+  assert.match(mediumPreset, /medium:\s*\{[\s\S]*?toolbar:\s*\{\s*height:\s*48,\s*buttonHeight:\s*40,\s*buttonWidth:\s*40,\s*iconSize:\s*20,[\s\S]*?padding:\s*4/)
 })
 
-test('ツールバーの文字サイズ調整ボタンは増減内容を示すアイコンを使う', () => {
+test('ツールバーの文字サイズと行間調整は増減アイコンを使う', () => {
   const toolbar = readFileSync(resolve(projectRoot, 'src/EditorToolbar.vue'), 'utf8')
-  const adjustment = toolbar.slice(toolbar.indexOf('toolbar-font-size-adjust'), toolbar.indexOf('toolbar.typography.lineHeight'))
+  const adjustment = toolbar.slice(toolbar.indexOf('toolbar.typography.fontSizeAdjust'), toolbar.indexOf('<VTooltip v-else'))
   assert.match(adjustment, /icon="mdi-format-font-size-decrease"/)
   assert.match(adjustment, /icon="mdi-format-font-size-increase"/)
-  assert.doesNotMatch(adjustment, /icon="mdi-minus"/)
-  assert.doesNotMatch(adjustment, /icon="mdi-plus"/)
+  const lineHeightAdjustment = toolbar.slice(toolbar.indexOf('toolbar.typography.lineHeight'), toolbar.indexOf('<VTooltip v-else'))
+  assert.match(lineHeightAdjustment, /icon="mdi-minus"/)
+  assert.match(lineHeightAdjustment, /icon="mdi-plus"/)
+  assert.equal((lineHeightAdjustment.match(/icon="mdi-format-line-spacing"/g) ?? []).length, 2)
+  assert.equal((lineHeightAdjustment.match(/class="toolbar-step-primary-icon"[^>]*icon="mdi-format-line-spacing"[^>]*aria-hidden="true"/g) ?? []).length, 2)
+  assert.match(lineHeightAdjustment, /class="toolbar-step-badge"[^>]*icon="mdi-minus"[^>]*aria-hidden="true"/)
+  assert.match(lineHeightAdjustment, /class="toolbar-step-badge"[^>]*icon="mdi-plus"[^>]*aria-hidden="true"/)
+  assert.match(lineHeightAdjustment, /lineHeight <= 1/)
+  assert.match(lineHeightAdjustment, /lineHeight >= 3/)
+  assert.match(lineHeightAdjustment, /aria-label="行間を0\.1狭くする"\s+title="行間を0\.1狭くする"/)
+  assert.match(lineHeightAdjustment, /aria-label="行間を0\.1広くする"\s+title="行間を0\.1広くする"/)
+  const styles = readFileSync(resolve(projectRoot, 'src/styles/app-bar.css'), 'utf8')
+  assert.match(styles, /toolbar-composite-icon \.toolbar-step-badge\.v-icon/)
+  assert.match(styles, /var\(--toolbar-icon-size, 20px\) \* 0\.72/)
+  assert.match(styles, /var\(--toolbar-icon-size, 20px\) \* 0\.68/)
+  const adjustStyle = styles.match(/\.toolbar-step-adjust \{[^}]+\}/)?.[0] ?? ''
+  assert.match(adjustStyle, /height: var\(--toolbar-button-height, 40px\)/)
+  assert.doesNotMatch(adjustStyle, /border(?:-radius)?\s*:/)
 })
 
 test('本文書式コントロールをツールバーへ一度ずつ登録でき、既定構成は維持する', () => {
   const commands = loadSourceModule('src/appCommands.ts')
   const preferences = loadSourceModule('src/appPreferenceSchema.ts')
   const typographyCommandIds = [
-    'toolbar.typography.fontFamily',
-    'toolbar.typography.fontSize',
     'toolbar.typography.fontSizeAdjust',
     'toolbar.typography.lineHeight',
   ]
@@ -154,8 +169,19 @@ test('本文書式コントロールをツールバーへ一度ずつ登録で�
   )
 
   const normalized = preferences.normalizeToolbarItems([
-    ...typographyCommandIds.map((commandId) => ({ type: 'command', commandId })),
+    { type: 'command', commandId: 'toolbar.typography.fontFamily' },
     { type: 'command', commandId: 'toolbar.typography.fontSize' },
+    { type: 'separator', id: 'keep-this-separator' },
+    ...typographyCommandIds.map((commandId) => ({ type: 'command', commandId })),
+    { type: 'command', commandId: 'toolbar.typography.fontSizeAdjust' },
   ])
-  assert.deepEqual(normalized.map((item) => item.commandId), typographyCommandIds)
+  assert.deepEqual(normalized, [
+    { type: 'separator', id: 'keep-this-separator' },
+    { type: 'command', commandId: 'toolbar.typography.fontSizeAdjust' },
+    { type: 'command', commandId: 'toolbar.typography.lineHeight' },
+  ])
+  assert.deepEqual(preferences.normalizeToolbarItems([
+    { type: 'command', commandId: 'toolbar.typography.fontFamily' },
+    { type: 'command', commandId: 'toolbar.typography.fontSize' },
+  ]), [])
 })

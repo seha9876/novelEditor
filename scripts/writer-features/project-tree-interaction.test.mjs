@@ -317,11 +317,13 @@ test('プロジェクトメニューはSidebarとメニューバーで共通利�
 test('プロジェクトのトップメニューは他のメニューと同じ表示属性と排他開閉を使う', () => {
   const menu = readFileSync(resolve(projectRoot, 'src/ProjectMenu.vue'), 'utf8')
   const mainMenu = readFileSync(resolve(projectRoot, 'src/MainMenuBar.vue'), 'utf8')
+  const sidebar = readFileSync(resolve(projectRoot, 'src/ProjectTreeSidebar.vue'), 'utf8')
   const projectState = readFileSync(resolve(projectRoot, 'src/useProjectMenuState.ts'), 'utf8')
   const mainState = readFileSync(resolve(projectRoot, 'src/useMainMenuState.ts'), 'utf8')
 
   assert.match(menu, /useProjectMenuState/)
   assert.match(menu, /modelValue: toRef\(props, 'modelValue'\)/)
+  assert.match(menu, /modelValue: boolean/)
   assert.match(menu, /defineExpose\(\{ closeMenus, closeSubmenu \}\)/)
   assert.match(menu, /:location="props\.mode === 'icon' \? 'bottom start' : undefined"/)
   assert.match(menu, /:transition="props\.mode === 'text' \? false : undefined"/)
@@ -330,6 +332,7 @@ test('プロジェクトのトップメニューは他のメニューと同じ�
   assert.match(mainMenu, /useMainMenuState/)
   assert.match(mainMenu, /closeSubmenu: \(\) => boolean/)
   assert.match(mainMenu, /v-model="projectMenuOpen"/)
+  assert.match(sidebar, /<ProjectMenu[\s\S]*v-model="projectMenuOpen"/)
   assert.match(mainState, /function runProjectAction\(action: \(\) => void\)/)
   assert.match(mainMenu, /@create="runProjectAction\(/)
   assert.match(mainMenu, /@select="runProjectAction\(/)
@@ -345,29 +348,32 @@ test('プロジェクトメニューとメニューバーの開閉状態を実�
   const projectStateModule = loadSourceModule('src/useProjectMenuState.ts')
   const mainStateModule = loadSourceModule('src/useMainMenuState.ts')
 
-  const uncontrolled = projectStateModule.useProjectMenuState()
-  uncontrolled.menuOpen.value = true
-  uncontrolled.switchMenuOpen.value = true
-  assert.equal(uncontrolled.menuOpen.value, true)
-  assert.equal(uncontrolled.closeSubmenu(), true)
-  assert.equal(uncontrolled.switchMenuOpen.value, false)
-  assert.equal(uncontrolled.closeSubmenu(), false)
-
   const controlledValue = ref(false)
+  const updates = []
   const controlled = projectStateModule.useProjectMenuState({
     modelValue: controlledValue,
-    onUpdateModelValue: (value) => { controlledValue.value = value },
+    onUpdateModelValue: (value) => {
+      updates.push(value)
+      controlledValue.value = value
+    },
   })
+  assert.equal(controlled.menuOpen.value, false)
   controlled.menuOpen.value = true
+  assert.deepEqual(updates, [true])
   assert.equal(controlledValue.value, true)
   assert.equal(controlled.menuOpen.value, true)
   await nextTick()
   controlled.switchMenuOpen.value = true
-  controlledValue.value = false
+  controlled.menuOpen.value = false
+  assert.deepEqual(updates, [true, false])
   await nextTick()
   assert.equal(controlled.switchMenuOpen.value, false)
 
-  const project = projectStateModule.useProjectMenuState()
+  const projectValue = ref(false)
+  const project = projectStateModule.useProjectMenuState({
+    modelValue: projectValue,
+    onUpdateModelValue: (value) => { projectValue.value = value },
+  })
   const main = mainStateModule.useMainMenuState({
     closeProjectSubmenu: project.closeSubmenu,
     closeProjectMenus: project.closeMenus,

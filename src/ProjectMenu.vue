@@ -9,7 +9,7 @@ const props = withDefaults(defineProps<{
   activeProjectId: number | null
   disabled?: boolean
   mode?: 'icon' | 'text'
-  modelValue?: boolean
+  modelValue: boolean
 }>(), {
   disabled: false,
   mode: 'icon',

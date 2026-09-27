@@ -39,6 +39,7 @@ const emit = defineEmits<{
 }>()
 
 const pendingOpenRequest = ref<ProjectTreeOpenRequest | null>(null)
+const projectMenuOpen = ref(false)
 type SelectionController = ReturnType<typeof useProjectTreeSelection>
 type ActionsController = ReturnType<typeof useProjectTreeActions>
 let selectionController: SelectionController | null = null
@@ -246,6 +247,7 @@ watch(() => props.openResult, (result) => { void applyOpenResult(result) })
           </template>
         </VTooltip>
         <ProjectMenu
+          v-model="projectMenuOpen"
           :projects="snapshot.projects"
           :active-project-id="snapshot.activeProjectId"
           :disabled="isBusy"

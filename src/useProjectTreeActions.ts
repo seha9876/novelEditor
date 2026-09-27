@@ -1,5 +1,5 @@
 /** プロジェクトツリーの名前入力、DB操作、ファイル開閉結果を表示構成から分離する。 */
-import { computed, ref, type Ref } from 'vue'
+import { computed, ref, watch, type Ref } from 'vue'
 import { ask, message } from '@tauri-apps/plugin-dialog'
 import { chooseTextFile, fileName } from './textFile'
 import type { ProjectTreeOpenRequest, ProjectTreeOpenResult } from './projectTreeWindow'
@@ -16,6 +16,7 @@ import { useProjectTreeProjectActions } from './useProjectTreeProjectActions'
 
 type ProjectTreeDialogMode = 'folder-create' | 'folder-rename'
 type ProjectTreeDocumentOrigin = { nodeId: number; projectId: number }
+type ProjectTreeContextTarget = { kind: 'root' } | { kind: 'node'; nodeId: number }
 
 type RunMutation = (action: () => Promise<void>, options?: { setErrorOnFailure?: boolean }) => Promise<boolean>
 
@@ -40,10 +41,19 @@ type ProjectTreeActionsOptions = {
 
 /** ツリー操作に必要なダイアログ・保留要求・DB更新を所有する。 */
 export function useProjectTreeActions(options: ProjectTreeActionsOptions) {
-  const contextNodeId = ref<number | null>(null)
-  const contextNode = computed(() => options.snapshot.value.nodes.find((node) => node.id === contextNodeId.value) ?? null)
+  const contextTarget = ref<ProjectTreeContextTarget>({ kind: 'root' })
+  const contextNode = computed(() => {
+    const target = contextTarget.value
+    return target.kind === 'node'
+      ? options.snapshot.value.nodes.find((node) => node.id === target.nodeId) ?? null
+      : null
+  })
   const nodeMenuOpen = ref(false)
   const nodeMenuTarget = ref<[number, number]>([0, 0])
+  /** アクティブプロジェクト切替時に古い対象の操作メニューを閉じる。 */
+  watch(() => options.snapshot.value.activeProjectId, () => {
+    nodeMenuOpen.value = false
+  })
   const dialogOpen = ref(false)
   const dialogMode = ref<ProjectTreeDialogMode>('folder-create')
   const dialogTitle = ref('')
@@ -149,7 +159,18 @@ export function useProjectTreeActions(options: ProjectTreeActionsOptions) {
     event.preventDefault()
     event.stopPropagation()
     options.selectNodeFromContextMenu(node)
-    contextNodeId.value = node.id
+    contextTarget.value = { kind: 'node', nodeId: node.id }
+    nodeMenuTarget.value = [event.clientX, event.clientY]
+    nodeMenuOpen.value = true
+  }
+
+  /** ツリーの空欄を現在プロジェクトのルートとして操作メニューを開く。 */
+  function openRootMenu(event: MouseEvent): void {
+    event.preventDefault()
+    event.stopPropagation()
+    if (options.snapshot.value.activeProjectId === null) return
+    options.clearNodeSelection()
+    contextTarget.value = { kind: 'root' }
     nodeMenuTarget.value = [event.clientX, event.clientY]
     nodeMenuOpen.value = true
   }
@@ -216,6 +237,7 @@ export function useProjectTreeActions(options: ProjectTreeActionsOptions) {
   }
 
   return {
+    contextTarget,
     contextNode,
     nodeMenuOpen,
     nodeMenuTarget,
@@ -237,6 +259,7 @@ export function useProjectTreeActions(options: ProjectTreeActionsOptions) {
     registerDroppedFiles,
     requestFolderCreate,
     openNodeMenu,
+    openRootMenu,
     openTreeFile,
     applyOpenResult,
     requestNodeRemove,

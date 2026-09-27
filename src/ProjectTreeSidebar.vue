@@ -138,6 +138,7 @@ const {
 } = selection
 const {
   contextNode,
+  contextTarget,
   nodeMenuOpen,
   nodeMenuTarget,
   dialogOpen,
@@ -157,6 +158,7 @@ const {
   requestFolderCreate,
   openNameDialog,
   openNodeMenu,
+  openRootMenu: openRootMenuAction,
   openTreeFile,
   applyOpenResult,
   requestRelink,
@@ -199,6 +201,13 @@ function activateNodeFromClick(event: MouseEvent, node: ProjectTreeNode): void {
   }
   if (selectNodeFromClick(event, node)) return
   void activateNode(node)
+}
+
+/** 行以外のツリー空欄を現在プロジェクトのルートとして右クリックする。 */
+function openRootMenu(event: MouseEvent): void {
+  const target = event.target instanceof Element ? event.target : null
+  if (target?.closest('.project-tree-row')) return
+  openRootMenuAction(event)
 }
 
 /** 別プロジェクト由来の文書を開いている場合、そのプロジェクトを表示する。 */
@@ -289,6 +298,7 @@ watch(() => props.openResult, (result) => { void applyOpenResult(result) })
       tabindex="0"
       @keydown="handleTreeKeydown"
       @click="handleTreeBackgroundClick"
+      @contextmenu="openRootMenu"
     >
       <div v-if="snapshot.activeProjectId === null" class="project-tree-empty">プロジェクトを選択してください。</div>
       <template v-else>
@@ -368,6 +378,10 @@ watch(() => props.openResult, (result) => { void applyOpenResult(result) })
           <VDivider class="my-1" />
           <VListItem role="menuitem" title="登録を解除" prepend-icon="mdi-delete-outline" @click="requestNodeRemove" />
         </template>
+      </VList>
+      <VList v-else-if="contextTarget.kind === 'root'" density="compact" min-width="220" role="menu" aria-label="ルート操作">
+        <VListItem role="menuitem" title="フォルダを追加" prepend-icon="mdi-folder-plus-outline" @click="requestFolderCreate()" />
+        <VListItem role="menuitem" title="TXTを登録" prepend-icon="mdi-file-plus-outline" @click="registerFile()" />
       </VList>
     </VMenu>
 

@@ -208,6 +208,93 @@ test('ツリーActionsの開く結果は既存の参照切れ状態を保った�
   assert.deepEqual(applied, ['request-1', 'request-2'])
 })
 
+test('ツリー空欄の右クリックは選択を解除し、ルートへ追加するメニューを開く', async () => {
+  const { nextTick, ref } = require('vue')
+  const folderCalls = []
+  const fileCalls = []
+  const actionsModule = loadSourceModule('src/useProjectTreeActions.ts', {
+    '@tauri-apps/plugin-dialog': {
+      ask: async () => false,
+      message: async () => {},
+    },
+    './textFile': {
+      chooseTextFile: async () => 'C:\\drafts\\root.txt',
+      fileName: (path) => path.split('\\').at(-1),
+    },
+    './projectTreeClient': {
+      createProjectFolder: async (...args) => { folderCalls.push(args) },
+      registerProjectFile: async (...args) => { fileCalls.push(args) },
+      registerDroppedProjectFiles: async () => ({ registeredCount: 0, failures: [] }),
+      relinkProjectFile: async () => {},
+      removeProjectNodes: async () => {},
+      renameProjectFolder: async () => {},
+    },
+  })
+  const snapshot = ref({
+    projects: [{ id: 1, name: '主作品' }, { id: 2, name: '別作品' }],
+    nodes: [],
+    activeProjectId: 1,
+  })
+  let clearSelectionCount = 0
+  const actions = actionsModule.useProjectTreeActions({
+    snapshot,
+    pendingOpenRequest: ref(null),
+    documentOrigin: () => null,
+    selectedNodes: () => [],
+    unavailableNodeIds: () => [],
+    isBusy: () => false,
+    runMutation: async (action) => { await action(); return true },
+    showTreeError: async () => {},
+    setUnavailableNodeIds: () => {},
+    clearNodeSelection: () => { clearSelectionCount += 1 },
+    selectNodeFromContextMenu: () => {},
+    expandFolderPath: () => {},
+    containsNode: () => false,
+    onOpenFile: () => {},
+    onOpenResultApplied: () => {},
+    onOriginDetached: () => {},
+  })
+  const event = {
+    clientX: 120,
+    clientY: 240,
+    preventDefaultCalled: false,
+    stopPropagationCalled: false,
+    preventDefault() { this.preventDefaultCalled = true },
+    stopPropagation() { this.stopPropagationCalled = true },
+  }
+
+  actions.openRootMenu(event)
+  assert.deepEqual(actions.contextTarget.value, { kind: 'root' })
+  assert.equal(actions.contextNode.value, null)
+  assert.equal(actions.nodeMenuOpen.value, true)
+  assert.deepEqual(actions.nodeMenuTarget.value, [120, 240])
+  assert.equal(clearSelectionCount, 1)
+  assert.equal(event.preventDefaultCalled, true)
+  assert.equal(event.stopPropagationCalled, true)
+
+  actions.requestFolderCreate()
+  actions.dialogValue.value = 'ルートフォルダ'
+  await actions.saveNameDialog()
+  assert.deepEqual(folderCalls, [[1, null, 'ルートフォルダ']])
+
+  actions.openRootMenu(event)
+  await actions.registerFile()
+  assert.deepEqual(fileCalls, [[1, null, 'C:\\drafts\\root.txt']])
+
+  snapshot.value = { ...snapshot.value, activeProjectId: null }
+  await nextTick()
+  assert.equal(actions.nodeMenuOpen.value, false)
+
+  snapshot.value = { ...snapshot.value, activeProjectId: 1 }
+  await nextTick()
+  actions.openRootMenu(event)
+  assert.equal(actions.nodeMenuOpen.value, true)
+  snapshot.value = { ...snapshot.value, activeProjectId: 2 }
+  await nextTick()
+  assert.equal(actions.nodeMenuOpen.value, false)
+  assert.equal(clearSelectionCount, 3)
+})
+
 test('ツリー幅Layoutはドラッグ結果を実際の保存処理へ渡す', async () => {
   const { ref } = require('vue')
   const previousWindow = globalThis.window
@@ -283,6 +370,18 @@ test('ツリーの複数選択メニューは一括解除だけを表示し、�
   assert.doesNotMatch(multiMenu, /VDivider|title="登録を解除"/)
   assert.match(singleMenu, /VDivider[\s\S]*title="登録を解除"/)
   assert.match(selection, /const displayedSelection = validSelection\.filter\(\(id\) => visibleIds\.has\(id\)\)/)
+})
+
+test('ツリー空欄はルートメニューへ接続し、行メニューとは分離されている', () => {
+  const sidebar = readFileSync(resolve(projectRoot, 'src/ProjectTreeSidebar.vue'), 'utf8')
+  const actions = readFileSync(resolve(projectRoot, 'src/useProjectTreeActions.ts'), 'utf8')
+  assert.match(sidebar, /@contextmenu="openRootMenu"/)
+  assert.match(sidebar, /<VList v-else-if="contextTarget\.kind === 'root'"/)
+  assert.match(sidebar, /title="フォルダを追加"[\s\S]*?title="TXTを登録"/)
+  assert.match(actions, /type ProjectTreeContextTarget = \{ kind: 'root' \} \| \{ kind: 'node'; nodeId: number \}/)
+  assert.match(actions, /function openRootMenu\(event: MouseEvent\)/)
+  assert.match(actions, /options\.clearNodeSelection\(\)/)
+  assert.match(actions, /contextTarget\.value = \{ kind: 'node', nodeId: node\.id \}/)
 })
 
 test('ツリーヘッダーは幅を消費する選択欄を持たず、追加操作をアイコンと説明へ集約する', () => {

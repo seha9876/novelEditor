@@ -86,11 +86,12 @@ test('設定channelはrevision順の状態だけを保持し、購読を破棄�
   const { useSettingsWindowChannel } = loadSourceModule('src/useSettingsWindowChannel.ts', mocks)
   const channel = useSettingsWindowChannel()
   await channel.setup()
-  handlers[0]({ payload: { revision: 2, editor: {}, toolbar: {}, barSizes: {}, page: 'editor.wrapping', history: { canUndo: false, canRedo: false } } })
+  const appearance = loadSourceModule('src/appearance.ts').createDefaultAppearance()
+  handlers[0]({ payload: { revision: 2, appearance, appearanceEpoch: 0, editor: {}, toolbar: {}, barSizes: {}, page: 'editor.wrapping', history: { canUndo: false, canRedo: false } } })
   handlers[0]({ payload: { revision: 1, editor: { stale: true }, toolbar: {}, barSizes: {}, page: 'editor.typography', history: { canUndo: true, canRedo: false } } })
   assert.equal(channel.snapshot.value.revision, 2)
   channel.dispose()
-  assert.deepEqual(unlistenCounts, [1, 1])
+  assert.deepEqual(unlistenCounts, [1, 1, 1, 1, 1])
 })
 
 test('設定channelは途中の購読失敗を解除し、再試行で両方の購読を回復する', async () => {
@@ -110,7 +111,7 @@ test('設定channelは途中の購読失敗を解除し、再試行で両方の�
   await assert.rejects(channel.setup(), /エラー購読失敗/)
   assert.equal(activeSubscriptions.size, 0)
   await channel.setup()
-  assert.equal(activeSubscriptions.size, 2)
+  assert.equal(activeSubscriptions.size, 5)
   channel.dispose()
   assert.equal(activeSubscriptions.size, 0)
 })

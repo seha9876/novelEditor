@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 設定ページを切り替えながら編集し、変更を共通経路へ反映して自動保存する。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { getCurrentWindow, type CloseRequestedEvent } from '@tauri-apps/api/window'
 import OutlineSettingsPage from './OutlineSettingsPage.vue'
 import { createDefaultOutline } from './outline'
 import ToolbarSettingsPage from './ToolbarSettingsPage.vue'
@@ -49,6 +50,22 @@ const settingsChannel = useSettingsWindowChannel({
   onSnapshot: (nextSnapshot) => receiveChannelSnapshot(nextSnapshot),
 })
 const { snapshot, errorMessage, sendCommand } = settingsChannel
+let removeCloseListener: (() => void) | undefined
+let closing = false, allowClose = false
+
+/** 設定窓を閉じる前に保留入力のメイン側反映を確認し、確認できない場合は窓を残す。 */
+async function onCloseRequested(event: CloseRequestedEvent): Promise<void> {
+  if (allowClose) return
+  event.preventDefault()
+  if (closing) return
+  closing = true
+  try { await settingsChannel.flush(); allowClose = true; await getCurrentWindow().close() }
+  catch (error) { allowClose = false; errorMessage.value = String(error) }
+  finally { closing = false }
+}
+
+/** ピッカー確定時に最終色を送り、通信失敗を画面内へ表示する。 */
+function flushColors(): void { void settingsChannel.flushColors().catch(error => { errorMessage.value = String(error) }) }
 const activeView = ref<SettingsViewId>('editor.wrapping')
 const openedGroups = ref(['editor', 'appearance', 'application'])
 const openedSectionIds = ref<SettingsSectionId[]>([...allSettingsSectionIds])
@@ -283,12 +300,14 @@ function onKeydown(event: KeyboardEvent): void {
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
   await settingsChannel.setup()
+  removeCloseListener = await getCurrentWindow().onCloseRequested(onCloseRequested)
   await sendCommand({ type: 'ready' })
 })
 
 // 設定ウィンドウを破棄する際に状態イベントの購読を解除する。
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  removeCloseListener?.()
   settingsChannel.dispose()
 })
 </script>
@@ -405,9 +424,9 @@ onBeforeUnmount(() => {
           <OutlineSettingsPage v-else-if="page.id === 'editor.outline'" :preferences="snapshot.outline" @change="sendCommand({ type: 'change', outline: $event })" />
           <AppearanceSettingsPage
             v-else-if="page.id === 'appearance.colors'"
-            :appearance="snapshot.appearance" :file-busy="snapshot.appearanceFileBusy"
+            :appearance="snapshot.appearance" :epoch="snapshot.appearanceEpoch" :file-busy="snapshot.appearanceFileBusy"
             :heading-level="activeView === 'all' ? 4 : 2" :sections="page.sections" :expanded-section-ids="openedSectionIds"
-            @command="sendCommand" @toggle-section="toggleSection"
+            @command="sendCommand" @flush-colors="flushColors" @toggle-section="toggleSection"
           />
           <ToolbarSettingsPage
             v-else-if="page.id === 'appearance.toolbar'"

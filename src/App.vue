@@ -159,6 +159,7 @@ const settingsController = useSettingsController({
   showPersistenceNotice,
   showError,
   onAppearanceChanged: appearanceHost.update,
+  onAppearanceFlush: appearanceHost.flush,
 })
 const searchController = useSearchController({
   editor,

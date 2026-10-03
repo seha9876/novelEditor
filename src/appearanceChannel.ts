@@ -1,6 +1,7 @@
 /** 配色だけを全ウィンドウへ配信する。保存の責務はメイン窓に残す。 */
 import { emit, emitTo, listen } from '@tauri-apps/api/event'
-import type { Palette } from './appearance'
+import { colorKeys, type Palette } from './appearance'
+import { createFrameTask } from './frameTask'
 
 export const APPEARANCE_STATE_EVENT = 'editor-appearance-state'
 export const APPEARANCE_REQUEST_EVENT = 'editor-appearance-request'
@@ -13,21 +14,32 @@ export function createAppearanceHost(initial: Palette, apply: (colors: Palette) 
   let disposed = false
   let unlisten: (() => void) | undefined
   let setupPromise: Promise<void> | undefined
+  let publishing: Promise<void> | null = null
+  let publishAgain = false
+  const frame = createFrameTask(() => { apply(colors); void publish() })
   apply(colors)
 
   /** 閉じかけの子窓などへの通知失敗を永続化の失敗として扱わない。 */
   async function publish(): Promise<void> {
     if (disposed) return
-    try { await emit(APPEARANCE_STATE_EVENT, { colors: { ...colors }, revision }) } catch { /* 次の状態要求で再送する。 */ }
+    if (publishing) { publishAgain = true; return publishing }
+    const run = (async () => {
+      do {
+        publishAgain = false
+        try { await emit(APPEARANCE_STATE_EVENT, { colors: { ...colors }, revision }) } catch { /* 次の状態要求で再送する。 */ }
+      } while (publishAgain && !disposed)
+    })()
+    publishing = run
+    try { await run } finally { if (publishing === run) publishing = null }
   }
 
-  /** 色を即時適用してから、更新順を付けて各窓へ送る。 */
+  /** 現在値は即時更新し、表示と通知はフレーム単位で最新値へまとめる。 */
   function update(next: Palette): void {
     if (disposed) return
+    if (colorKeys.every(key => next[key] === colors[key])) return
     colors = { ...next }
     revision += 1
-    apply(colors)
-    void publish()
+    frame.schedule()
   }
 
   /** 起動要求の購読を重複させず開始し、破棄と競合した購読も解除する。 */
@@ -44,9 +56,12 @@ export function createAppearanceHost(initial: Palette, apply: (colors: Palette) 
   /** アプリ終了時に新しい配信と状態要求を止める。 */
   function dispose(): void {
     disposed = true
+    frame.dispose()
     unlisten?.()
   }
-  return { update, setup, dispose }
+  /** 確定・終了時には保留中の最終色と通知を完了する。 */
+  async function flush(): Promise<void> { frame.flush(); if (publishing) await publishing }
+  return { update, setup, flush, dispose }
 }
 
 /** 子窓は購読後に現在値を要求し、古い通知や破棄後の通知を適用しない。 */
@@ -55,6 +70,8 @@ export function createAppearanceClient(apply: (colors: Palette) => void) {
   let disposed = false
   let unlisten: (() => void) | undefined
   let setupPromise: Promise<void> | undefined
+  let latest: Palette | null = null
+  const frame = createFrameTask(() => { if (latest) { apply(latest); latest = null } })
 
   /** 受信開始と初期値要求を順に実行する。途中失敗時は次回の開始を許可する。 */
   async function setup(): Promise<void> {
@@ -64,7 +81,8 @@ export function createAppearanceClient(apply: (colors: Palette) => void) {
       const remove = await listen<AppearanceSnapshot>(APPEARANCE_STATE_EVENT, ({ payload }) => {
         if (disposed || payload.revision <= revision) return
         revision = payload.revision
-        apply(payload.colors)
+        latest = payload.colors
+        frame.schedule()
       })
       if (disposed) { remove(); return }
       unlisten = remove
@@ -85,7 +103,10 @@ export function createAppearanceClient(apply: (colors: Palette) => void) {
   /** 子窓終了時に購読を解除する。 */
   function dispose(): void {
     disposed = true
+    frame.dispose()
     clearListener()
   }
-  return { setup, dispose }
+  /** 確認要求直後など、テストや確定処理では保留表示を直ちに適用する。 */
+  function flush(): void { frame.flush() }
+  return { setup, flush, dispose }
 }

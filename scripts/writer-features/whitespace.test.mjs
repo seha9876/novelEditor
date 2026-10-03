@@ -91,7 +91,10 @@ test('空白表示は設定窓との同期、保存後の再読込、Undo/Redo�
       async saveSettingsPreferences(editor) { saved.push({ ...editor }) },
     },
     '@tauri-apps/api/event': {
-      async emitTo(_label, _event, payload) { snapshots.push(payload) },
+      async emitTo(_label, event, payload) {
+        if (event === 'editor-settings-flush-inputs') commandHandler({ payload: { type: 'inputs-flushed', requestId: payload.requestId } })
+        else if (event === 'editor-settings-state') snapshots.push(payload)
+      },
       async listen(_event, handler) { commandHandler = handler; return () => {} },
     },
     '@tauri-apps/api/webviewWindow': {

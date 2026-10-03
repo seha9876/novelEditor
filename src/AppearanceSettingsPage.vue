@@ -8,6 +8,7 @@ import type { SettingsSectionDefinition, SettingsSectionId } from './settingsDef
 
 const props = defineProps<{
   appearance: AppearancePreferences
+  epoch: number
   fileBusy: boolean
   headingLevel: number
   sections: readonly SettingsSectionDefinition[]
@@ -16,6 +17,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   command: [command: SettingsCommand]
   toggleSection: [sectionId: SettingsSectionId, expanded: boolean]
+  flushColors: []
 }>()
 const presets = computed(() => [...builtInPresets, ...props.appearance.presets])
 const baseline = computed(() => findColorPreset(props.appearance) ?? builtInPresets[0])
@@ -102,7 +104,7 @@ function confirmDelete(): void {
       <VExpansionPanels multiple variant="accordion">
         <VExpansionPanel v-for="group in colorGroups" :key="group.label" :title="group.label">
           <VExpansionPanelText>
-            <ColorSettingInput v-for="key in group.keys" :key="key" :color-key="key" :label="colorDefinitions[key][1]" :value="appearance.colors[key]" :baseline="baseline.colors[key]" @change="changeColor" />
+            <ColorSettingInput v-for="key in group.keys" :key="key" :color-key="key" :label="colorDefinitions[key][1]" :value="appearance.colors[key]" :baseline="baseline.colors[key]" :epoch="epoch" @change="changeColor" @finish="emit('flushColors')" />
           </VExpansionPanelText>
         </VExpansionPanel>
       </VExpansionPanels>

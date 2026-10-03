@@ -1,7 +1,7 @@
 import { cloneOutline, normalizeOutline, type OutlinePreferences } from './outline'
 /** 設定値の適用と表示メトリクスをまとめ、保存・履歴・設定子窓へ橋渡しする。 */
 import { computed, ref } from 'vue'
-import { applyAppearanceAction, cloneAppearance, createDefaultAppearance, findColorPreset, type AppearancePreferences, type Palette } from './appearance'
+import { applyAppearanceAction, cloneAppearance, colorDefinitions, isHexColor, createDefaultAppearance, findColorPreset, type AppearancePreferences, type Palette } from './appearance'
 import { readColorPreset, writeColorPreset } from './appearanceFile'
 import {
   isValidTypographyNumber,
@@ -40,6 +40,7 @@ export type SettingsControllerOptions = {
   showPersistenceNotice: SaveErrorNotifier
   showError: OperationErrorNotifier
   onAppearanceChanged?: (colors: Palette) => void
+  onAppearanceFlush?: () => Promise<void>
 }
 
 /** 設定値を正規化し、設定ウィンドウと永続Storeの間を接続する。 */
@@ -48,6 +49,9 @@ export function useSettingsController(options: SettingsControllerOptions) {
   const appearance = ref(cloneAppearance(options.initialPreferences.ui.appearance))
   let appearanceFileBusy = false
   let colorInteractionId: string | undefined
+  let appearanceEpoch = 0
+  let colorOnly = false
+  let lastColorState: Parameters<ReturnType<typeof useSettingsWindowBridge>['publishColorState']>[0] | null = null
   const editorSettings = ref<EditorSettings>({ ...options.initialPreferences.editor })
   const toolbarPreferences = ref<ToolbarPreferences>({
     visible: options.initialPreferences.ui.toolbar.visible,
@@ -96,6 +100,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
       outline: cloneOutline(outline.value),
       appearance: cloneAppearance(appearance.value),
       appearanceFileBusy,
+      appearanceEpoch,
       editor: { ...editorSettings.value },
       toolbar: cloneToolbarPreferences(toolbarPreferences.value),
       statusBar: cloneStatusBarPreferences(statusBarPreferences.value),
@@ -118,11 +123,40 @@ export function useSettingsController(options: SettingsControllerOptions) {
 
   /** 設定子窓が存在するときだけ状態を配信する。 */
   function publishSettingsState(): Promise<void> {
+    if (colorOnly && lastColorState && settingsWindowBridge?.publishColorState) return settingsWindowBridge.publishColorState(lastColorState)
     return settingsWindowBridge?.publishState() ?? Promise.resolve()
+  }
+
+  /** 復元・プリセット操作の前に旧入力を無効化する。世代は保存ファイルへ含めない。 */
+  function invalidateColorInputs(): void { appearanceEpoch++; colorInteractionId = undefined; colorOnly = false; lastColorState = null }
+
+  /** 1色だけを変更し、本文設定・ルール・プリセットの参照と計算結果を保つ。 */
+  function updateColor(command: Extract<SettingsCommand, { type: 'appearance' }>): void {
+    const action = command.action
+    if (action.type !== 'color') return
+    if (command.colorInput && command.colorInput.epoch !== appearanceEpoch) { void settingsWindowBridge.publishState(); return }
+    if (command.colorInput && (!Number.isSafeInteger(command.colorInput.sequence) || command.colorInput.sequence < 1)) throw new Error('色入力の順序情報が不正です。')
+    if (!Object.prototype.hasOwnProperty.call(colorDefinitions, action.key) || !isHexColor(action.value)) throw new Error('色は #RRGGBB 形式で指定してください。')
+    const input = command.colorInput && action.interactionId ? { interactionId: action.interactionId, sequence: command.colorInput.sequence } : undefined
+    if (input && lastColorState?.input?.interactionId === input.interactionId && input.sequence <= lastColorState.input.sequence) return
+    const value = action.value.toUpperCase()
+    if (appearance.value.colors[action.key] !== value) {
+      if (!action.interactionId || action.interactionId !== colorInteractionId) settingsHistory.push(cloneCurrentSettings())
+      colorInteractionId = action.interactionId
+      appearance.value.colors[action.key] = value
+      options.onAppearanceChanged?.(appearance.value.colors)
+      colorOnly = true
+      lastColorState = { appearanceEpoch, changes: { [action.key]: value }, history: { canUndo: settingsHistory.canUndo, canRedo: settingsHistory.canRedo }, input }
+      settingsPersistence.markChanged()
+    } else if (input) {
+      lastColorState = { appearanceEpoch, changes: { [action.key]: value }, history: { canUndo: settingsHistory.canUndo, canRedo: settingsHistory.canRedo }, input }
+      void settingsWindowBridge.publishColorState(lastColorState)
+    }
   }
 
   /** Store書き込み失敗時に設定を戻し、既存の通知文言を維持する。 */
   function applySettingsRollback(snapshot: SettingsValues): void {
+    invalidateColorInputs()
     appearance.value = cloneAppearance(snapshot.appearance)
     colorInteractionId = undefined
     options.onAppearanceChanged?.(appearance.value.colors)
@@ -189,6 +223,8 @@ export function useSettingsController(options: SettingsControllerOptions) {
       return
     }
 
+    colorOnly = false
+
     if (recordHistory && (!interactionId || interactionId !== colorInteractionId)) settingsHistory.push(cloneCurrentSettings())
     colorInteractionId = interactionId
     const colorsChanged = JSON.stringify(nextAppearance.colors) !== JSON.stringify(appearance.value.colors)
@@ -215,7 +251,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
 
   /** Undoで直前状態を適用し、現在状態をRedo履歴へ移す。 */
   function undoSettingsChange(): void {
-    colorInteractionId = undefined
+    invalidateColorInputs()
     const previous = settingsHistory.undo(cloneCurrentSettings())
     if (!previous) return
     updateCurrentSettings(previous.editor, previous.toolbar, false, false, previous.barSizes, previous.statusBar, previous.appearance, undefined, previous.outline)
@@ -224,7 +260,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
 
   /** Redoで取り消した状態を適用し、現在状態をUndo履歴へ移す。 */
   function redoSettingsChange(): void {
-    colorInteractionId = undefined
+    invalidateColorInputs()
     const next = settingsHistory.redo(cloneCurrentSettings())
     if (!next) return
     updateCurrentSettings(next.editor, next.toolbar, false, false, next.barSizes, next.statusBar, next.appearance, undefined, next.outline)
@@ -242,25 +278,30 @@ export function useSettingsController(options: SettingsControllerOptions) {
     if (disposed) return
     try {
       if (command.type === 'ready') {
-        if (!settingsHistory.active) beginSettingsHistorySession()
+        colorOnly = false
+        if (!settingsHistory.active) { invalidateColorInputs(); beginSettingsHistorySession() }
         await publishSettingsState()
       } else if (command.type === 'navigate') {
         settingsPage.value = command.page
-        await publishSettingsState()
+        await settingsWindowBridge.publishState()
       } else if (command.type === 'undo') {
         undoSettingsChange()
       } else if (command.type === 'redo') {
         redoSettingsChange()
       } else if (command.type === 'change') {
+        if (command.resetAppearance) invalidateColorInputs()
         if (command.outline && normalizeOutline(command.outline).rules.length !== command.outline.rules.length) throw new Error('見出しルールを保存できません。入力を見直してください。')
         const nextAppearance = command.resetAppearance
           ? { ...createDefaultAppearance(), presets: cloneAppearance(appearance.value).presets }
           : appearance.value
         updateCurrentSettings(command.editor, command.toolbar, command.flush ?? false, true, command.barSizes, command.statusBar, nextAppearance, undefined, command.outline ? normalizeOutline(command.outline) : outline.value)
       } else if (command.type === 'appearance') {
-        const next = applyAppearanceAction(appearance.value, command.action)
-        updateCurrentSettings(undefined, undefined, command.action.type !== 'color', true, undefined, undefined, next,
-          command.action.type === 'color' ? command.action.interactionId : undefined)
+        if (command.action.type === 'color') updateColor(command)
+        else {
+          invalidateColorInputs()
+          const next = applyAppearanceAction(appearance.value, command.action)
+          updateCurrentSettings(undefined, undefined, true, true, undefined, undefined, next)
+        }
       } else if (command.type === 'appearance-file') {
         await handleAppearanceFile(command)
       }
@@ -279,6 +320,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
         const preset = await readColorPreset()
         if (disposed || !preset) return
         const next = applyAppearanceAction(appearance.value, { type: 'import', preset })
+        invalidateColorInputs()
         updateCurrentSettings(undefined, undefined, true, true, undefined, undefined, next)
       } else {
         const preset = command.presetId ? findColorPreset(appearance.value, command.presetId) : undefined
@@ -344,7 +386,9 @@ export function useSettingsController(options: SettingsControllerOptions) {
 
   /** 終了前に遅延中の設定保存をすべて完了させる。 */
   async function flush(): Promise<void> {
+    await settingsWindowBridge.flushInputs?.()
     await settingsPersistence.flush()
+    await options.onAppearanceFlush?.()
   }
 
   /** 設定イベント、タイマー、設定ウィンドウを解除する。 */

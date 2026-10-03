@@ -2,12 +2,15 @@
 import { ref } from 'vue'
 import { emitTo, listen } from '@tauri-apps/api/event'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { createFrameTask } from './frameTask'
 import {
+  SETTINGS_COLOR_EVENT, SETTINGS_INPUT_ACK_EVENT, SETTINGS_FLUSH_INPUTS_EVENT,
   SETTINGS_COMMAND_EVENT,
   SETTINGS_ERROR_EVENT,
   SETTINGS_STATE_EVENT,
   type SettingsCommand,
   type SettingsSnapshot,
+  type SettingsColorState,
 } from './settingsSession'
 
 type SettingsSnapshotPayload = Omit<SettingsSnapshot, 'revision'>
@@ -28,12 +31,44 @@ export function useSettingsWindowBridge(options: SettingsWindowBridgeOptions) {
   let setupPromise: Promise<void> | null = null
   let disposed = false
   let settingsStateRevision = 0
+  let pendingColor: Omit<SettingsColorState, 'revision'> | null = null
+  let sendingColor: Promise<void> | null = null
+  let lastColor = ''
+  const flushRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>()
+  const colorFrame = createFrameTask(() => { void flushColorState() })
+
+  /** 軽量返信を直列化し、通信待ちの中間色は最新値へまとめる。 */
+  async function flushColorState(): Promise<void> {
+    if (sendingColor) return sendingColor
+    const run = (async () => {
+      while (pendingColor && !disposed) {
+        const next = pendingColor; pendingColor = null
+        const signature = JSON.stringify(next)
+        if (signature === lastColor) continue
+        try {
+          await emitTo('settings', SETTINGS_COLOR_EVENT, { ...next, revision: ++settingsStateRevision })
+          lastColor = signature
+        } catch { /* 次の変更または完全な状態要求で復旧する。 */ }
+      }
+    })()
+    sendingColor = run
+    try { await run } finally { if (sendingColor === run) sendingColor = null }
+  }
+
+  /** 色変更だけを予約し、プリセット一覧や無関係な設定を複製しない。 */
+  function publishColorState(next: Omit<SettingsColorState, 'revision'>): Promise<void> {
+    if (disposed || !settingsWindowOpen.value) return Promise.resolve()
+    pendingColor = { ...next, changes: { ...(pendingColor?.appearanceEpoch === next.appearanceEpoch ? pendingColor.changes : {}), ...next.changes } }
+    colorFrame.schedule()
+    return Promise.resolve()
+  }
 
   /** 状態配信をbest-effortで行い、閉じかけの設定ウィンドウで保存処理を止めない。 */
   async function publishState(): Promise<void> {
     if (disposed) return
+    pendingColor = null; colorFrame.cancel(); lastColor = ''
     try {
-      const targetWindow = await WebviewWindow.getByLabel('settings')
+      const targetWindow = settingsWindow ?? await WebviewWindow.getByLabel('settings')
       if (disposed || !targetWindow) return
       const snapshot: SettingsSnapshot = {
         ...options.getSnapshot(),
@@ -44,6 +79,20 @@ export function useSettingsWindowBridge(options: SettingsWindowBridgeOptions) {
     } catch {
       // ウィンドウの破棄と競合した状態配信は設定保存へ影響させない。
     }
+  }
+
+  /** 終了前に子窓の入力を要求し、メインへの反映確認まで待つ。 */
+  async function flushInputs(): Promise<void> {
+    if (disposed) return
+    const target = await WebviewWindow.getByLabel('settings')
+    if (!target) return
+    const requestId = crypto.randomUUID()
+    const result = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => { flushRequests.delete(requestId); reject(new Error('設定画面の入力を確認できませんでした。設定画面で再確認してください。')) }, 3000)
+      flushRequests.set(requestId, { resolve, reject, timer })
+    })
+    try { await emitTo('settings', SETTINGS_FLUSH_INPUTS_EVENT, { requestId }); await result }
+    finally { const pending = flushRequests.get(requestId); if (pending) clearTimeout(pending.timer); flushRequests.delete(requestId) }
   }
 
   /** 設定画面へ保存エラーをbest-effortで通知する。 */
@@ -61,6 +110,7 @@ export function useSettingsWindowBridge(options: SettingsWindowBridgeOptions) {
   /** 設定子窓の破棄通知を現在の窓だけに適用する。 */
   function handleWindowDestroyed(destroyedWindow: WebviewWindow): void {
     if (settingsWindow !== destroyedWindow) return
+    pendingColor = null; colorFrame.cancel(); lastColor = ''
     settingsWindow = null
     settingsWindowOpening = false
     settingsWindowOpen.value = false
@@ -122,7 +172,13 @@ export function useSettingsWindowBridge(options: SettingsWindowBridgeOptions) {
     if (setupPromise) return setupPromise
     const setupRun = (async () => {
       const lateUnlisten = await listen<SettingsCommand>(SETTINGS_COMMAND_EVENT, (event) => {
-        void options.onCommand(event.payload)
+        const command = event.payload
+        if (command.type === 'input-barrier') {
+          void emitTo('settings', SETTINGS_INPUT_ACK_EVENT, { requestId: command.requestId }).catch(() => undefined)
+        } else if (command.type === 'inputs-flushed') {
+          const pending = flushRequests.get(command.requestId)
+          if (pending) { clearTimeout(pending.timer); flushRequests.delete(command.requestId); if (command.error) pending.reject(new Error(command.error)); else pending.resolve() }
+        } else void options.onCommand(command)
       })
       if (disposed) {
         lateUnlisten()
@@ -142,6 +198,9 @@ export function useSettingsWindowBridge(options: SettingsWindowBridgeOptions) {
   async function dispose(): Promise<void> {
     if (disposed) return
     disposed = true
+    colorFrame.dispose(); pendingColor = null
+    for (const pending of flushRequests.values()) { clearTimeout(pending.timer); pending.reject(new Error('設定画面との通信が終了しました。')) }
+    flushRequests.clear()
     unlistenSettingsCommand?.()
     unlistenSettingsCommand = undefined
     settingsWindowOpen.value = false
@@ -161,6 +220,8 @@ export function useSettingsWindowBridge(options: SettingsWindowBridgeOptions) {
     settingsWindowOpen,
     open,
     publishState,
+    publishColorState,
+    flushInputs,
     publishError,
     setup,
     dispose,

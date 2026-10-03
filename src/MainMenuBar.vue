@@ -175,6 +175,7 @@ defineExpose({ closeMenus })
         <VBtn v-bind="displayMenuProps" class="menu-heading" size="small" variant="text">表示</VBtn>
       </template>
       <VList density="compact" min-width="240" role="menu" aria-label="表示">
+        <VListItem v-for="item in [{ id: 'toggle', label: 'サイドバーを開閉' }, { id: 'project', label: 'プロジェクトパネル' }, { id: 'search', label: '検索パネル' }, { id: 'history', label: '履歴パネル' }, { id: 'outline', label: 'アウトラインパネル' }]" :key="item.id" role="menuitem" :title="item.label" :disabled="isCommandDisabled(`view.sidebar.${item.id}` as CommandId)" @click="runMenuCommand(`view.sidebar.${item.id}` as CommandId)" />
         <VListItem role="menuitemcheckbox" :aria-checked="focusMode" :active="focusMode" :disabled="isCommandDisabled('view.focusMode.toggle')" title="集中モード" @click="runMenuCommand('view.focusMode.toggle')">
           <template #prepend><VIcon icon="mdi-check" :style="{ visibility: focusMode ? 'visible' : 'hidden' }" aria-hidden="true" /></template>
           <template #append><span class="menu-shortcut">{{ getCommandShortcut('view.focusMode.toggle') }}</span></template>

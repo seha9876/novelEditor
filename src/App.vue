@@ -4,6 +4,13 @@ import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { message } from '@tauri-apps/plugin-dialog'
 import EditorPane from './EditorPane.vue'
 import ProjectTreeSidebar from './ProjectTreeSidebar.vue'
+import SidebarShell from './SidebarShell.vue'
+import SidebarSearchPanel from './SidebarSearchPanel.vue'
+import SidebarHistoryPanel from './SidebarHistoryPanel.vue'
+import OutlinePanel from './OutlinePanel.vue'
+import { useSidebarSearch } from './useSidebarSearch'
+import { useSidebarHistory } from './useSidebarHistory'
+import type { SidebarPanelId } from './sidebarModel'
 import MainAppBar from './MainAppBar.vue'
 import ProjectNameDialog from './ProjectNameDialog.vue'
 import QuickOpenDialog from './QuickOpenDialog.vue'
@@ -42,9 +49,9 @@ const persistenceNoticeOpen = ref(false)
 const mainCloseInProgress = ref(false)
 const focusMode = ref(false)
 const gitHistoryOpen = ref(false)
-const projectTreeContent = ref<HTMLElement | null>(null)
-// Tooltipのactivator用refと競合しないよう、ボタンの親DOMを保持する。
-const projectTreeToggle = ref<HTMLElement | null>(null)
+const documentRevision = ref(0)
+const documentHead = ref(0)
+const historyRefreshRevision = ref(0)
 const statusBarContextMenuOpen = ref(false)
 const statusBarContextMenuTarget = ref<[number, number]>([0, 0])
 let appLifecycleGeneration = 0
@@ -83,6 +90,7 @@ async function showError(action: string, error: unknown): Promise<void> {
 
 type ProjectTreeController = ReturnType<typeof useProjectTreeWindowController>
 let projectTreeController!: ProjectTreeController
+let sidebarSearchController: ReturnType<typeof useSidebarSearch> | null = null
 let quickOpenController: ReturnType<typeof useQuickOpenController> | null = null
 const documentSession = useDocumentSession({
   editor,
@@ -93,6 +101,7 @@ const documentSession = useDocumentSession({
   fileNavigationBlocked: gitHistoryOpen,
   reportProjectTreeOpenResult: (result, sourceWindowId) => {
     projectTreeController.reportProjectTreeOpenResult(result, sourceWindowId)
+    if (sidebarSearchController?.receiveOpenResult(result)) projectTreeController.consumeProjectTreeOpenResult(result.requestId)
     if (quickOpenController?.receiveOpenResult(result)) projectTreeController.consumeProjectTreeOpenResult(result.requestId)
   },
 })
@@ -101,6 +110,8 @@ const gitHistory = useGitHistoryController({
   disabled: computed(() => documentSession.busy.value || mainCloseInProgress.value || !!documentSession.externalDialog.value),
   path: documentSession.path,
   dirty: documentSession.dirty,
+  externalState: documentSession.externalState,
+  externalError: documentSession.externalError,
   saveDocument: documentSession.saveDocument,
 })
 const editorInteractionLocked = computed(() => documentSession.documentLocked.value || gitHistoryOpen.value)
@@ -194,6 +205,9 @@ const {
   chooseWrapMode,
 } = settingsController
 const {
+  activeSidebarPanel,
+  selectSidebarPanel,
+  dockProjectTreeWindow,
   projectTreeDetached,
   projectTreeCollapsed,
   projectTreeVisuallyCollapsed,
@@ -224,15 +238,6 @@ const {
   dispose: disposeProjectTreeWindowController,
 } = projectTreeController
 
-// 非表示のDOM更新より先に、隠れる内容や境界のフォーカスを開閉ボタンへ移す。
-watch(projectTreeVisuallyCollapsed, (collapsed) => {
-  if (!collapsed || focusMode.value || projectTreeDetached.value || mainCloseInProgress.value) return
-  const active = document.activeElement
-  if (projectTreeContent.value?.contains(active)
-    || (active instanceof HTMLElement && active.classList.contains('project-tree-resize-handle'))) {
-    projectTreeToggle.value?.querySelector<HTMLButtonElement>('button')?.focus()
-  }
-}, { flush: 'sync' })
 const {
   projects: projectMenuProjects,
   activeProjectId: projectMenuActiveProjectId,
@@ -273,6 +278,37 @@ const {
   dispose: disposeMainWindowController,
 } = mainWindowController
 
+const visibleSidebarPanel = computed(() => !focusMode.value && !projectTreeVisuallyCollapsed.value ? activeSidebarPanel.value : null)
+const visitedPanels = ref(new Set<SidebarPanelId>([activeSidebarPanel.value, 'project']))
+const sidebarDisabled = computed(() => editorInteractionLocked.value || mainCloseInProgress.value || busy.value)
+const sidebarSearch = useSidebarSearch({
+  active: computed(() => visibleSidebarPanel.value === 'search'), editor, revision: documentRevision, path,
+  conditions: searchController.conditions, snapshot: projectController.snapshot, disabled: sidebarDisabled, openFile: openProjectTreeFile,
+})
+sidebarSearchController = sidebarSearch
+const sidebarHistory = useSidebarHistory({
+  active: computed(() => visibleSidebarPanel.value === 'history'), path, disabled: sidebarDisabled, refreshRevision: historyRefreshRevision,
+})
+watch(documentSession.saveRevision, () => { historyRefreshRevision.value++ })
+watch(visibleSidebarPanel, panel => {
+  if (panel) visitedPanels.value.add(panel)
+  searchController.setSidebarActive(panel === 'search')
+}, { immediate: true })
+watch(() => [searchScope.value.enabled, searchScope.value.empty, searchScope.value.startLine, searchScope.value.endLine], () => sidebarSearch.invalidate())
+
+/** 本文の世代とカーソルだけを受け取り、解析済みの古い位置を区別する。 */
+function onDocumentState(revision: number, head: number): void { documentRevision.value = revision; documentHead.value = head }
+/** 履歴画面で完了した操作を簡易一覧へ反映し、本文へフォーカスを戻す。 */
+function onHistoryClosed(): void { historyRefreshRevision.value++; focusAfterFileDialog() }
+/** 管理画面には現在の所属フォルダーを渡し、記録や送信は自動で実行しない。 */
+function openHistoryManagement(root?: string): void { void gitHistory.open(root) }
+/** パネルの明示選択では集中モードを解除し、切替以外の文書操作を行わない。 */
+function selectSidebar(panel: SidebarPanelId, toggle = true): void {
+  if (mainCloseInProgress.value || projectTreeResizing.value) return
+  focusMode.value = false
+  selectSidebarPanel(panel, toggle)
+}
+
 const commandActions: Record<CommandId, () => Promise<void>> = {
   'document.new': newDocument,
   'document.open': openDocument,
@@ -300,6 +336,11 @@ const commandActions: Record<CommandId, () => Promise<void>> = {
   'view.whitespace.toggle': settingsController.toggleWhitespace,
   'view.lineNumbers.toggle': settingsController.toggleLineNumbers,
   'view.focusMode.toggle': toggleFocusMode,
+  'view.sidebar.toggle': async () => { toggleSidebar() },
+  'view.sidebar.project': async () => { selectSidebar('project', false) },
+  'view.sidebar.search': async () => { selectSidebar('search', false) },
+  'view.sidebar.history': async () => { selectSidebar('history', false) },
+  'view.sidebar.outline': async () => { selectSidebar('outline', false) },
   'view.toolbar.customize': async () => openSettingsWindow('appearance.toolbar'),
 }
 const appCommands = Object.fromEntries(appCommandDefinitions.map((definition) => [definition.id, {
@@ -315,9 +356,9 @@ function isCommandDisabled(commandId: CommandId): boolean {
   if (gitHistoryOpen.value && (commandId.startsWith('document.') || commandId.startsWith('edit.'))) return true
   if (documentSession.externalDialog.value && (commandId.startsWith('document.') || commandId.startsWith('edit.'))) return true
   if (recentFiles.isOpen.value && (commandId.startsWith('document.') || commandId.startsWith('edit.'))) return true
-  if (commandId === 'document.gitHistory') return recentFilesDisabled.value || quickOpen.isOpen.value
+  if (commandId === 'document.gitHistory') return recentFilesDisabled.value || quickOpen.isOpen.value || sidebarHistory.pending.value || sidebarHistory.exporting.value
   if (commandId === 'document.recentFiles') return recentFilesDisabled.value || quickOpen.isOpen.value
-  if (commandId === 'view.focusMode.toggle') return projectTreeResizing.value
+  if (commandId === 'view.focusMode.toggle' || commandId.startsWith('view.sidebar.')) return projectTreeResizing.value
   if (commandId === 'document.quickOpen') return quickOpenDisabled.value
   if (quickOpen.isOpen.value && (commandId.startsWith('document.') || commandId.startsWith('edit.'))) return true
   if (commandId.startsWith('edit.')) return documentLocked.value
@@ -328,6 +369,8 @@ function isCommandDisabled(commandId: CommandId): boolean {
 /** 現在選択されている状態付きコマンドかを判定する。 */
 function isCommandChecked(commandId: CommandId): boolean {
   if (commandId === 'view.focusMode.toggle') return focusMode.value
+  if (commandId === 'view.sidebar.toggle') return !focusMode.value && !projectTreeCollapsed.value
+  if (commandId.startsWith('view.sidebar.')) return visibleSidebarPanel.value === commandId.slice('view.sidebar.'.length)
   if (commandId === 'view.lineNumbers.toggle') return editorSettings.value.showLineNumbers
   if (commandId === 'view.whitespace.toggle') return editorSettings.value.showWhitespace
   if (commandId === 'wrap.window') return editorSettings.value.wrapMode === 'window'
@@ -336,12 +379,10 @@ function isCommandChecked(commandId: CommandId): boolean {
   return commandId === 'window.alwaysOnTop' && alwaysOnTop.value
 }
 
-/** ツリー内のフォーカスを開閉ボタンへ移し、内容と幅を保持して開閉する。 */
-function toggleProjectTree(): void {
-  if (focusMode.value || projectTreeDetached.value || projectTreeResizing.value || mainCloseInProgress.value) return
-  if (!projectTreeCollapsed.value && projectTreeContent.value?.contains(document.activeElement)) {
-    projectTreeToggle.value?.querySelector<HTMLButtonElement>('button')?.focus()
-  }
+/** 保存済みの幅と選択パネルを保持して開閉する。集中モード中は明示して再表示する。 */
+function toggleSidebar(): void {
+  if (projectTreeResizing.value || mainCloseInProgress.value) return
+  if (focusMode.value) { selectSidebar(activeSidebarPanel.value, false); return }
   toggleProjectTreeCollapsed()
 }
 
@@ -383,7 +424,7 @@ function focusAfterFileDialog(): void {
 
 /** 終了要求ではGitの実行完了を案内し、保存を完了させてからメイン窓を破棄する。 */
 async function handleCloseRequested(): Promise<void> {
-  if (gitHistory.pending.value) {
+  if (gitHistory.pending.value || sidebarHistory.pending.value || sidebarHistory.exporting.value) {
     showPersistenceNotice('Git の処理中です。完了してからもう一度終了してください。')
     return
   }
@@ -478,6 +519,8 @@ onBeforeUnmount(() => {
   externalFileMonitor.dispose()
   recentFiles.dispose()
   gitHistory.dispose()
+  sidebarSearch.dispose()
+  sidebarHistory.dispose()
   appMounted = false
   appLifecycleGeneration += 1
   window.removeEventListener('keydown', onKeydown, true)
@@ -547,7 +590,7 @@ onBeforeUnmount(() => {
       @open-file="quickOpen.openSelected"
       @closed="focusAfterFileDialog"
     />
-    <GitHistoryDialog :controller="gitHistory" @closed="focusAfterFileDialog" />
+    <GitHistoryDialog :controller="gitHistory" @closed="onHistoryClosed" />
     <RecentFilesDialog
       :model-value="recentFiles.isOpen.value"
       :entries="recentFiles.entries.value"
@@ -566,53 +609,40 @@ onBeforeUnmount(() => {
       {{ persistenceNotice }}
     </VSnackbar>
     <VNavigationDrawer
-      v-if="!projectTreeDetached"
       :model-value="!focusMode"
-      class="project-navigation"
-      :class="{ 'is-focus-hidden': focusMode }"
+      class="project-navigation sidebar-navigation"
+      :class="{ 'is-focus-hidden': focusMode, 'is-collapsed': projectTreeVisuallyCollapsed }"
       app
       permanent
       :width="projectTreeDrawerWidth"
-      aria-label="プロジェクトツリー"
+      aria-label="執筆サイドバー"
     >
-      <div ref="projectTreeToggle" class="project-tree-toggle-row">
-        <VTooltip :text="projectTreeVisuallyCollapsed ? 'プロジェクトツリーを開く' : 'プロジェクトツリーを閉じる'" :disabled="focusMode || projectTreeResizing" location="right">
-          <template #activator="{ props: toggleProps }">
-            <VBtn
-              v-bind="toggleProps"
-              class="project-tree-toggle"
-              variant="text"
-              :icon="projectTreeVisuallyCollapsed ? 'mdi-chevron-right' : 'mdi-chevron-left'"
-              :aria-label="projectTreeVisuallyCollapsed ? 'プロジェクトツリーを開く' : 'プロジェクトツリーを閉じる'"
-              :aria-expanded="!projectTreeVisuallyCollapsed"
-              aria-controls="project-tree-content"
-              :disabled="mainCloseInProgress"
-              :aria-disabled="projectTreeResizing || mainCloseInProgress"
-              @click="toggleProjectTree"
-            />
-          </template>
-        </VTooltip>
-      </div>
-      <div v-show="!projectTreeVisuallyCollapsed" id="project-tree-content" ref="projectTreeContent" class="project-tree-content">
-        <ProjectTreeSidebar
-          :disabled="projectTreeWindowDisabled"
-          :document-origin="documentOrigin"
-          :expanded-folder-ids="expandedProjectTreeFolderIds"
-          :unavailable-node-ids="projectTreeUnavailableNodeIds"
-          :open-result="projectTreeOpenResult"
-          @detach-request="requestProjectTreeDetach"
-          @open-file="openProjectTreeFile"
-          @open-result-applied="consumeProjectTreeOpenResult"
-          @origin-detached="detachDocumentOrigin"
-          @expanded-change="updateExpandedProjectTreeFolders"
-          @unavailable-change="updateProjectTreeUnavailableNodeIds"
-        />
-      </div>
+      <SidebarShell :active-panel="activeSidebarPanel" :collapsed="projectTreeVisuallyCollapsed" :disabled="mainCloseInProgress" :resizing="projectTreeResizing" @select="selectSidebar" @close="toggleSidebar">
+        <div v-show="activeSidebarPanel === 'project'" id="sidebar-project" :inert="activeSidebarPanel !== 'project'" class="sidebar-panel">
+          <ProjectTreeSidebar
+            v-if="!projectTreeDetached"
+            :disabled="projectTreeWindowDisabled" :document-origin="documentOrigin"
+            :expanded-folder-ids="expandedProjectTreeFolderIds" :unavailable-node-ids="projectTreeUnavailableNodeIds" :open-result="projectTreeOpenResult"
+            @detach-request="requestProjectTreeDetach" @open-file="openProjectTreeFile" @open-result-applied="consumeProjectTreeOpenResult"
+            @origin-detached="detachDocumentOrigin" @expanded-change="updateExpandedProjectTreeFolders" @unavailable-change="updateProjectTreeUnavailableNodeIds"
+          />
+          <div v-else class="sidebar-inner"><p>プロジェクトは分離ウィンドウに表示しています。</p><VBtn variant="text" :disabled="projectTreeWindowDisabled" @click="openProjectTreeWindow">分離ウィンドウを表示</VBtn><VBtn variant="text" :disabled="projectTreeWindowDisabled" @click="dockProjectTreeWindow">メインへ戻す</VBtn></div>
+        </div>
+        <div v-if="visitedPanels.has('search')" v-show="activeSidebarPanel === 'search'" id="sidebar-search" :inert="activeSidebarPanel !== 'search'" class="sidebar-panel">
+          <SidebarSearchPanel :controller="sidebarSearch" :conditions="searchController.conditions.value" :scope-status="searchScope" :project-name="projectMenuProjects.find(project => project.id === projectMenuActiveProjectId)?.name || ''" :disabled="sidebarDisabled" @conditions="searchController.setSidebarConditions" @clear-scope="editor?.setSearchScope('clear')" />
+        </div>
+        <div v-if="visitedPanels.has('history')" v-show="activeSidebarPanel === 'history'" id="sidebar-history" :inert="activeSidebarPanel !== 'history'" class="sidebar-panel">
+          <SidebarHistoryPanel :controller="sidebarHistory" :path="path" :disabled="sidebarDisabled" @manage="openHistoryManagement" />
+        </div>
+        <div v-if="visitedPanels.has('outline')" v-show="activeSidebarPanel === 'outline'" id="sidebar-outline" :inert="activeSidebarPanel !== 'outline'" class="sidebar-panel">
+          <OutlinePanel :active="visibleSidebarPanel === 'outline'" :editor="editor" :revision="documentRevision" :head="documentHead" :document-key="path" :preferences="settingsController.outline.value" :disabled="sidebarDisabled" @settings="openSettingsWindow('editor.outline')" />
+        </div>
+      </SidebarShell>
       <div
         class="project-tree-resize-handle"
         role="separator"
         :tabindex="projectTreeVisuallyCollapsed ? -1 : 0"
-        aria-label="プロジェクトツリーの幅"
+        aria-label="サイドバーの幅"
         aria-orientation="vertical"
         :aria-valuemin="36"
         :aria-valuemax="projectTreeMaximumWidth"
@@ -632,7 +662,7 @@ onBeforeUnmount(() => {
           <span>{{ documentSession.externalState.value === 'changed' ? '外部で変更されました。現在の本文は保持しています。' : documentSession.externalState.value === 'missing' ? 'ファイルが見つかりません。現在の本文は保持しています。' : 'ファイルの状態を確認できません。' }}</span>
           <VBtn size="small" variant="text" :disabled="busy || mainCloseInProgress" @click="documentSession.reviewExternalFile">確認する</VBtn>
         </div>
-        <EditorPane ref="editor" :settings="editorSettings" :read-only="editorInteractionLocked" @change="onChange" @statistics="statistics = $event" @search-status="onSearchStatus" @search-navigate="onSearchNavigate" @search-scope="onSearchScope" />
+        <EditorPane ref="editor" :settings="editorSettings" :read-only="editorInteractionLocked" @change="onChange" @document-state="onDocumentState" @statistics="statistics = $event" @search-status="onSearchStatus" @search-navigate="onSearchNavigate" @search-scope="onSearchScope" />
       </div>
     </VMain>
     <ExternalFileDialog

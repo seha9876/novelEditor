@@ -41,6 +41,8 @@ export type SearchControllerOptions = {
 /** 検索状態を配信し、遅着した子ウィンドウ操作をセッションIDで拒否する。 */
 export function useSearchController(options: SearchControllerOptions) {
   const searchSession = new SearchSession()
+  const conditions = ref<SearchConditions>({ ...searchSession.conditions })
+  let appliedConditions = { ...searchSession.conditions }
   const searchScope = ref(createSearchScopeStatus())
   let searchWindow: WebviewWindow | null = null
   let searchWindowOpening = false
@@ -97,7 +99,7 @@ export function useSearchController(options: SearchControllerOptions) {
     searchWindowClosing = false
     searchWindowReady = false
     searchSession.stop()
-    if (!disposed) options.editor.value?.setSearch(searchSession.conditions, false)
+    if (!disposed) options.editor.value?.setSearch(appliedConditions, false)
     if (!options.mainCloseInProgress.value && !disposed) {
       void options.appWindow.setFocus().then(() => {
         if (!disposed && !searchWindow && !options.mainCloseInProgress.value) options.editor.value?.focus()
@@ -174,13 +176,15 @@ export function useSearchController(options: SearchControllerOptions) {
     }
   }
 
-  /** 本文側のF3は条件があればそのまま検索し、未指定なら検索画面を開く。 */
+  /** 本文側のF3は適用済み条件を再利用する。未適用の正規表現は独立窓の検索へ引き継ぐ。 */
   function onNavigate(action: SearchAction): void {
     if (disposed || options.documentLocked.value || options.mainCloseInProgress.value) return
-    if (!searchSession.conditions.search) {
+    const changed = ['search', 'caseSensitive', 'regexp'].some(key => searchSession.conditions[key as keyof SearchConditions] !== appliedConditions[key as keyof SearchConditions])
+    if (!searchSession.conditions.search || changed && searchSession.conditions.regexp && !searchWindowReady) {
       void open('search')
       return
     }
+    if (changed) { appliedConditions = { ...searchSession.conditions }; options.editor.value?.setSearch(appliedConditions, searchWindowReady) }
     options.editor.value?.runSearch(action)
   }
 
@@ -190,17 +194,20 @@ export function useSearchController(options: SearchControllerOptions) {
     searchWindowError = ''
     if (command.type === 'ready') {
       searchWindowReady = true
-      options.editor.value?.setSearch(searchSession.conditions, true)
+      appliedConditions = { ...searchSession.conditions }
+      options.editor.value?.setSearch(appliedConditions, true)
     } else {
       const result = searchSession.receive(command)
       if (!result.accepted) return
+      conditions.value = { ...searchSession.conditions }
       if (result.scopeAction && options.editor.value) {
         if (!options.editor.value.setSearchScope(result.scopeAction)) {
           searchWindowError = options.editor.value.getSearchScope().reason
         }
         onScope(options.editor.value.getSearchScope())
       }
-      options.editor.value?.setSearch(searchSession.conditions, true)
+      appliedConditions = { ...searchSession.conditions }
+      options.editor.value?.setSearch(appliedConditions, true)
       if (result.action) options.editor.value?.runSearch(result.action)
       if (command.type === 'close') {
         void close().catch((error: unknown) => options.showError('検索画面を閉じる操作', error))
@@ -252,7 +259,24 @@ export function useSearchController(options: SearchControllerOptions) {
     void publishSearchState()
   }, { flush: 'sync', immediate: true })
 
+  /** サイドバー入力を検索窓と共有し、置換文字列を意図せず初期化しない。 */
+  function setSidebarConditions(patch: Partial<SearchConditions>): void {
+    if (disposed) return
+    searchSession.conditions = { ...searchSession.conditions, ...patch }
+    conditions.value = { ...searchSession.conditions }
+    if (searchWindowReady) { appliedConditions = { ...searchSession.conditions }; options.editor.value?.setSearch(appliedConditions, true) }
+    void publishSearchState()
+  }
+
+  /** サイドバーは解析済み位置を描画し、検索窓が閉じている間は正規表現をUIで走査しない。 */
+  function setSidebarActive(active: boolean): void {
+    if (!disposed && !searchWindowReady && !active) options.editor.value?.setSearch(appliedConditions, false)
+  }
+
   return {
+    conditions,
+    setSidebarConditions,
+    setSidebarActive,
     open,
     close,
     onStatus,

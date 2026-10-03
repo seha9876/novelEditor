@@ -6,6 +6,91 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// 原稿の変更だけを表示し、同名の別パス・削除・不正バイト列を安全に区別する。
+#[test]
+fn file_history_selects_current_path_and_deleted_state() {
+    let temp = Sandbox::new();
+    let root = temp.repo("作品 空白");
+    fs::create_dir(root.join("章")).unwrap();
+    fs::write(root.join("章/原稿 [1].TXT"), b"\xef\xbb\xbffirst\r\n").unwrap();
+    fs::write(root.join("原稿 [1].TXT"), "other").unwrap();
+    let first = record_all(&root);
+    fs::write(root.join("原稿 [1].TXT"), "unrelated").unwrap();
+    record_all(&root);
+    fs::write(root.join("章/原稿 [1].TXT"), [255]).unwrap();
+    let second = record_all(&root);
+    fs::remove_file(root.join("章/原稿 [1].TXT")).unwrap();
+    let deleted = record_all(&root);
+    let before_index = fs::read(root.join(".git/index")).unwrap();
+    let requested = if cfg!(windows) {
+        "章/原稿 [1].txt"
+    } else {
+        "章/原稿 [1].TXT"
+    };
+    let page = file_history(&root, requested, 0, "").unwrap();
+    assert_eq!(page.head, deleted);
+    assert_eq!(page.entries.len(), 3);
+    assert!(page.entries[0].path.is_none());
+    assert_eq!(page.entries[1].entry.id, second);
+    assert_eq!(page.entries[1].path.as_deref(), Some("章/原稿 [1].TXT"));
+    assert_eq!(page.entries[2].entry.id, first);
+    assert_eq!(blob(&root, &second, "章/原稿 [1].TXT").unwrap(), [255]);
+    assert_eq!(fs::read(root.join(".git/index")).unwrap(), before_index);
+    assert!(!page.has_more);
+    assert!(file_history(&root, requested, 0, &first).is_err());
+    assert!(file_history(&root, "../outside.txt", 0, "").is_err());
+    assert!(file_history(&root, ".git/config", 0, "").is_err());
+    assert!(file_history(&root, "image.png", 0, "").is_err());
+}
+
+/// 記録なしと未登録パスは空の履歴を返し、名前変更前の履歴を追跡しない。
+#[test]
+fn file_history_does_not_follow_renames() {
+    let temp = Sandbox::new();
+    let root = temp.repo("原稿");
+    assert!(file_history(&root, "new.txt", 0, "")
+        .unwrap()
+        .entries
+        .is_empty());
+    fs::write(root.join("old.txt"), "text").unwrap();
+    record_all(&root);
+    fs::rename(root.join("old.txt"), root.join("new.txt")).unwrap();
+    let renamed = record_all(&root);
+    let page = file_history(&root, "new.txt", 0, "").unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].entry.id, renamed);
+    assert!(file_history(&root, "absent.txt", 0, "")
+        .unwrap()
+        .entries
+        .is_empty());
+}
+
+/// 50件を超える履歴を同じ基準で送り、基準更新後のページを混ぜない。
+#[test]
+fn file_history_pages_use_a_verified_head() {
+    let temp = Sandbox::new();
+    let root = temp.repo("pages");
+    for index in 0..52 {
+        fs::write(root.join("draft.txt"), index.to_string()).unwrap();
+        git(&root, &["add", "--", "draft.txt"]).unwrap();
+        git(
+            &root,
+            &["commit", "--quiet", "-m", &format!("記録 {index}")],
+        )
+        .unwrap();
+    }
+    let first = file_history(&root, "draft.txt", 0, "").unwrap();
+    assert_eq!(first.entries.len(), 50);
+    assert!(first.has_more);
+    let next = file_history(&root, "draft.txt", 50, &first.head).unwrap();
+    assert_eq!(next.entries.len(), 2);
+    assert!(!next.has_more);
+    assert_eq!(next.entries[0].entry.message, "記録 1");
+    fs::write(root.join("draft.txt"), "later").unwrap();
+    record_all(&root);
+    assert!(file_history(&root, "draft.txt", 50, &first.head).is_err());
+}
 struct Sandbox(PathBuf);
 impl Sandbox {
     /// 並列テストから独立した作業フォルダーを用意する。
@@ -114,7 +199,7 @@ fn backs_up_and_restores_independent_copy_without_force() {
     backup(&root, &target, &status(&root, None).unwrap().token).unwrap();
     assert_eq!(
         status(&root, Some(&target)).unwrap().backup_state,
-        "バックアップ済み"
+        BackupState::Current
     );
     fs::write(root.join("a.txt"), "two").unwrap();
     record_all(&root);
@@ -127,7 +212,7 @@ fn backs_up_and_restores_independent_copy_without_force() {
     fs::rename(&target, temp.0.join("unplugged.git")).unwrap();
     assert_eq!(
         status(&root, Some(&target)).unwrap().backup_state,
-        "バックアップ先を確認できません"
+        BackupState::Unknown
     );
     assert_eq!(history(&restored, 0).unwrap().len(), 2);
     assert!(!restored.join(".git/objects/info/alternates").exists());
@@ -257,4 +342,190 @@ fn export_is_exclusive_and_preserves_original_bytes() {
     assert_eq!(fs::read(&target).unwrap(), bytes);
     assert!(super::write_new(&temp.0.join("missing/child.txt"), bytes).is_err());
     assert!(super::write_new(&temp.0, bytes).is_err());
+}
+
+/// 初回・一致・不一致・確認不能の判定と復元候補の説明を実Gitから取得する。
+#[test]
+fn returns_typed_states_and_restore_metadata() {
+    let temp = Sandbox::new();
+    let root = temp.repo("作品");
+    assert_eq!(
+        status(&root, None).unwrap().backup_state,
+        BackupState::NotSet
+    );
+    assert!(history(&root, 0).unwrap().is_empty());
+    let target = temp.0.join("backup");
+    fs::create_dir(&target).unwrap();
+    prepare_backup(&root, &target).unwrap();
+    assert_eq!(
+        status(&root, Some(&target)).unwrap().backup_state,
+        BackupState::NoHistory
+    );
+    fs::write(root.join("章.txt"), "first").unwrap();
+    let id = record_all(&root);
+    assert_eq!(
+        status(&root, Some(&target)).unwrap().backup_state,
+        BackupState::Different
+    );
+    backup(&root, &target, &status(&root, None).unwrap().token).unwrap();
+    let candidates = branches(&target).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].name, "main");
+    assert_eq!(candidates[0].id, id);
+    assert_eq!(candidates[0].message, "推敲の記録");
+    assert!(!candidates[0].date.is_empty());
+    assert_eq!(
+        status(&root, Some(&target)).unwrap().backup_state,
+        BackupState::Current
+    );
+    git(&root, &["update-ref", "refs/heads/別の案", &id]).unwrap();
+    git(
+        &root,
+        &[
+            "push",
+            "--",
+            &display(&target),
+            "refs/heads/別の案:refs/heads/別の案",
+        ],
+    )
+    .unwrap();
+    assert_eq!(branches(&target).unwrap().len(), 2);
+    git(&root, &["checkout", "--detach"]).unwrap();
+    assert_eq!(
+        status(&root, None).unwrap().blocked,
+        Some(RecordBlock::Detached)
+    );
+}
+
+/// 壊れた記録への参照を、まだ履歴がない状態として画面へ返さない。
+#[test]
+fn rejects_corrupt_history_instead_of_reporting_empty() {
+    let temp = Sandbox::new();
+    let root = temp.repo("draft");
+    fs::write(root.join("a.txt"), "first").unwrap();
+    record_all(&root);
+    fs::write(
+        root.join(".git/refs/heads/main"),
+        format!("{}\n", "b".repeat(40)),
+    )
+    .unwrap();
+    assert!(history(&root, 0).is_err());
+    assert!(status(&root, None).is_err());
+}
+
+/// 部分成功の種別・出力先・元のエラーがTauri境界で失われないことを確認する。
+#[test]
+fn serializes_partial_results_without_claiming_no_output() {
+    for kind in [
+        super::FailureKind::RecordedNeedsAttention,
+        super::FailureKind::OutputIncomplete,
+        super::FailureKind::RestoredRegistrationFailed,
+    ] {
+        let failure = super::Failure::partial(kind, "詳しい理由".into(), "出力先".into());
+        let value = serde_json::to_value(failure).unwrap();
+        assert_ne!(value["kind"], "unknown");
+        assert_eq!(value["details"], "詳しい理由");
+        assert_eq!(value["output"], "出力先");
+    }
+    let failure: super::Failure = "未分類の理由".into();
+    let value = serde_json::to_value(failure).unwrap();
+    assert_eq!(value["kind"], "unknown");
+    assert!(value["output"].is_null());
+}
+
+/// インデックスを他プロセス相当の共有条件で開き、記録後の確定失敗でも履歴と回復用ロックを残す。
+#[cfg(windows)]
+#[test]
+fn reports_recorded_history_when_index_finalize_is_locked() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let temp = Sandbox::new();
+    let root = temp.repo("draft");
+    fs::write(root.join("a.txt"), "first").unwrap();
+    let old = record_all(&root);
+    fs::write(root.join("a.txt"), "edited").unwrap();
+    let snapshot = status(&root, None).unwrap();
+    let index = root.join(".git/index");
+    let index_bytes = fs::read(&index).unwrap();
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2)
+        .open(&index)
+        .unwrap();
+    let failure = record(
+        &root,
+        &snapshot.token,
+        &["a.txt".into()],
+        "後処理を検証",
+        "",
+        "",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        failure.kind,
+        super::FailureKind::RecordedNeedsAttention
+    ));
+    let head = status(&root, None).unwrap().head;
+    assert_ne!(head, old);
+    assert_eq!(failure.output.as_deref(), Some(head.as_str()));
+    assert_eq!(fs::read(&index).unwrap(), index_bytes);
+    assert!(root.join(".git/index.lock").exists());
+    assert_eq!(blob(&root, &head, "a.txt").unwrap(), b"edited");
+    assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "edited");
+    drop(held);
+}
+
+/// 既存履歴にWindowsで取り出せない名前がある場合、作成途中の復元先を明示し、元データを残す。
+#[cfg(windows)]
+#[test]
+fn reports_partial_destination_when_checkout_fails() {
+    let temp = Sandbox::new();
+    let root = temp.repo("draft");
+    fs::write(root.join("a.txt"), "first").unwrap();
+    let first = record_all(&root);
+    let blob = String::from_utf8(git(&root, &["hash-object", "-w", "--stdin"]).unwrap()).unwrap();
+    let cache = format!("100644,{},AUX.txt", blob.trim());
+    git(
+        &root,
+        &[
+            "-c",
+            "core.protectNTFS=false",
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &cache,
+        ],
+    )
+    .unwrap();
+    let tree = String::from_utf8(git(&root, &["write-tree"]).unwrap()).unwrap();
+    let id = String::from_utf8(
+        git(
+            &root,
+            &["commit-tree", tree.trim(), "-p", &first, "-m", "別OSの原稿"],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let target = temp.0.join("backup");
+    fs::create_dir(&target).unwrap();
+    prepare_backup(&root, &target).unwrap();
+    git(
+        &root,
+        &[
+            "push",
+            "--",
+            &display(&target),
+            &format!("{}:refs/heads/main", id.trim()),
+        ],
+    )
+    .unwrap();
+    let destination = temp.0.join("restored");
+    let failure = restore(&target, &destination, "main").unwrap_err();
+    assert!(matches!(failure.kind, super::FailureKind::OutputIncomplete));
+    assert_eq!(
+        failure.output.as_deref(),
+        Some(display(&destination).as_str())
+    );
+    assert!(destination.is_dir());
+    assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "first");
+    assert_eq!(branches(&target).unwrap()[0].id, id.trim());
 }

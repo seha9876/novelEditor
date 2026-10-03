@@ -13,6 +13,10 @@ import { createSearchConditions, createSearchScopeStatus, type SearchAction, typ
 import GoToLineDialog from './GoToLineDialog.vue'
 import { goToEditorLine } from './editorNavigation'
 import { createWhitespaceExtensions } from './editorWhitespace'
+import { getEditorSearchRange } from './searchPanel'
+import type { DocumentSnapshot, DocumentNavigation } from './sidebarModel'
+import { sidebarMatches, sidebarSearchHighlights } from './sidebarSearchHighlights'
+import { EditorSelection } from '@codemirror/state'
 
 const props = defineProps<{ settings: EditorSettings; readOnly: boolean }>()
 const emit = defineEmits<{
@@ -21,6 +25,7 @@ const emit = defineEmits<{
   searchStatus: [status: SearchStatus]
   searchNavigate: [action: SearchAction]
   searchScope: [scope: SearchScopeStatus]
+  documentState: [revision: number, head: number]
 }>()
 
 const host = ref<HTMLElement | null>(null)
@@ -31,6 +36,7 @@ let view: EditorView | undefined
 let statistics: StatisticsController | undefined
 let searchConditions = createSearchConditions()
 let searchActive = false
+let documentRevision = 0
 const wrapping = new Compartment()
 const readOnlySetting = new Compartment()
 const whitespace = new Compartment()
@@ -68,6 +74,7 @@ function createState(text: string): EditorState {
       readOnlySetting.of(EditorState.readOnly.of(props.readOnly)),
       EditorView.contentAttributes.of({ 'aria-label': '小説の本文' }),
       history(),
+      sidebarSearchHighlights,
       createSearchExtensions((action) => emit('searchNavigate', action)),
       keymap.of([...defaultKeymap, ...historyKeymap]),
       wrapping.of(props.settings.wrapMode === 'none' ? [] : EditorView.lineWrapping),
@@ -75,10 +82,11 @@ function createState(text: string): EditorState {
       lineNumberDisplay.of(props.settings.showLineNumbers ? lineNumbers() : []),
       // 文書変更時だけ親へ通知し、選択範囲の移動などでは未保存判定を更新しない。
       EditorView.updateListener.of((update) => {
-        if (update.docChanged) reportChange()
+        if (update.docChanged) { documentRevision += 1; reportChange() }
         else if (update.selectionSet) statistics?.updateSelection(getSelectionStatisticsInput())
         if (update.docChanged || !getSearchQuery(update.startState).eq(getSearchQuery(update.state))) reportSearchStatus()
         if (update.docChanged || update.selectionSet) emit('searchScope', getSearchScope())
+        if (update.docChanged || update.selectionSet) emit('documentState', documentRevision, update.state.selection.main.head)
       }),
       editorTheme,
     ],
@@ -139,6 +147,7 @@ function getText(): string {
 
 /** 本文を切り替え、変更を親へ通知する。元の改行形式は親が保存用に保持する。 */
 function setDocument(text: string): void {
+  documentRevision += 1
   lineNavigationOpen.value = false
   // 文書の切り替え時に状態ごと作り直し、前の文書の Undo 履歴を持ち越さない。
   view?.setState(createState(text))
@@ -146,11 +155,32 @@ function setDocument(text: string): void {
   reportChange(true)
   reportSearchStatus()
   emit('searchScope', getSearchScope())
+  emit('documentState', documentRevision, view?.state.selection.main.head ?? 0)
+}
+
+/** 解析時点の本文と範囲を渡す。長期的な本文の保管はCodeMirrorに残す。 */
+function getDocumentSnapshot(): DocumentSnapshot {
+  return { revision: documentRevision, text: getText(), head: view?.state.selection.main.head ?? 0, scope: view ? getEditorSearchRange(view) : null }
+}
+
+/** 古い本文への移動を拒否し、選択とスクロールだけを変更する。 */
+function revealRange(target: DocumentNavigation): boolean {
+  if (!view || props.readOnly || target.revision !== documentRevision || !Number.isInteger(target.from) || !Number.isInteger(target.to)
+    || target.from < 0 || target.to < target.from || target.to > view.state.doc.length) return false
+  view.dispatch({ selection: EditorSelection.range(target.from, target.to), effects: EditorView.scrollIntoView(target.from, { y: 'center' }), userEvent: 'select' })
+  view.focus(); return true
 }
 
 /** 本文の CodeMirror ビューへ入力フォーカスを移す。 */
 function focus(): void {
   view?.focus()
+}
+
+/** Workerで確定した一致だけを描画する。世代と範囲を検証し、本文とUndoには触れない。 */
+function setSidebarMatches(revision: number, ranges: { from: number; to: number }[]): void {
+  if (!view || revision !== documentRevision) return
+  if (ranges.some(range => range.from < 0 || range.to < range.from || range.to > view!.state.doc.length)) return
+  view.dispatch({ effects: sidebarMatches.of(ranges) })
 }
 
 /** 現在位置を初期値として行移動画面を開く。文書操作中は開かない。 */
@@ -194,6 +224,7 @@ function getSearchScope(): SearchScopeStatus {
 function setSearchScope(action: SearchScopeAction): boolean {
   if (!view || props.readOnly) return false
   const updated = updateEditorSearchScope(view, action)
+  if (updated) { documentRevision++; emit('documentState', documentRevision, view.state.selection.main.head) }
   emit('searchScope', getSearchScope())
   reportSearchStatus()
   return updated
@@ -205,7 +236,7 @@ function reportSearchStatus(): void {
 }
 
 // 親は本文を複製保持せず、保存時に公開したメソッドから CodeMirror の現在値を読む。
-defineExpose({ getText, setDocument, focus, setSearch, runSearch, getSearchScope, setSearchScope, openLineNavigation })
+defineExpose({ getText, setDocument, focus, setSearch, runSearch, getSearchScope, setSearchScope, openLineNavigation, getDocumentSnapshot, revealRange, setSidebarMatches })
 
 // Vue の要素確定後に CodeMirror を配置し、初期文字数を親へ通知する。
 onMounted(() => {

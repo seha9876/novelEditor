@@ -34,6 +34,6 @@ export function sameRecentFilePath(left: string, right: string): boolean {
 }
 
 /** 通常のドライブパスとUNCパスを、比較専用の表記に揃える。 */
-function comparablePath(path: string): string {
+export function comparablePath(path: string): string {
   return path.replace(/\//g, '\\').replace(/^\\\\\?\\UNC\\/i, '\\\\').replace(/^\\\\\?\\/, '').toLowerCase()
 }

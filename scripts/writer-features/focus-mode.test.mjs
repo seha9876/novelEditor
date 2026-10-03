@@ -83,8 +83,8 @@ test('集中モードはツリーのマウントを維持し、保存設定と�
   const bar = readFileSync(resolve(projectRoot, 'src/MainAppBar.vue'), 'utf8')
   const styles = readFileSync(resolve(projectRoot, 'src/styles/project-tree.css'), 'utf8')
   const drawer = app.match(/<VNavigationDrawer[\s\S]*?>/)[0]
-  assert.match(drawer, /v-if="!projectTreeDetached"/)
-  assert.match(drawer, /:class="\{ 'is-focus-hidden': focusMode \}"/)
+  assert.doesNotMatch(drawer, /v-if/)
+  assert.match(drawer, /'is-focus-hidden': focusMode/)
   assert.match(styles, /\.project-navigation\.is-focus-hidden \{ display: none !important; \}/)
   assert.match(drawer, /:model-value="!focusMode"/)
   assert.match(bar, /:extended="props.toolbarVisible && !props.focusMode"/)

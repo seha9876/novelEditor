@@ -1,3 +1,4 @@
+import { cloneOutline, normalizeOutline, type OutlinePreferences } from './outline'
 /** 設定値の適用と表示メトリクスをまとめ、保存・履歴・設定子窓へ橋渡しする。 */
 import { computed, ref } from 'vue'
 import { applyAppearanceAction, cloneAppearance, createDefaultAppearance, findColorPreset, type AppearancePreferences, type Palette } from './appearance'
@@ -43,6 +44,7 @@ export type SettingsControllerOptions = {
 
 /** 設定値を正規化し、設定ウィンドウと永続Storeの間を接続する。 */
 export function useSettingsController(options: SettingsControllerOptions) {
+  const outline = ref(normalizeOutline(options.initialPreferences.outline))
   const appearance = ref(cloneAppearance(options.initialPreferences.ui.appearance))
   let appearanceFileBusy = false
   let colorInteractionId: string | undefined
@@ -77,6 +79,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
   /** 現在の設定値を履歴・保存用スナップショットへ複製する。 */
   function cloneCurrentSettings(): SettingsValues {
     return cloneSettingsValues({
+      outline: outline.value,
       appearance: appearance.value,
       editor: editorSettings.value,
       toolbar: toolbarPreferences.value,
@@ -90,6 +93,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
   /** 設定子窓へ配信する値を、保存対象と同じく参照独立な形で作る。 */
   function createSettingsSnapshot(): Omit<SettingsSnapshot, 'revision'> {
     return {
+      outline: cloneOutline(outline.value),
       appearance: cloneAppearance(appearance.value),
       appearanceFileBusy,
       editor: { ...editorSettings.value },
@@ -122,6 +126,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
     appearance.value = cloneAppearance(snapshot.appearance)
     colorInteractionId = undefined
     options.onAppearanceChanged?.(appearance.value.colors)
+    outline.value = cloneOutline(snapshot.outline)
     editorSettings.value = { ...snapshot.editor }
     toolbarPreferences.value = cloneToolbarPreferences(snapshot.toolbar)
     statusBarPreferences.value = normalizeStatusBarPreferences(snapshot.statusBar)
@@ -144,7 +149,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
   const settingsPersistence = useSettingsPersistence<SettingsValues>({
     clone: cloneSettingsValues,
     getSnapshot: cloneCurrentSettings,
-    save: (snapshot) => saveSettingsPreferences(snapshot.editor, snapshot.toolbar, snapshot.barSizes, snapshot.statusBar, snapshot.appearance),
+    save: (snapshot) => saveSettingsPreferences(snapshot.editor, snapshot.toolbar, snapshot.barSizes, snapshot.statusBar, snapshot.appearance, snapshot.outline),
     applyRollback: applySettingsRollback,
     notifyRollback: notifySettingsRollback,
     notifyUnexpectedError: notifyUnexpectedSettingsSaveError,
@@ -161,6 +166,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
     statusBarPatch?: Partial<StatusBarPreferences>,
     nextAppearance: AppearancePreferences = appearance.value,
     interactionId?: string,
+    nextOutline: OutlinePreferences = outline.value,
   ): void {
     const nextEditor = normalizeEditorSettings({ ...editorSettings.value, ...editorPatch })
     const nextToolbar = {
@@ -172,7 +178,8 @@ export function useSettingsController(options: SettingsControllerOptions) {
     }
     const nextBarSizes = normalizeInterfaceBarSizes({ ...barSizes.value, ...barSizesPatch })
     const nextStatusBar = normalizeStatusBarPreferences({ ...statusBarPreferences.value, ...statusBarPatch })
-    const hasChanged = JSON.stringify(nextEditor) !== JSON.stringify(editorSettings.value) ||
+    const hasChanged = JSON.stringify(nextOutline) !== JSON.stringify(outline.value) ||
+      JSON.stringify(nextEditor) !== JSON.stringify(editorSettings.value) ||
       JSON.stringify(nextAppearance) !== JSON.stringify(appearance.value) ||
       JSON.stringify(nextToolbar) !== JSON.stringify(toolbarPreferences.value) ||
       JSON.stringify(nextBarSizes) !== JSON.stringify(barSizes.value) ||
@@ -185,6 +192,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
     if (recordHistory && (!interactionId || interactionId !== colorInteractionId)) settingsHistory.push(cloneCurrentSettings())
     colorInteractionId = interactionId
     const colorsChanged = JSON.stringify(nextAppearance.colors) !== JSON.stringify(appearance.value.colors)
+    outline.value = cloneOutline(nextOutline)
     appearance.value = cloneAppearance(nextAppearance)
     if (colorsChanged) options.onAppearanceChanged?.(appearance.value.colors)
     editorSettings.value = nextEditor
@@ -210,7 +218,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
     colorInteractionId = undefined
     const previous = settingsHistory.undo(cloneCurrentSettings())
     if (!previous) return
-    updateCurrentSettings(previous.editor, previous.toolbar, false, false, previous.barSizes, previous.statusBar, previous.appearance)
+    updateCurrentSettings(previous.editor, previous.toolbar, false, false, previous.barSizes, previous.statusBar, previous.appearance, undefined, previous.outline)
     void publishSettingsState()
   }
 
@@ -219,7 +227,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
     colorInteractionId = undefined
     const next = settingsHistory.redo(cloneCurrentSettings())
     if (!next) return
-    updateCurrentSettings(next.editor, next.toolbar, false, false, next.barSizes, next.statusBar, next.appearance)
+    updateCurrentSettings(next.editor, next.toolbar, false, false, next.barSizes, next.statusBar, next.appearance, undefined, next.outline)
     void publishSettingsState()
   }
 
@@ -244,10 +252,11 @@ export function useSettingsController(options: SettingsControllerOptions) {
       } else if (command.type === 'redo') {
         redoSettingsChange()
       } else if (command.type === 'change') {
+        if (command.outline && normalizeOutline(command.outline).rules.length !== command.outline.rules.length) throw new Error('見出しルールを保存できません。入力を見直してください。')
         const nextAppearance = command.resetAppearance
           ? { ...createDefaultAppearance(), presets: cloneAppearance(appearance.value).presets }
           : appearance.value
-        updateCurrentSettings(command.editor, command.toolbar, command.flush ?? false, true, command.barSizes, command.statusBar, nextAppearance)
+        updateCurrentSettings(command.editor, command.toolbar, command.flush ?? false, true, command.barSizes, command.statusBar, nextAppearance, undefined, command.outline ? normalizeOutline(command.outline) : outline.value)
       } else if (command.type === 'appearance') {
         const next = applyAppearanceAction(appearance.value, command.action)
         updateCurrentSettings(undefined, undefined, command.action.type !== 'color', true, undefined, undefined, next,
@@ -348,6 +357,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
   }
 
   return {
+    outline,
     appearance,
     editorSettings,
     displayedToolbarItems,

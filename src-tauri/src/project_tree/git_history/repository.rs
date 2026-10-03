@@ -1,4 +1,5 @@
 //! Git の処理を引数配列で実行する。原稿の作業ツリーは記録時にも書き換えない。
+use super::{Failure, FailureKind};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -20,10 +21,10 @@ pub struct Status {
     pub head: String,
     pub changes: Vec<Change>,
     pub token: String,
-    pub blocked: Option<String>,
+    pub blocked: Option<RecordBlock>,
     pub author_name: String,
     pub author_email: String,
-    pub backup_state: String,
+    pub backup_state: BackupState,
 }
 #[derive(Debug, Serialize)]
 pub struct Entry {
@@ -31,6 +32,66 @@ pub struct Entry {
     pub date: String,
     pub author: String,
     pub message: String,
+}
+
+/// 表示文言ではなく判定結果を渡し、確認不能を未送信と混同させない。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum BackupState {
+    NotSet,
+    NoHistory,
+    Current,
+    Different,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum RecordBlock {
+    Detached,
+    Busy,
+    StagedOrConflict,
+}
+impl RecordBlock {
+    /// 記録を止める理由と、既存のGit状態を保つための対処を説明する。
+    fn message(&self) -> &'static str {
+        match self {
+            Self::Detached => "記録先が選択されていません。既存のGitツールでブランチへ戻してから再確認してください",
+            Self::Busy => "別の履歴処理が進行中です。完了してから再確認してください",
+            Self::StagedOrConflict => "別のツールで記録を準備中、または変更が競合しています。既存のGitツールで処理を完了してから再確認してください",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct BackupBranch {
+    pub name: String,
+    pub id: String,
+    pub date: String,
+    pub message: String,
+}
+
+/// 初回記録前だけ空のHEADを認め、それ以外の読込失敗を空履歴として扱わない。
+fn current_head(root: &Path) -> Result<String, String> {
+    let output = command(root, None)?
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if output.status.success() {
+        return String::from_utf8(output.stdout)
+            .map(|s| s.trim().to_string())
+            .map_err(|e| e.to_string());
+    }
+    if let Ok(reference) = line(root, &["symbolic-ref", "--quiet", "HEAD"]) {
+        let check = command(root, None)?
+            .args(["show-ref", "--verify", "--quiet", &reference])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if check.status.code() == Some(1) {
+            return Ok(String::new());
+        }
+    }
+    checked(output).map(|_| String::new())
 }
 
 /// Windows の表示用パスから拡張長接頭辞を除き、Git にも同じ絶対パスを渡す。
@@ -45,6 +106,15 @@ pub fn display(path: &Path) -> String {
 
 /// 環境の Git 指定を除去し、シェルや対話を使わず、窓を出さずに実行する。
 fn command(root: &Path, index: Option<&Path>) -> Result<Command, String> {
+    command_with_pathspec(root, index, true)
+}
+
+/// 検証済みの読み取りにだけパス指定の拡張を許し、記録操作は常にリテラルに限定する。
+fn command_with_pathspec(
+    root: &Path,
+    index: Option<&Path>,
+    literal: bool,
+) -> Result<Command, String> {
     // 管理フォルダー内の同名exeを起動しないよう、PATHの絶対ディレクトリから解決する。
     let executable_name = if cfg!(windows) { "git.exe" } else { "git" };
     let executable = std::env::var_os("PATH")
@@ -67,7 +137,11 @@ fn command(root: &Path, index: Option<&Path>) -> Result<Command, String> {
         .current_dir(root)
         .args([
             "--no-pager",
-            "--literal-pathspecs",
+            if literal {
+                "--literal-pathspecs"
+            } else {
+                "--no-literal-pathspecs"
+            },
             "-c",
             "core.quotepath=false",
             "-c",
@@ -204,7 +278,7 @@ pub fn status(root: &Path, backup: Option<&Path>) -> Result<Status, String> {
         return Err("登録した管理ルートが変わっています。登録し直してください".into());
     }
     let branch = line(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).unwrap_or_default();
-    let head = line(root, &["rev-parse", "--verify", "HEAD"]).unwrap_or_default();
+    let head = current_head(root)?;
     let raw = git(
         root,
         &[
@@ -221,7 +295,7 @@ pub fn status(root: &Path, backup: Option<&Path>) -> Result<Status, String> {
     hash.update(&branch);
     hash.update(fs::read(git_path(root, "index")?).unwrap_or_default());
     let mut blocked = if branch.is_empty() {
-        Some("ブランチが選択されていません。Git ツールでブランチへ戻してください".into())
+        Some(RecordBlock::Detached)
     } else {
         None
     };
@@ -236,7 +310,7 @@ pub fn status(root: &Path, backup: Option<&Path>) -> Result<Status, String> {
         "index.lock",
     ] {
         if git_path(root, name)?.exists() {
-            blocked = Some("Git の別の処理が進行中です。完了してから更新してください".into());
+            blocked = Some(RecordBlock::Busy);
         }
     }
     let mut changes = Vec::new();
@@ -246,9 +320,7 @@ pub fn status(root: &Path, backup: Option<&Path>) -> Result<Status, String> {
             return Err("Git の状態出力を解釈できません".into());
         }
         if bytes[0] != b' ' && bytes[0] != b'?' {
-            blocked = Some(
-                "コミット準備中の変更または競合があります。Git ツールで解決してください".into(),
-            );
+            blocked = Some(RecordBlock::StagedOrConflict);
         }
         let relative = &row[3..];
         if let Ok(path) = text_path(root, relative) {
@@ -274,12 +346,12 @@ pub fn status(root: &Path, backup: Option<&Path>) -> Result<Status, String> {
     let author_name = line(root, &["config", "--get", "user.name"]).unwrap_or_default();
     let author_email = line(root, &["config", "--get", "user.email"]).unwrap_or_default();
     let backup_state = match backup {
-        None => "未設定".into(),
+        None => BackupState::NotSet,
         Some(path) => match remote_head(root, path, &branch) {
-            Ok(remote) if !head.is_empty() && remote == head => "バックアップ済み".into(),
-            Ok(_) if head.is_empty() => "記録がありません".into(),
-            Ok(_) => "未バックアップの記録があります".into(),
-            Err(_) => "バックアップ先を確認できません".into(),
+            Ok(remote) if !head.is_empty() && remote == head => BackupState::Current,
+            Ok(_) if head.is_empty() => BackupState::NoHistory,
+            Ok(_) => BackupState::Different,
+            Err(_) => BackupState::Unknown,
         },
     };
     Ok(Status {
@@ -320,10 +392,10 @@ pub fn record(
     message: &str,
     name: &str,
     email: &str,
-) -> Result<String, String> {
+) -> Result<String, Failure> {
     let before = status(root, None)?;
     if let Some(reason) = before.blocked {
-        return Err(reason);
+        return Err(reason.message().into());
     }
     if before.token != token {
         return Err("確認後に変更がありました。一覧を更新して選び直してください".into());
@@ -453,7 +525,15 @@ pub fn record(
         ],
     )?;
     guard.preserve_lock = true;
-    fs::rename(&guard.lock, &index).map_err(|e| format!("履歴 {id} は記録済みですがインデックスの確定に失敗しました。index.lock を保持しました。Git の状態を確認してください: {e}"))?;
+    fs::rename(&guard.lock, &index).map_err(|e| {
+        Failure::partial(
+            FailureKind::RecordedNeedsAttention,
+            format!(
+                "履歴 {id} は記録済みですが後処理に失敗しました。index.lock を保持しました: {e}"
+            ),
+            id.clone(),
+        )
+    })?;
     guard.preserve_lock = false;
     Ok(id)
 }
@@ -472,7 +552,7 @@ fn validate_id(root: &Path, id: &str) -> Result<(), String> {
 
 /// 現在のブランチから到達可能な履歴を50件ずつ返す。
 pub fn history(root: &Path, offset: u32) -> Result<Vec<Entry>, String> {
-    if line(root, &["rev-parse", "--verify", "HEAD"]).is_err() {
+    if current_head(root)?.is_empty() {
         return Ok(vec![]);
     }
     let bytes = git(
@@ -487,6 +567,11 @@ pub fn history(root: &Path, offset: u32) -> Result<Vec<Entry>, String> {
             "--",
         ],
     )?;
+    parse_entries(bytes)
+}
+
+/// 共通の履歴形式を解釈し、破損した結果を空履歴に変えない。
+fn parse_entries(bytes: Vec<u8>) -> Result<Vec<Entry>, String> {
     let text = String::from_utf8(bytes).map_err(|_| "履歴の文字コードを解釈できません")?;
     let rows: Vec<&str> = text
         .strip_suffix('\0')
@@ -611,21 +696,37 @@ pub fn backup(root: &Path, target: &Path, token: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// バックアップに実在するブランチ名だけを復元候補にする。
-pub fn branches(target: &Path) -> Result<Vec<String>, String> {
+/// 実在するブランチと最新記録を返し、専門用語を知らなくても復元候補を区別できるようにする。
+pub fn branches(target: &Path) -> Result<Vec<BackupBranch>, String> {
     validate_bare(target)?;
-    Ok(line(
+    let output = line(
         target,
-        &["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
-    )?
-    .lines()
-    .map(str::to_string)
-    .collect())
+        &[
+            "for-each-ref",
+            "--format=%(refname:strip=2)%00%(objectname)%00%(authordate:iso-strict)%00%(subject)",
+            "refs/heads/",
+        ],
+    )?;
+    output
+        .lines()
+        .map(|row| {
+            let fields: Vec<_> = row.split('\0').collect();
+            if fields.len() != 4 {
+                return Err("復元候補を解釈できません".into());
+            }
+            Ok(BackupBranch {
+                name: fields[0].into(),
+                id: fields[1].into(),
+                date: fields[2].into(),
+                message: fields[3].into(),
+            })
+        })
+        .collect()
 }
 
 /// バックアップから新規フォルダーに独立複製する。失敗時も既存データは削除しない。
-pub fn restore(source: &Path, destination: &Path, branch: &str) -> Result<PathBuf, String> {
-    if !branches(source)?.iter().any(|s| s == branch) {
+pub fn restore(source: &Path, destination: &Path, branch: &str) -> Result<PathBuf, Failure> {
+    if !branches(source)?.iter().any(|s| s.name == branch) {
         return Err("復元するブランチを選んでください".into());
     }
     if destination.exists() {
@@ -649,6 +750,115 @@ pub fn restore(source: &Path, destination: &Path, branch: &str) -> Result<PathBu
             &display(source),
             &display(destination),
         ],
-    )?;
+    )
+    .map_err(|e| Failure::partial(FailureKind::OutputIncomplete, e, display(destination)))?;
     root(destination)
+        .map_err(|e| Failure::partial(FailureKind::OutputIncomplete, e, display(destination)))
+}
+
+/// 一件の原稿の過去状態。削除された時点は本文のない記録として区別する。
+#[derive(Debug, Serialize)]
+pub struct FileEntry {
+    #[serde(flatten)]
+    pub entry: Entry,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileHistoryPage {
+    pub head: String,
+    pub branch: String,
+    pub entries: Vec<FileEntry>,
+    pub has_more: bool,
+}
+
+/// 現在のパスに変更があった記録だけを返す。改名の追跡や書込は行わない。
+pub fn file_history(
+    root: &Path,
+    relative: &str,
+    offset: u32,
+    expected_head: &str,
+) -> Result<FileHistoryPage, String> {
+    text_path(root, relative)?;
+    let head = current_head(root)?;
+    if !expected_head.is_empty() && head != expected_head {
+        return Err("履歴の基準が変わりました。再確認してください".into());
+    }
+    let branch = line(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).unwrap_or_default();
+    if head.is_empty() {
+        return Ok(FileHistoryPage {
+            head,
+            branch,
+            entries: vec![],
+            has_more: false,
+        });
+    }
+    validate_id(root, &head)?;
+    let spec = format!(
+        "{}{}",
+        if cfg!(windows) {
+            ":(literal,icase)"
+        } else {
+            ":(literal)"
+        },
+        relative
+    );
+    let bytes = checked(
+        command_with_pathspec(root, None, false)?
+            .args([
+                "log",
+                "-z",
+                "--full-history",
+                "--no-renames",
+                "--max-count=51",
+                &format!("--skip={offset}"),
+                "--format=%H%x00%aI%x00%an%x00%s",
+                &head,
+                "--",
+                &spec,
+            ])
+            .output()
+            .map_err(|e| e.to_string())?,
+    )?;
+    let mut records = parse_entries(bytes)?;
+    let has_more = records.len() > 50;
+    records.truncate(50);
+    let mut entries = Vec::new();
+    for entry in records {
+        let rows = nul_strings(&git(root, &["ls-tree", "-r", "-z", &entry.id])?)?;
+        let mut paths = Vec::new();
+        for row in rows {
+            if let Some((meta, path)) = row.split_once('\t') {
+                let matches = if cfg!(windows) {
+                    path.to_lowercase() == relative.to_lowercase()
+                } else {
+                    path == relative
+                };
+                if matches && (meta.starts_with("100644 blob ") || meta.starts_with("100755 blob "))
+                {
+                    text_path(root, path)?;
+                    paths.push(path.to_string());
+                }
+            }
+        }
+        if paths.len() > 1 {
+            return Err(
+                "大文字小文字だけが異なる原稿を区別できません。管理画面で確認してください".into(),
+            );
+        }
+        entries.push(FileEntry {
+            entry,
+            path: paths.pop(),
+        });
+    }
+    if current_head(root)? != head {
+        return Err("履歴の確認中に記録が変わりました。再確認してください".into());
+    }
+    Ok(FileHistoryPage {
+        head,
+        branch,
+        entries,
+        has_more,
+    })
 }

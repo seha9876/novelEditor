@@ -22,6 +22,11 @@ export type CommandId =
   | 'window.close'
   | 'toolbar.typography.fontSizeAdjust'
   | 'toolbar.typography.lineHeight'
+  | 'view.sidebar.toggle'
+  | 'view.sidebar.project'
+  | 'view.sidebar.search'
+  | 'view.sidebar.history'
+  | 'view.sidebar.outline'
   | 'view.toolbar.toggle'
   | 'view.whitespace.toggle'
   | 'view.lineNumbers.toggle'
@@ -68,6 +73,11 @@ export const appCommandDefinitions: readonly AppCommandDefinition[] = [
   { id: 'window.close', label: '閉じる', icon: 'mdi-window-close', toolbarEligible: true },
   { id: 'toolbar.typography.fontSizeAdjust', label: '文字サイズを1px変更', icon: 'mdi-plus-minus-variant', toolbarEligible: true },
   { id: 'toolbar.typography.lineHeight', label: '行間', icon: 'mdi-format-line-spacing', toolbarEligible: true },
+  { id: 'view.sidebar.toggle', label: 'サイドバーを開閉', icon: 'mdi-dock-left', toolbarEligible: false },
+  { id: 'view.sidebar.project', label: 'プロジェクトパネル', icon: 'mdi-folder-outline', toolbarEligible: false },
+  { id: 'view.sidebar.search', label: '検索パネル', icon: 'mdi-magnify', toolbarEligible: false },
+  { id: 'view.sidebar.history', label: '履歴パネル', icon: 'mdi-history', toolbarEligible: false },
+  { id: 'view.sidebar.outline', label: 'アウトラインパネル', icon: 'mdi-format-list-bulleted', toolbarEligible: false },
   { id: 'view.toolbar.toggle', label: 'ツールバーを表示', icon: 'mdi-toolbar', toolbarEligible: false },
   { id: 'view.whitespace.toggle', label: '空白・タブを表示', icon: 'mdi-format-pilcrow', toolbarEligible: true },
   { id: 'view.lineNumbers.toggle', label: '行番号を表示', icon: 'mdi-format-list-numbered', toolbarEligible: true },

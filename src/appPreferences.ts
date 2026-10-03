@@ -1,3 +1,5 @@
+import { normalizeOutline, type OutlinePreferences } from './outline'
+import type { SidebarPreferences } from './sidebarModel'
 /** エディター設定・画面構成・配色プリセットをStoreへ永続化する。 */
 import { load, type Store } from '@tauri-apps/plugin-store'
 import { normalizeAppearance, type AppearancePreferences } from './appearance'
@@ -137,10 +139,12 @@ export function saveSettingsPreferences(
   barSizes: InterfaceBarSizes,
   statusBar?: StatusBarPreferences,
   appearance?: AppearancePreferences,
+  outline?: OutlinePreferences,
 ): Promise<void> {
   return savePreferenceUpdate((current) => ({
     ...current,
     editor: normalizeEditorSettings(editor),
+    outline: outline ? normalizeOutline(outline) : current.outline,
     ui: {
       ...current.ui,
       appearance: appearance ? normalizeAppearance(appearance) : current.ui.appearance,
@@ -197,4 +201,9 @@ function savePreferenceUpdate(update: (current: ApplicationPreferencesV1) => App
     }
   })
   return pendingSave
+}
+
+/** サイドバーと分離状態を同時に部分保存し、設定画面の保存と競合させない。 */
+export function saveSidebarPreferences(sidebar: SidebarPreferences, detached: boolean): Promise<void> {
+  return savePreferenceUpdate(current => ({ ...current, ui: { ...current.ui, sidebar: { ...sidebar }, projectTree: { ...current.ui.projectTree, detached } } }))
 }

@@ -1,3 +1,5 @@
+import { createDefaultOutline, normalizeOutline, cloneOutline, type OutlinePreferences } from './outline'
+import { normalizeSidebar, type SidebarPreferences } from './sidebarModel'
 /** アプリ設定の保存形式、既定値、検証・複製処理をまとめる。 */
 import type { CommandId } from './appCommands'
 import { cloneAppearance, createDefaultAppearance, normalizeAppearance, type AppearancePreferences } from './appearance'
@@ -98,11 +100,13 @@ export type ProjectTreePreferences = {
 export type ApplicationPreferencesV1 = {
   schemaVersion: 1
   editor: EditorSettings
+  outline: OutlinePreferences
   ui: {
     appearance: AppearancePreferences
     toolbar: ToolbarPreferences
     statusBar: StatusBarPreferences
     barSizes: InterfaceBarSizes
+    sidebar: SidebarPreferences
     projectTree: ProjectTreePreferences
   }
 }
@@ -112,6 +116,7 @@ export function createDefaultApplicationPreferences(): ApplicationPreferencesV1 
   return {
     schemaVersion: 1,
     editor: { ...defaultEditorSettings },
+    outline: createDefaultOutline(),
     ui: {
       appearance: createDefaultAppearance(),
       toolbar: {
@@ -120,6 +125,7 @@ export function createDefaultApplicationPreferences(): ApplicationPreferencesV1 
       },
       statusBar: createDefaultStatusBarPreferences(),
       barSizes: createDefaultInterfaceBarSizes(),
+      sidebar: { width: defaultProjectTreeWidth, collapsed: false, activePanel: 'project' },
       projectTree: { width: defaultProjectTreeWidth, detached: false, collapsed: false },
     },
   }
@@ -280,6 +286,7 @@ export function normalizeApplicationPreferences(value: unknown): ApplicationPref
   return {
     schemaVersion: 1,
     editor: normalizeEditorSettings(raw.editor),
+    outline: normalizeOutline(raw.outline),
     ui: {
       appearance: normalizeAppearance(rawUi.appearance),
       toolbar: {
@@ -288,6 +295,7 @@ export function normalizeApplicationPreferences(value: unknown): ApplicationPref
       },
       statusBar: normalizeStatusBarPreferences(rawStatusBar),
       barSizes: normalizeInterfaceBarSizes(rawBarSizes),
+      sidebar: normalizeSidebar(rawUi.sidebar, { width: Math.max(220, Math.min(480, projectTreeWidth)), collapsed: typeof rawProjectTree.collapsed === 'boolean' ? rawProjectTree.collapsed : false }),
       projectTree: {
         width: Math.max(220, Math.min(480, projectTreeWidth)),
         detached: typeof rawProjectTree.detached === 'boolean' ? rawProjectTree.detached : false,
@@ -302,6 +310,7 @@ export function cloneApplicationPreferences(value: ApplicationPreferencesV1): Ap
   return {
     schemaVersion: 1,
     editor: { ...value.editor },
+    outline: cloneOutline(value.outline),
     ui: {
       appearance: cloneAppearance(value.ui.appearance),
       toolbar: {
@@ -310,6 +319,7 @@ export function cloneApplicationPreferences(value: ApplicationPreferencesV1): Ap
       },
       statusBar: cloneStatusBarPreferences(value.ui.statusBar),
       barSizes: cloneInterfaceBarSizes(value.ui.barSizes),
+      sidebar: { ...value.ui.sidebar },
       projectTree: { ...value.ui.projectTree },
     },
   }

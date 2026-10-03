@@ -19,6 +19,50 @@ use tauri_plugin_fs::FsExt;
 
 static OPERATION: Mutex<()> = Mutex::new(());
 
+/// 操作の途中まで完了した状態を、通常の失敗と混同せず画面へ伝える。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FailureKind {
+    Unknown,
+    RecordedNeedsAttention,
+    OutputIncomplete,
+    RestoredRegistrationFailed,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Failure {
+    pub kind: FailureKind,
+    pub details: String,
+    pub output: Option<String>,
+}
+impl Failure {
+    /// 作成済みの記録や出力先を残し、再実行前に確認できる情報を渡す。
+    fn partial(kind: FailureKind, details: String, output: String) -> Self {
+        Self {
+            kind,
+            details,
+            output: Some(output),
+        }
+    }
+}
+impl From<String> for Failure {
+    /// 分類できない失敗の元情報を省略せず保持する。
+    fn from(details: String) -> Self {
+        Self {
+            kind: FailureKind::Unknown,
+            details,
+            output: None,
+        }
+    }
+}
+impl From<&str> for Failure {
+    /// 固定の検証エラーも同じ通信形式へ揃える。
+    fn from(details: &str) -> Self {
+        details.to_string().into()
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Workspace {
@@ -61,6 +105,12 @@ pub enum Request {
     History {
         id: i64,
         offset: u32,
+    },
+    FileHistory {
+        id: i64,
+        path: String,
+        offset: u32,
+        head: String,
     },
     Files {
         id: i64,
@@ -181,7 +231,7 @@ fn register(connection: &Connection, root: &Path) -> Result<(), String> {
 }
 
 /// 履歴から取り出す TXT は排他的に新規作成し、既存の原稿には上書きしない。
-fn export(window: &Window, destination: &str, bytes: &[u8]) -> Result<(), String> {
+fn export(window: &Window, destination: &str, bytes: &[u8]) -> Result<(), Failure> {
     let path = Path::new(destination);
     if !path.is_absolute()
         || !window.fs_scope().is_allowed(path)
@@ -199,7 +249,7 @@ fn export(window: &Window, destination: &str, bytes: &[u8]) -> Result<(), String
 }
 
 /// 取り出しの作成競合を排他的な作成で検出し、既存ファイルを開いて切り詰めない。
-fn write_new(target: &Path, bytes: &[u8]) -> Result<(), String> {
+fn write_new(target: &Path, bytes: &[u8]) -> Result<(), Failure> {
     let mut file = fs::OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -210,9 +260,8 @@ fn write_new(target: &Path, bytes: &[u8]) -> Result<(), String> {
     file.write_all(bytes)
         .and_then(|_| file.sync_all())
         .map_err(|e| {
-            format!(
-                "取り出しに失敗しました。出力先に不完全なファイルが残っている可能性があります: {e}"
-            )
+            Failure::partial(FailureKind::OutputIncomplete,
+                format!("取り出しに失敗しました。出力先に不完全なファイルが残っている可能性があります: {e}"), display(target))
         })
 }
 
@@ -223,7 +272,7 @@ fn state(workspace: &Workspace) -> Result<Status, String> {
 }
 
 /// 許可済みの操作だけを振り分ける。記録・送信・復元の終了まで直列化を保つ。
-fn execute(window: &Window, request: Request) -> Result<Value, String> {
+fn execute(window: &Window, request: Request) -> Result<Value, Failure> {
     match request {
         Request::List => {
             let version = repository::git(&std::env::temp_dir(), &["--version"]);
@@ -291,6 +340,17 @@ fn execute(window: &Window, request: Request) -> Result<Value, String> {
             Path::new(&workspace(window, id)?.root),
             offset
         )?)),
+        Request::FileHistory {
+            id,
+            path,
+            offset,
+            head,
+        } => Ok(json!(repository::file_history(
+            Path::new(&workspace(window, id)?.root),
+            &path,
+            offset,
+            &head
+        )?)),
         Request::Files { id, commit } => Ok(json!(repository::files(
             Path::new(&workspace(window, id)?.root),
             &commit
@@ -357,9 +417,10 @@ fn execute(window: &Window, request: Request) -> Result<Value, String> {
             }
             let restored = repository::restore(&source, &parent.join(name), &branch)?;
             database(window, |c| register(c, &restored)).map_err(|e| {
-                format!(
-                    "復元は完了しましたが一覧への登録に失敗しました。{} を登録してください: {e}",
-                    display(&restored)
+                Failure::partial(
+                    FailureKind::RestoredRegistrationFailed,
+                    format!("復元は完了しましたが一覧への登録に失敗しました: {e}"),
+                    display(&restored),
                 )
             })?;
             Ok(json!(display(&restored)))
@@ -369,7 +430,7 @@ fn execute(window: &Window, request: Request) -> Result<Value, String> {
 
 /// 非同期のメイン窓専用入口。ブロッキング Git 実行を UI スレッドから分離する。
 #[tauri::command]
-pub async fn git_history(window: Window, request: Request) -> Result<Value, String> {
+pub async fn git_history(window: Window, request: Request) -> Result<Value, Failure> {
     if window.label() != "main" {
         return Err("履歴はメイン画面から操作してください".into());
     }
@@ -380,5 +441,5 @@ pub async fn git_history(window: Window, request: Request) -> Result<Value, Stri
         execute(&window, request)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| Failure::from(e.to_string()))?
 }

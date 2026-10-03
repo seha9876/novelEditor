@@ -1,0 +1,29 @@
+.project-navigation .v-navigation-drawer__content { overflow: visible; }
+.sidebar-shell { display: flex; height: 100%; min-height: 0; overflow: hidden; }
+.sidebar-rail { width: 36px; flex: 0 0 36px; display: flex; flex-direction: column; border-right: 1px solid var(--app-border); background: var(--app-surface); color: var(--app-text); }
+.sidebar-rail .v-btn { width: 36px; min-width: 36px; height: 36px; border-radius: 0; }
+.sidebar-rail .v-btn[aria-pressed="true"] { background: var(--app-selected); color: var(--app-onSelected); box-shadow: inset 2px 0 var(--app-primary); }
+.sidebar-content { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--app-surface); color: var(--app-text); }
+.sidebar-header { height: 36px; flex: 0 0 36px; display: flex; justify-content: space-between; align-items: center; padding-left: 8px; font-size: .875rem; border-bottom: 1px solid var(--app-border); }
+.sidebar-panel-content { flex: 1; min-height: 0; overflow: hidden; }
+.sidebar-panel { height: 100%; overflow: auto; }
+.sidebar-panel > .project-tree-sidebar { height: 100%; }
+.sidebar-inner { padding: 10px; font-size: .875rem; overflow-wrap: anywhere; }
+.sidebar-inner > * + * { margin-top: 10px; }
+.sidebar-help, .sidebar-result small { font-size: .75rem; line-height: 1.6; color: var(--app-muted); }
+.sidebar-path { overflow-wrap: anywhere; white-space: pre-wrap; }
+.sidebar-options { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.sidebar-options .v-checkbox { flex: 1 1 140px; }
+.sidebar-search { background: var(--app-searchBackground); color: var(--app-searchText); }
+.sidebar-result { display: block; width: 100%; color: inherit; background: transparent; text-align: left; border: 0; border-bottom: 1px solid var(--app-border); padding: 8px 4px; font: inherit; overflow-wrap: anywhere; cursor: pointer; }
+.sidebar-result > * { display: block; }
+.sidebar-result:hover { background: var(--app-hover); }
+.sidebar-result[aria-selected="true"], .sidebar-result[aria-pressed="true"], .sidebar-result[aria-current="location"] { background: var(--app-selected); color: var(--app-onSelected); }
+.sidebar-result:disabled { opacity: .6; cursor: default; }
+.sidebar-result:focus-visible, .outline-expander:focus-visible { outline: 2px solid var(--app-focus); outline-offset: -2px; }
+.sidebar-result mark { background: var(--app-matchBackground); color: var(--app-matchText); }
+.sidebar-preview pre { max-height: 280px; overflow: auto; padding: 8px; white-space: pre-wrap; font: inherit; background: var(--app-editorBackground); color: var(--app-editorText); }
+.outline-row { display: flex; align-items: flex-start; }
+.outline-expander { flex: 0 0 20px; width: 20px; height: 36px; background: transparent; color: inherit; border: 0; cursor: pointer; }
+.sidebar-panel-content .git-feedback { font-size: .8125rem; }
+.project-navigation.is-collapsed .project-tree-resize-handle { width: 4px; right: -4px; }

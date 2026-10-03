@@ -1,3 +1,4 @@
+import { cloneOutline, type OutlinePreferences } from './outline'
 /** 本文・各バー・配色とプリセットを履歴用の独立した値として扱う。 */
 import {
   cloneInterfaceBarSizes,
@@ -11,6 +12,7 @@ import { cloneAppearance, type AppearancePreferences } from './appearance'
 
 export type SettingsValues = {
   appearance: AppearancePreferences
+  outline: OutlinePreferences
   editor: EditorSettings
   toolbar: ToolbarPreferences
   barSizes: InterfaceBarSizes
@@ -22,6 +24,7 @@ export function cloneSettingsValues(value: SettingsValues): SettingsValues {
   return {
     appearance: cloneAppearance(value.appearance),
     editor: { ...value.editor },
+    outline: cloneOutline(value.outline),
     toolbar: {
       visible: value.toolbar.visible,
       items: value.toolbar.items.map((item) => ({ ...item })),

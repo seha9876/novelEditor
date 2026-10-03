@@ -621,14 +621,14 @@ test('ツリー幅Layoutはドラッグ結果を実際の保存処理へ渡す',
     removeEventListener: () => {},
   }
   try {
-    const layoutModule = loadSourceModule('src/useProjectTreePaneLayout.ts', {
+    const layoutModule = loadSourceModule('src/useSidebarPaneLayout.ts', {
       './appPreferences': {
-        saveProjectTreePreferences: async (preferences) => { saved.push(preferences) },
+        saveSidebarPreferences: async (preferences, detached) => { saved.push({ ...preferences, detached }) },
       },
     })
     const detached = ref(false)
-    const layout = layoutModule.useProjectTreePaneLayout({
-      initialPreferences: { ui: { projectTree: { width: 280, detached: false } } },
+    const layout = layoutModule.useSidebarPaneLayout({
+      initialPreferences: { ui: { sidebar: { width: 280, activePanel: 'project', collapsed: false }, projectTree: { detached: false } } },
       detached,
       showPersistenceNotice: () => {},
     })
@@ -641,12 +641,12 @@ test('ツリー幅Layoutはドラッグ結果を実際の保存処理へ渡す',
       preventDefault: () => {},
       currentTarget: { setPointerCapture: () => {}, hasPointerCapture: () => false },
     }
-    layout.startProjectTreeResize(event)
-    layout.moveProjectTreeResize({ pointerId: 8, clientX: 325 })
-    layout.endProjectTreeResize({ ...event, clientX: 325 })
+    layout.startSidebarResize(event)
+    layout.moveSidebarResize({ pointerId: 8, clientX: 325 })
+    layout.endSidebarResize({ ...event, clientX: 325 })
     await layout.flush()
-    assert.equal(layout.projectTreeDisplayWidth.value, 305)
-    assert.deepEqual(saved, [{ width: 305, detached: false, collapsed: false }])
+    assert.equal(layout.sidebarDisplayWidth.value, 305)
+    assert.deepEqual(saved, [{ width: 305, detached: false, collapsed: false, activePanel: 'project' }])
     await layout.dispose()
   } finally {
     if (previousWindow === undefined) delete globalThis.window

@@ -49,6 +49,9 @@ export function getEditorSearchScope(view: EditorView): SearchScopeStatus {
   }
 }
 
+/** 結果一覧に検索範囲の実位置を渡し、行番号だけで限定境界を丸めない。 */
+export function getEditorSearchRange(view: EditorView): SearchScopeRange | null { return view.state.field(searchScope, false) ?? null }
+
 /** 現在の連続選択を固定するか限定を解除し、本文・選択・Undo履歴は変更しない。 */
 export function updateEditorSearchScope(view: EditorView, action: SearchScopeAction): boolean {
   if (view.state.readOnly || (action === 'capture' && !getEditorSearchScope(view).canCapture)) return false

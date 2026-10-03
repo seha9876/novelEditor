@@ -458,6 +458,7 @@ export function useDetachedProjectTreeWindow(options: DetachedProjectTreeWindowO
   }
 
   return {
+    dockProjectTreeWindow,
     projectTreeDetached: options.detached,
     expandedProjectTreeFolderIds,
     projectTreeUnavailableNodeIds,

@@ -667,7 +667,7 @@ test('検索候補を開くと別プロジェクトの出自を保持し、表�
     assert.equal(session.dirty.value, false)
     assert.equal(snapshot.activeProjectId, 1)
     assert.deepEqual(invocations.map(({ command }) => command), ['project_tree_snapshot', 'project_file_authorize'])
-    assert.deepEqual(treeResults, [{ requestId: request.requestId, nodeId: 20, sourceWindowId: 'quick-open' }])
+    assert.deepEqual(treeResults, [{ requestId: request.requestId, nodeId: 20, outcome: 'opened', sourceWindowId: 'quick-open' }])
   } finally {
     session.dispose()
   }

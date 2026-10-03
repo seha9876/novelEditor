@@ -1,3 +1,4 @@
+import type { OutlinePreferences } from './outline'
 import type { EditorSettings } from './editorSettings'
 import type { AppearanceAction, AppearancePreferences } from './appearance'
 import type { InterfaceBarSizes, StatusBarItemId, StatusBarPreferences, ToolbarItem, ToolbarPreferences } from './appPreferenceSchema'
@@ -7,6 +8,7 @@ import type { SettingsViewId } from './settingsDefinitions'
 export type SettingsSnapshot = {
   appearance: AppearancePreferences
   appearanceFileBusy: boolean
+  outline: OutlinePreferences
   editor: EditorSettings
   toolbar: ToolbarPreferences
   statusBar: StatusBarPreferences
@@ -29,6 +31,7 @@ export type SettingsCommand =
   | { type: 'redo' }
   | {
       type: 'change'
+      outline?: OutlinePreferences
       editor?: Partial<EditorSettings>
       toolbar?: Partial<ToolbarPreferences> & { items?: ToolbarItem[] }
       statusBar?: Partial<StatusBarPreferences> & { items?: StatusBarItemId[] }

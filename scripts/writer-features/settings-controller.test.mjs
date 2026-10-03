@@ -12,6 +12,7 @@ test('設定履歴moduleはセッション・上限・Undo/Redoを独立して�
   const { createSettingsHistory } = loadSourceModule('src/settingsHistory.ts')
   const defaults = preferences.createDefaultApplicationPreferences()
   const base = {
+    outline: defaults.outline,
     appearance: defaults.ui.appearance,
     editor: { ...defaults.editor },
     toolbar: { ...defaults.ui.toolbar, items: defaults.ui.toolbar.items.map((item) => ({ ...item })) },
@@ -232,6 +233,15 @@ test('設定Controllerは変更を履歴化し、Undo/Redoと直列保存を実�
   assert.equal(controller.interfaceBarMetrics.value.menu.height, 32)
   await controller.setup()
   commandHandler({ payload: { type: 'ready' } })
+  const outlineDefaults = JSON.parse(JSON.stringify(controller.outline.value))
+  const customOutline = globalThis.structuredClone(outlineDefaults)
+  customOutline.rules[0].level = 3
+  commandHandler({ payload: { type: 'change', outline: customOutline } })
+  assert.equal(controller.outline.value.rules[0].level, 3)
+  commandHandler({ payload: { type: 'undo' } })
+  assert.deepEqual(controller.outline.value, outlineDefaults)
+  commandHandler({ payload: { type: 'redo' } })
+  assert.equal(controller.outline.value.rules[0].level, 3)
   const originalSize = controller.editorSettings.value.fontSize
   commandHandler({ payload: { type: 'change', editor: { fontSize: originalSize + 1 } } })
   commandHandler({ payload: { type: 'undo' } })

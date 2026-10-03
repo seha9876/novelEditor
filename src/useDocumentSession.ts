@@ -1,5 +1,7 @@
 /** 本文とファイル操作をメイン画面のライフサイクルから分離し、復元処理へ橋渡しする。 */
 import { computed, ref, shallowRef, watch, type Ref } from 'vue'
+import { fingerprintBytes } from './sidebarAnalysis'
+import type { DocumentSnapshot, DocumentNavigation } from './sidebarModel'
 import { ask } from '@tauri-apps/plugin-dialog'
 import { createEmptyStatistics } from './statisticsCalculation'
 import type { EditorStatistics } from './statisticsCalculation'
@@ -22,6 +24,12 @@ import type { SearchAction, SearchConditions, SearchScopeAction, SearchScopeStat
 export type DocumentEditorHandle = {
   /** CodeMirror が保持する現在の本文を返す。 */
   getText: () => string
+  /** 解析時点の本文・選択・限定範囲を世代と一緒に返す。 */
+  getDocumentSnapshot: () => DocumentSnapshot
+  /** 世代の一致した範囲だけへ移動し、本文やUndo履歴を保持する。 */
+  revealRange: (target: DocumentNavigation) => boolean
+  /** Workerで確認済みの一致位置を強調する。本文は変更しない。 */
+  setSidebarMatches: (revision: number, ranges: { from: number; to: number }[]) => void
   /** 本文を切り替え、編集履歴を初期化する。 */
   setDocument: (text: string) => void
   /** 本文領域へ入力フォーカスを移す。 */
@@ -56,6 +64,7 @@ export function useDocumentSession(options: DocumentSessionOptions) {
   const documentOrigin = ref<DocumentOrigin | null>(null)
   const savedText = ref('')
   const dirty = ref(false)
+  const saveRevision = ref(0)
   const statistics = ref<EditorStatistics>(createEmptyStatistics())
   const busy = ref(true)
   const documentLocked = ref(true)
@@ -305,7 +314,7 @@ export function useDocumentSession(options: DocumentSessionOptions) {
   async function openProjectTreeFile(request: ProjectTreeOpenRequest, sourceWindowId?: string): Promise<void> {
     if (disposed) return
     if (busy.value || externalDialog.value || options.fileNavigationBlocked?.value || options.mainCloseInProgress.value) {
-      options.reportProjectTreeOpenResult({ requestId: request.requestId, nodeId: request.nodeId, error: '別の操作中のため、ファイルを開けませんでした。' }, sourceWindowId)
+      options.reportProjectTreeOpenResult({ requestId: request.requestId, nodeId: request.nodeId, outcome: 'failed', error: '別の操作中のため、ファイルを開けませんでした。' }, sourceWindowId)
       return
     }
     busy.value = true
@@ -335,11 +344,24 @@ export function useDocumentSession(options: DocumentSessionOptions) {
       if (request.expectedPath !== undefined && authorizedPath !== request.expectedPath) {
         throw new Error('検索候補の参照先が変更されています。もう一度検索してください。')
       }
-      const file = await loadTextFile(authorizedPath)
+      let file = await loadTextFile(authorizedPath)
+      if (request.searchFingerprint && await fingerprintBytes(file.originalBytes) !== request.searchFingerprint) throw new Error('検索後に原稿が変更されています。もう一度検索してください。')
       if (disposed || !(await confirmDiscard()) || disposed) {
         if (disposed) return
-        options.reportProjectTreeOpenResult({ requestId: request.requestId, nodeId: request.nodeId }, sourceWindowId)
+        options.reportProjectTreeOpenResult({ requestId: request.requestId, nodeId: request.nodeId, outcome: 'cancelled' }, sourceWindowId)
         return
+      }
+      // 未保存確認中の変更も照合し、許可先の再指定や外部更新後の古い位置へ移動しない。
+      if (request.searchFingerprint) {
+        const latestPath = await authorizeProjectFile(request.nodeId)
+        if (disposed) return
+        if (!sameRecentFilePath(latestPath, authorizedPath)) throw new Error('登録先が変更されました。もう一度検索してください。')
+        const latest = await loadTextFile(latestPath)
+        if (disposed) return
+        const latestFingerprint = await fingerprintBytes(latest.originalBytes)
+        if (disposed) return
+        if (latestFingerprint !== request.searchFingerprint) throw new Error('確認中に原稿が変更されました。もう一度検索してください。')
+        file = latest
       }
       recovery.flush()
       currentFile.value = file
@@ -357,7 +379,7 @@ export function useDocumentSession(options: DocumentSessionOptions) {
       await recovery.syncSnapshot()
       if (disposed) return
       options.editor.value?.focus()
-      options.reportProjectTreeOpenResult({ requestId: request.requestId, nodeId: request.nodeId }, sourceWindowId)
+      options.reportProjectTreeOpenResult({ requestId: request.requestId, nodeId: request.nodeId, outcome: 'opened' }, sourceWindowId)
     } catch (error) {
       if (disposed) return
       options.reportProjectTreeOpenResult({
@@ -365,6 +387,7 @@ export function useDocumentSession(options: DocumentSessionOptions) {
         nodeId: request.nodeId,
         error: String(error),
         unavailable,
+        outcome: 'failed',
       }, sourceWindowId)
     } finally {
       if (!disposed) {
@@ -422,6 +445,7 @@ export function useDocumentSession(options: DocumentSessionOptions) {
       path.value = target
       if (!previousPath || !sameRecentFilePath(previousPath, target)) documentOrigin.value = null
       currentFile.value = result.file
+      saveRevision.value++
       suggestedFileName.value = fileName(target)
       restoredUnsaved.value = false
       savedText.value = text
@@ -474,6 +498,7 @@ export function useDocumentSession(options: DocumentSessionOptions) {
     path,
     documentOrigin,
     dirty,
+    saveRevision,
     statistics,
     busy,
     documentLocked,

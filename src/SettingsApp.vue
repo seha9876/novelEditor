@@ -1,6 +1,8 @@
 <script setup lang="ts">
 // 設定ページを切り替えながら編集し、変更を共通経路へ反映して自動保存する。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import OutlineSettingsPage from './OutlineSettingsPage.vue'
+import { createDefaultOutline } from './outline'
 import ToolbarSettingsPage from './ToolbarSettingsPage.vue'
 import WrappingSettingsPage from './WrappingSettingsPage.vue'
 import TypographySettingsPage from './TypographySettingsPage.vue'
@@ -249,6 +251,7 @@ function confirmAllDefaults(): void {
     barSizes,
     flush: true,
     resetAppearance: true,
+    outline: createDefaultOutline(),
   })
 }
 
@@ -399,6 +402,7 @@ onBeforeUnmount(() => {
             @update-editor="changeEditor" @number-input="onTypographyInput" @number-value="onTypographyValue" @number-commit="commitTypographyInput" @number-interaction="onTypographyInteraction"
             @restore-field="restoreField" @toggle-section="toggleSection"
           />
+          <OutlineSettingsPage v-else-if="page.id === 'editor.outline'" :preferences="snapshot.outline" @change="sendCommand({ type: 'change', outline: $event })" />
           <AppearanceSettingsPage
             v-else-if="page.id === 'appearance.colors'"
             :appearance="snapshot.appearance" :file-busy="snapshot.appearanceFileBusy"
@@ -473,7 +477,7 @@ onBeforeUnmount(() => {
     </VDialog>
     <VDialog v-model="allResetDialog" max-width="440">
       <VCard title="すべての設定を初期値に戻しますか？">
-        <VCardText>本文表示、折り返し、ツールバー、ステータスバー、各バーのサイズ、現在の配色を初期値へ変更し、自動保存します。保存済みの配色プリセットとデータ保存先は変更しません。</VCardText>
+        <VCardText>本文表示、折り返し、見出し判定、ツールバー、ステータスバー、各バーのサイズ、現在の配色を初期値へ変更し、自動保存します。保存済みの配色プリセットとデータ保存先は変更しません。</VCardText>
         <VCardActions>
           <VSpacer />
           <VBtn variant="text" @click="allResetDialog = false">戻る</VBtn>

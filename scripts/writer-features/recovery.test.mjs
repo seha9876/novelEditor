@@ -12,7 +12,7 @@ import {
 test('通常保存と別名保存でUTF-8・BOM・全改行形式と保存後の基準を維持する', async () => {
   const writes = []
   const files = loadSourceModule('src/textFile.ts', {
-    '@tauri-apps/plugin-fs': { writeFile: async (path, bytes) => { writes.push({ path, bytes }) } },
+    './externalFile': { writeTextFileConditional: async (path, _expected, bytes) => { writes.push({ path, bytes }); return { kind: 'saved' } } },
   })
   for (const lineEnding of ['\n', '\r\n', '\r']) {
     for (const hasBom of [false, true]) {
@@ -21,19 +21,19 @@ test('通常保存と別名保存でUTF-8・BOM・全改行形式と保存後の
       original.editorText = '第一章\n星の声🌟'
       assert.equal(original.hasBom, hasBom)
       assert.equal(original.lineEnding, lineEnding)
-      const copy = await files.saveTextFile('別名.txt', original.editorText, lineEnding, hasBom, original)
+      const { file: copy } = await files.saveTextFile('別名.txt', original.editorText, lineEnding, hasBom, { kind: 'missing' }, original)
       assert.deepEqual(writes.at(-1).bytes, bytes)
       assert.equal(copy.path, '別名.txt')
-      const edited = await files.saveTextFile('別名.txt', `${copy.editorText}\n続き`, lineEnding, hasBom, copy)
+      const { file: edited } = await files.saveTextFile('別名.txt', `${copy.editorText}\n続き`, lineEnding, hasBom, { kind: 'present', bytes: Array.from(copy.originalBytes) }, copy)
       assert.equal(edited.editorText, `${copy.editorText}\n続き`)
       assert.deepEqual(writes.at(-1).bytes, files.encodeTextFile(edited.editorText, lineEnding, hasBom))
-      await files.saveTextFile('別名.txt', edited.editorText, lineEnding, hasBom, edited)
+      await files.saveTextFile('別名.txt', edited.editorText, lineEnding, hasBom, { kind: 'present', bytes: Array.from(edited.originalBytes) }, edited)
       assert.equal(writes.at(-1).bytes, edited.originalBytes)
     }
   }
   const mixed = files.decodeTextFile('原稿.txt', new TextEncoder().encode('一\r\n二\n三\r四'))
   mixed.editorText = '一\n二\n三\n四'
-  await files.saveTextFile('混在の複製.txt', mixed.editorText, mixed.lineEnding, false, mixed)
+  await files.saveTextFile('混在の複製.txt', mixed.editorText, mixed.lineEnding, false, { kind: 'missing' }, mixed)
   assert.equal(writes.at(-1).bytes, mixed.originalBytes)
   assert.throws(() => files.decodeTextFile('不正.txt', new Uint8Array([0xff])))
 })
@@ -43,23 +43,42 @@ test('保存開始後の本文変更は書き込んだ本文や保存基準に�
   let fail = false
   let written
   const files = loadSourceModule('src/textFile.ts', {
-    '@tauri-apps/plugin-fs': { writeFile: async (_path, bytes) => {
+    './externalFile': { writeTextFileConditional: async (_path, _expected, bytes) => {
       written = bytes
       await gate.promise
       if (fail) throw new Error('書き込み失敗')
+      return { kind: 'saved' }
     } },
   })
   let editorText = '保存開始時'
-  const save = files.saveTextFile('新規.txt', editorText, '\n', false)
+  const save = files.saveTextFile('新規.txt', editorText, '\n', false, { kind: 'missing' })
   editorText += 'の後に追記'
   gate.release()
-  const saved = await save
+  const { file: saved } = await save
   assert.equal(new TextDecoder().decode(written), '保存開始時')
   assert.notEqual(editorText, saved.editorText)
   fail = true
-  await assert.rejects(files.saveTextFile('失敗.txt', editorText, '\n', false, saved))
+  await assert.rejects(files.saveTextFile('失敗.txt', editorText, '\n', false, { kind: 'missing' }, saved))
   assert.equal(saved.path, '新規.txt')
   assert.equal(saved.editorText, '保存開始時')
+})
+
+test('UTF-8 BOM直後の本文U+FEFFを読み込み・編集保存で失わない', async () => {
+  const writes = []
+  const files = loadSourceModule('src/textFile.ts', {
+    './externalFile': { writeTextFileConditional: async (_path, _expected, bytes) => { writes.push(bytes); return { kind: 'saved' } } },
+  })
+  const text = '\uFEFF第一章\n本文中\uFEFFの文字'
+  const bytes = files.encodeTextFile(text, '\r\n', true)
+  const original = files.decodeTextFile('原稿.txt', bytes)
+  assert.equal(original.text, text.replaceAll('\n', '\r\n'))
+  assert.equal(original.hasBom, true)
+  original.editorText = text
+  await files.saveTextFile('複製.txt', text, original.lineEnding, original.hasBom, { kind: 'missing' }, original)
+  assert.deepEqual(writes.at(-1), bytes)
+  await files.saveTextFile('原稿.txt', `${text}\n追記`, original.lineEnding, original.hasBom, { kind: 'present', bytes: Array.from(original.originalBytes) }, original)
+  const reopened = files.decodeTextFile('原稿.txt', writes.at(-1))
+  assert.equal(reopened.text, `${text}\n追記`.replaceAll('\n', '\r\n'))
 })
 
 test('復元候補を検証し、元パスを保存せず、空本文も復元対象として保持する', () => {

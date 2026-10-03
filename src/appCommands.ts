@@ -2,10 +2,14 @@
 export type CommandId =
   | 'document.new'
   | 'document.open'
+  | 'document.quickOpen'
+  | 'document.recentFiles'
+  | 'document.gitHistory'
   | 'document.save'
   | 'document.saveAs'
   | 'edit.find'
   | 'edit.replace'
+  | 'edit.goToLine'
   | 'settings.open'
   | 'wrap.window'
   | 'wrap.columns'
@@ -19,6 +23,9 @@ export type CommandId =
   | 'toolbar.typography.fontSizeAdjust'
   | 'toolbar.typography.lineHeight'
   | 'view.toolbar.toggle'
+  | 'view.whitespace.toggle'
+  | 'view.lineNumbers.toggle'
+  | 'view.focusMode.toggle'
   | 'view.toolbar.customize'
 
 /** メニューとツールバーが共有するコマンド表示情報。 */
@@ -41,10 +48,14 @@ export type AppCommand = AppCommandDefinition & {
 export const appCommandDefinitions: readonly AppCommandDefinition[] = [
   { id: 'document.new', label: '新規', icon: 'mdi-file-plus-outline', shortcut: 'Ctrl+N', toolbarEligible: true },
   { id: 'document.open', label: '開く', icon: 'mdi-folder-open-outline', shortcut: 'Ctrl+O', toolbarEligible: true },
+  { id: 'document.quickOpen', label: 'プロジェクト内ファイルを開く', icon: 'mdi-file-search-outline', shortcut: 'Ctrl+P', toolbarEligible: true },
+  { id: 'document.gitHistory', label: '履歴とバックアップ', icon: 'mdi-source-branch', toolbarEligible: true },
+  { id: 'document.recentFiles', label: '最近開いたファイル', icon: 'mdi-history', toolbarEligible: true },
   { id: 'document.save', label: '保存', icon: 'mdi-content-save-outline', shortcut: 'Ctrl+S', toolbarEligible: true },
   { id: 'document.saveAs', label: '名前を付けて保存', icon: 'mdi-content-save-edit-outline', shortcut: 'Ctrl+Shift+S', toolbarEligible: true },
   { id: 'edit.find', label: '検索', icon: 'mdi-magnify', shortcut: 'Ctrl+F', toolbarEligible: true },
   { id: 'edit.replace', label: '置換', icon: 'mdi-find-replace', shortcut: 'Ctrl+H', toolbarEligible: true },
+  { id: 'edit.goToLine', label: '行へ移動', icon: 'mdi-format-list-numbered', shortcut: 'Ctrl+G', toolbarEligible: true },
   { id: 'settings.open', label: '設定画面を開く', icon: 'mdi-cog-outline', toolbarEligible: true },
   { id: 'wrap.window', label: '右端で折り返し', icon: 'mdi-wrap', toolbarEligible: true },
   { id: 'wrap.columns', label: '指定桁数で折り返し', icon: 'mdi-format-columns', toolbarEligible: true },
@@ -58,6 +69,9 @@ export const appCommandDefinitions: readonly AppCommandDefinition[] = [
   { id: 'toolbar.typography.fontSizeAdjust', label: '文字サイズを1px変更', icon: 'mdi-plus-minus-variant', toolbarEligible: true },
   { id: 'toolbar.typography.lineHeight', label: '行間', icon: 'mdi-format-line-spacing', toolbarEligible: true },
   { id: 'view.toolbar.toggle', label: 'ツールバーを表示', icon: 'mdi-toolbar', toolbarEligible: false },
+  { id: 'view.whitespace.toggle', label: '空白・タブを表示', icon: 'mdi-format-pilcrow', toolbarEligible: true },
+  { id: 'view.lineNumbers.toggle', label: '行番号を表示', icon: 'mdi-format-list-numbered', toolbarEligible: true },
+  { id: 'view.focusMode.toggle', label: '集中モード', icon: 'mdi-focus-field', shortcut: 'F10', toolbarEligible: true },
   { id: 'view.toolbar.customize', label: 'ツールバーをカスタマイズ', icon: 'mdi-tune-variant', toolbarEligible: false },
 ]
 

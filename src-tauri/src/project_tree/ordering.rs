@@ -1,5 +1,7 @@
 //! プロジェクトツリーの並び順、移動、循環検証を担当する。
 
+use std::collections::HashSet;
+
 use rusqlite::{params, OptionalExtension, Transaction};
 
 use crate::project_order::{order_between, reindexed_order_at, PositionError};
@@ -94,9 +96,13 @@ pub(super) fn validate_no_cycle(
     destination_parent_id: Option<i64>,
 ) -> Result<(), String> {
     let mut ancestor_id = destination_parent_id;
+    let mut visited = HashSet::new();
     while let Some(current_id) = ancestor_id {
         if current_id == node_id {
             return Err("フォルダを自分自身や配下へ移動できません".to_string());
+        }
+        if !visited.insert(current_id) {
+            return Err("移動先のフォルダ階層が循環しています".to_string());
         }
         ancestor_id = transaction
             .query_row(
@@ -245,6 +251,46 @@ mod tests {
             .execute("INSERT INTO projects(name) VALUES ('test')", [])
             .unwrap();
         connection.last_insert_rowid()
+    }
+
+    /// 起動後に外部編集で生じた循環も、移動操作を無限ループさせず拒否する。
+    #[test]
+    fn move_rejects_an_existing_cycle_in_the_destination_ancestors() {
+        let mut connection = memory_database();
+        let project_id = create_project(&connection);
+        let transaction = connection.transaction().unwrap();
+        let first =
+            insert_ordered_node(&transaction, project_id, None, "folder", "first", None).unwrap();
+        let child = insert_ordered_node(
+            &transaction,
+            project_id,
+            Some(first),
+            "folder",
+            "child",
+            None,
+        )
+        .unwrap();
+        let moving =
+            insert_ordered_node(&transaction, project_id, None, "folder", "moving", None).unwrap();
+        transaction
+            .execute(
+                "UPDATE project_nodes SET parent_id = ?1 WHERE id = ?2",
+                params![child, first],
+            )
+            .unwrap();
+
+        let error =
+            move_node_in_transaction(&transaction, moving, Some(first), "inside").unwrap_err();
+
+        assert!(error.contains("循環"));
+        let parent: Option<i64> = transaction
+            .query_row(
+                "SELECT parent_id FROM project_nodes WHERE id = ?1",
+                params![moving],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent, None);
     }
 
     #[test]

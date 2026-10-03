@@ -1,4 +1,5 @@
 /** 検索・置換の動作を検証する。 */
+import { URL } from 'node:url'
 import {
   assert,
   deferred,
@@ -224,4 +225,176 @@ test('検索窓の破棄後に遅着した生成エラーを通知しない', as
   await controller.dispose()
   callbacks['tauri://error']({ payload: '破棄後の遅着エラー' })
   assert.equal(errorCount, 0)
+})
+
+/** 実Controllerへ検索窓とイベント境界を接続し、窓世代の競合を再現する。 */
+function createSearchControllerHarness({ locked = false, focusPromise = Promise.resolve(), editorAdapter } = {}) {
+  const { ref } = require('vue')
+  const windows = []
+  const snapshots = []
+  const actions = []
+  const errors = []
+  const documentLocked = ref(locked)
+  const { createSearchScopeStatus } = loadSourceModule('src/searchSession.ts')
+  let commandListener
+  let editorFocusCount = 0
+  class MockSearchWindow {
+    constructor(_label, options) {
+      this.callbacks = {}
+      this.sessionId = new URL(options.url, 'http://localhost').searchParams.get('session')
+      windows.push(this)
+    }
+    async once(event, callback) { this.callbacks[event] = callback; return () => {} }
+    async destroy() {}
+    async unminimize() {}
+    async setFocus() {}
+  }
+  const { useSearchController } = loadSourceModule('src/useSearchController.ts', {
+    '@tauri-apps/api/event': {
+      async listen(_event, listener) { commandListener = listener; return () => {} },
+      async emitTo(_target, _event, snapshot) { snapshots.push(snapshot) },
+    },
+    '@tauri-apps/api/webviewWindow': { WebviewWindow: MockSearchWindow },
+  })
+  const controller = useSearchController({
+    editor: ref(editorAdapter ?? { setSearch() {}, runSearch(action) { actions.push(action) }, focus() { editorFocusCount += 1 },
+      getSearchScope: createSearchScopeStatus, setSearchScope: () => false }),
+    documentLocked, mainCloseInProgress: ref(false),
+    appWindow: { setFocus: () => focusPromise },
+    showPersistenceNotice: (error) => errors.push(error), showError: async (...error) => { errors.push(error) },
+  })
+  return { controller, windows, snapshots, actions, errors, documentLocked,
+    send: (command) => commandListener({ payload: command }),
+    focusCount: () => editorFocusCount }
+}
+
+test('検索Controllerは初期ロック状態を同期し、最初の操作から正しく検索できる', async () => {
+  for (const locked of [false, true]) {
+    const harness = createSearchControllerHarness({ locked })
+    await harness.controller.setup()
+    if (locked) {
+      await harness.controller.open('search')
+      assert.equal(harness.windows.length, 0)
+    } else {
+      await harness.controller.open('search')
+      const sessionId = harness.windows[0].sessionId
+      harness.send({ type: 'ready', sessionId })
+      const snapshot = harness.snapshots.at(-1)
+      assert.equal(snapshot.locked, false)
+      harness.send({ type: 'action', sessionId, sequence: 1, documentRevision: snapshot.documentRevision,
+        conditions: { search: '星', replace: '', caseSensitive: false, regexp: false }, action: 'next' })
+      assert.deepEqual(harness.actions, ['next'])
+    }
+    await harness.controller.dispose()
+  }
+})
+
+test('検索窓を再作成した後の旧窓の生成通知・エラーで新窓を壊さない', async () => {
+  const harness = createSearchControllerHarness()
+  await harness.controller.setup()
+  await harness.controller.open('search')
+  const oldWindow = harness.windows[0]
+  await harness.controller.close()
+  await harness.controller.open('search')
+  const newWindow = harness.windows[1]
+  oldWindow.callbacks['tauri://created']()
+  oldWindow.callbacks['tauri://error']({ payload: '旧窓の遅着エラー' })
+  harness.send({ type: 'ready', sessionId: newWindow.sessionId })
+  assert.equal(harness.snapshots.at(-1).sessionId, newWindow.sessionId)
+  assert.deepEqual(harness.errors, [])
+  await harness.controller.dispose()
+})
+
+test('検索終了後の非同期フォーカスが再表示や破棄後に本文へフォーカスを奪わない', async () => {
+  for (const reopen of [false, true]) {
+    const focus = deferred()
+    const harness = createSearchControllerHarness({ focusPromise: focus.promise })
+    await harness.controller.open('search')
+    await harness.controller.close()
+    if (reopen) await harness.controller.open('search')
+    else await harness.controller.dispose()
+    focus.release()
+    await Promise.resolve()
+    assert.equal(harness.focusCount(), 0)
+    await harness.controller.dispose()
+  }
+})
+
+/** 範囲付きの本物のCodeMirror状態を検索Controllerへ接続する。 */
+function createScopedControllerHarness() {
+  const core = loadSourceModule('src/searchPanel.ts')
+  const { EditorState, Transaction } = require('@codemirror/state')
+  const { history } = require('@codemirror/commands')
+  let harness
+  const view = {
+    state: EditorState.create({ doc: '星 星 星', selection: { anchor: 2, head: 3 }, extensions: [core.createSearchExtensions(), history()] }),
+    plugin: () => null,
+    dispatch(transaction) {
+      view.state = transaction instanceof Transaction ? transaction.state : view.state.update(transaction).state
+      harness?.controller.onScope(core.getEditorSearchScope(view))
+      harness?.controller.onStatus(core.getEditorSearchStatus(view))
+    },
+  }
+  harness = createSearchControllerHarness({ editorAdapter: {
+    setSearch: (conditions, active) => core.updateEditorSearch(view, conditions, active),
+    runSearch: (action) => core.runEditorSearchAction(view, action),
+    getSearchScope: () => core.getEditorSearchScope(view),
+    setSearchScope: (action) => core.updateEditorSearchScope(view, action),
+    focus() {},
+  } })
+  return { ...harness, core, view }
+}
+
+test('限定範囲を検索窓の再表示とF3へ引き継ぎ、本文とパスを子窓へ送らない', async () => {
+  const harness = createScopedControllerHarness()
+  const { controller, view } = harness
+  await controller.setup()
+  await controller.open('search')
+  const sessionId = harness.windows[0].sessionId
+  harness.send({ type: 'ready', sessionId })
+  const command = { sessionId, sequence: 1, documentRevision: harness.snapshots.at(-1).documentRevision,
+    conditions: { search: '星', replace: '月', regexp: false, caseSensitive: false } }
+  harness.send({ ...command, type: 'scope', scopeAction: 'capture' })
+  assert.equal(controller.searchScope.value.enabled, true)
+  harness.send({ ...command, sequence: 2, type: 'action', action: 'replaceAll' })
+  assert.equal(view.state.doc.toString(), '星 月 星')
+  await controller.close()
+  assert.equal(controller.searchScope.value.enabled, true)
+  view.dispatch({ selection: { anchor: 0 } })
+  controller.onNavigate('next')
+  assert.equal(view.state.selection.main.head, 0, '範囲外の星には移動しない')
+  await controller.open('search')
+  harness.send({ type: 'ready', sessionId: harness.windows[1].sessionId })
+  const snapshot = harness.snapshots.at(-1)
+  assert.equal(snapshot.scope.enabled, true)
+  assert.deepEqual(Object.keys(snapshot.scope).sort(), ['canCapture', 'empty', 'enabled', 'endLine', 'reason', 'startLine'])
+  assert.equal('text' in snapshot, false)
+  assert.equal('path' in snapshot, false)
+  await controller.dispose()
+})
+
+test('限定解除の遅着・重複を拒否し、保存相当のロックや取消で範囲を失わない', async () => {
+  const harness = createScopedControllerHarness()
+  await harness.controller.setup()
+  await harness.controller.open('search')
+  const sessionId = harness.windows[0].sessionId
+  harness.send({ type: 'ready', sessionId })
+  const command = { type: 'scope', scopeAction: 'capture', sessionId, sequence: 1,
+    documentRevision: harness.snapshots.at(-1).documentRevision,
+    conditions: { search: '星', replace: '月', regexp: false, caseSensitive: false } }
+  harness.send(command)
+  harness.documentLocked.value = true
+  harness.send({ ...command, sequence: 2, scopeAction: 'clear' })
+  harness.documentLocked.value = false
+  harness.send({ ...command, sequence: 3, scopeAction: 'clear' })
+  assert.equal(harness.core.getEditorSearchScope(harness.view).enabled, true)
+  harness.send({ ...command, sequence: 3, scopeAction: 'clear', documentRevision: harness.snapshots.at(-1).documentRevision })
+  assert.equal(harness.core.getEditorSearchScope(harness.view).enabled, true)
+  harness.send({ ...command, sequence: 4, scopeAction: 'clear', documentRevision: harness.snapshots.at(-1).documentRevision })
+  assert.equal(harness.core.getEditorSearchScope(harness.view).enabled, false)
+  harness.view.dispatch({ selection: { anchor: 0 } })
+  harness.send({ ...command, sequence: 5, documentRevision: harness.snapshots.at(-1).documentRevision })
+  assert.match(harness.snapshots.at(-1).error, /選択/)
+  assert.equal(harness.core.getEditorSearchScope(harness.view).enabled, false)
+  await harness.controller.dispose()
 })

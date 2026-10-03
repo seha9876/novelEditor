@@ -1,13 +1,15 @@
 <script setup lang="ts">
 // 検索条件だけを保持する非モーダル画面。本文の操作とUndoはメインウィンドウへ委ねる。
+import { useChildAppearance } from './useChildAppearance'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { emitTo, listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   createSearchConditions, SEARCH_COMMAND_EVENT, SEARCH_STATE_EVENT,
-  type SearchAction, type SearchCommand, type SearchField, type SearchSnapshot,
+  type SearchAction, type SearchCommand, type SearchField, type SearchSnapshot, type SearchScopeAction,
 } from './searchSession'
 
+useChildAppearance()
 const sessionId = new URLSearchParams(window.location.search).get('session') ?? ''
 const conditions = ref(createSearchConditions())
 const snapshot = ref<SearchSnapshot | null>(null)
@@ -16,18 +18,33 @@ const replaceField = ref<HTMLElement | null>(null)
 const errorMessage = ref('')
 const closing = ref(false)
 const sequence = ref(0)
+const scopePendingSequence = ref<number | null>(null)
+const failedSequence = ref<number | null>(null)
 let lastRevision = -1
 let focusRevision = -1
 let sendQueue = Promise.resolve()
 let unlistenState: (() => void) | undefined
 let unlistenClose: (() => void) | undefined
 
-const pending = computed(() => !snapshot.value || snapshot.value.acknowledgedSequence < sequence.value)
+const pending = computed(() => !snapshot.value ||
+  snapshot.value.acknowledgedSequence < sequence.value && failedSequence.value !== sequence.value)
+const scopePending = computed(() => scopePendingSequence.value !== null)
 const canRun = computed(() => !!snapshot.value && !snapshot.value.locked && !closing.value &&
+  !scopePending.value &&
+  !(snapshot.value.scope.enabled && snapshot.value.scope.empty) &&
   !!conditions.value.search && (pending.value || snapshot.value.status === 'found'))
+const scopeDisabled = computed(() => !snapshot.value || snapshot.value.locked || closing.value || pending.value)
+const scopeMessage = computed(() => {
+  const scope = snapshot.value?.scope
+  if (!scope) return ''
+  if (scope.enabled) return scope.empty ? '対象範囲が空です。範囲を再指定するか、限定を解除してください。'
+    : `検索対象: ${scope.startLine}～${scope.endLine}行（指定した文字範囲）`
+  return scope.canCapture ? '検索対象: 本文全体' : scope.reason
+})
 const statusMessage = computed(() => {
   if (snapshot.value?.locked) return '文書の操作が終わるまで検索・置換はできません'
   if (pending.value) return '検索条件を反映しています…'
+  if (snapshot.value?.scope.enabled && snapshot.value.scope.empty) return '範囲の再指定が必要です'
   const labels = { empty: '検索語を入力してください', invalid: '正規表現が正しくありません', notFound: '該当なし', found: '一致があります' }
   return labels[snapshot.value?.status ?? 'empty']
 })
@@ -38,13 +55,16 @@ function enqueueCommand(command: SearchCommand): Promise<void> {
   sendQueue = sending.catch((error: unknown) => {
     errorMessage.value = `検索操作を送れません。もう一度操作してください。${String(error)}`
     closing.value = false
+    // 送信に失敗した最新要求は応答を待たず、連番を再利用せずに再試行できるようにする。
+    failedSequence.value = command.type === 'ready' ? null : command.sequence
+    if (command.type === 'scope' && scopePendingSequence.value === command.sequence) scopePendingSequence.value = null
   })
   return sendQueue
 }
 
 /** 入力直後の操作でも最新条件を同封し、メイン側の古い条件では実行させない。 */
 function sendChange(action?: SearchAction): void {
-  if (!snapshot.value || closing.value) return
+  if (!snapshot.value || closing.value || action && !canRun.value) return
   errorMessage.value = ''
   void enqueueCommand({
     type: action ? 'action' : 'change',
@@ -53,6 +73,18 @@ function sendChange(action?: SearchAction): void {
     documentRevision: snapshot.value.documentRevision,
     conditions: { ...conditions.value },
     action,
+  })
+}
+
+/** 本文側で現在の選択を取り込み、古い文書に対する範囲変更は世代検証で拒否する。 */
+function sendScope(scopeAction: SearchScopeAction): void {
+  if (!snapshot.value || scopeDisabled.value) return
+  errorMessage.value = ''
+  // 範囲の設定失敗後に、先行して送った全置換が全文へ適用されるのを防ぐ。
+  scopePendingSequence.value = ++sequence.value
+  void enqueueCommand({
+    type: 'scope', scopeAction, sessionId, sequence: scopePendingSequence.value,
+    documentRevision: snapshot.value.documentRevision, conditions: { ...conditions.value },
   })
 }
 
@@ -80,6 +112,7 @@ function receiveSnapshot(next: SearchSnapshot): void {
   if (next.sessionId !== sessionId || next.revision <= lastRevision) return
   lastRevision = next.revision
   snapshot.value = next
+  if (scopePendingSequence.value !== null && next.acknowledgedSequence >= scopePendingSequence.value) scopePendingSequence.value = null
   if (next.error) {
     errorMessage.value = next.error
     closing.value = false
@@ -144,6 +177,15 @@ onBeforeUnmount(() => {
             <VCheckbox v-model="conditions.caseSensitive" label="大文字・小文字を区別" density="compact" hide-details :disabled="closing" @update:model-value="sendChange()" />
             <VCheckbox v-model="conditions.regexp" label="正規表現" density="compact" hide-details :disabled="closing" @update:model-value="sendChange()" />
           </div>
+          <div class="search-options">
+            <VCheckbox
+              :model-value="snapshot.scope.enabled" label="選択範囲に限定" density="compact" hide-details
+              :disabled="scopeDisabled || (!snapshot.scope.enabled && !snapshot.scope.canCapture)"
+              @update:model-value="sendScope($event ? 'capture' : 'clear')"
+            />
+            <VBtn size="small" variant="text" :disabled="scopeDisabled || !snapshot.scope.enabled || !snapshot.scope.canCapture" @click="sendScope('capture')">現在の選択で範囲を更新</VBtn>
+          </div>
+          <p class="search-help" role="status">{{ scopeMessage }}</p>
           <div class="search-actions">
             <VBtn size="small" variant="tonal" :disabled="!canRun" @click="sendChange('previous')">前へ</VBtn>
             <VBtn size="small" color="primary" variant="tonal" :disabled="!canRun" @click="sendChange('next')">次へ</VBtn>
@@ -154,6 +196,7 @@ onBeforeUnmount(() => {
           </div>
           <p class="search-status" role="status" aria-live="polite" :class="{ 'text-error': !pending && snapshot.status === 'invalid' }">{{ statusMessage }}</p>
           <p class="search-help">Enter: 次を検索 ／ Shift+Enter: 入力欄で改行 ／ F3・Shift+F3: 前後検索<br>正規表現の置換: $1、$2 でグループを参照 ／ Esc: 本文に戻る</p>
+          <p v-if="snapshot.scope.enabled" class="search-help">検索窓を閉じても対象範囲を維持します。本文の選択移動では範囲は変わりません。</p>
         </template>
         <p v-else role="status">検索画面を準備しています…</p>
         <p v-if="errorMessage" class="text-error" role="alert">{{ errorMessage }}</p>

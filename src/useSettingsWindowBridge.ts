@@ -75,7 +75,11 @@ export function useSettingsWindowBridge(options: SettingsWindowBridgeOptions) {
       const existing = await WebviewWindow.getByLabel('settings')
       if (disposed) return
       if (existing) {
-        settingsWindow = existing
+        // getByLabel は毎回別のラッパーを返すため、破棄通知を登録した参照を維持する。
+        if (!settingsWindow) {
+          settingsWindow = existing
+          void existing.once('tauri://destroyed', () => handleWindowDestroyed(existing))
+        }
         settingsWindowOpen.value = true
         settingsWindowOpening = false
         await publishState()

@@ -1,9 +1,12 @@
 import type { EditorSettings } from './editorSettings'
+import type { AppearanceAction, AppearancePreferences } from './appearance'
 import type { InterfaceBarSizes, StatusBarItemId, StatusBarPreferences, ToolbarItem, ToolbarPreferences } from './appPreferenceSchema'
 import type { SettingsViewId } from './settingsDefinitions'
 
 /** 設定ウィンドウへ配信する現在値とUndo／Redoの状態。 */
 export type SettingsSnapshot = {
+  appearance: AppearancePreferences
+  appearanceFileBusy: boolean
   editor: EditorSettings
   toolbar: ToolbarPreferences
   statusBar: StatusBarPreferences
@@ -18,6 +21,8 @@ export type SettingsSnapshot = {
 
 /** 設定ウィンドウからメイン画面へ送る履歴操作、ページ移動、型付き部分更新。 */
 export type SettingsCommand =
+  | { type: 'appearance'; action: AppearanceAction }
+  | { type: 'appearance-file'; operation: 'import' | 'export'; presetId?: string }
   | { type: 'ready' }
   | { type: 'navigate'; page: SettingsViewId }
   | { type: 'undo' }
@@ -28,6 +33,7 @@ export type SettingsCommand =
       toolbar?: Partial<ToolbarPreferences> & { items?: ToolbarItem[] }
       statusBar?: Partial<StatusBarPreferences> & { items?: StatusBarItemId[] }
       barSizes?: Partial<InterfaceBarSizes>
+      resetAppearance?: boolean
       flush?: boolean
     }
 

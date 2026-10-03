@@ -1,6 +1,6 @@
 <!-- 保存先の異なる TXT と仮想フォルダを、実ファイルを動かさず管理する。 -->
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { message } from '@tauri-apps/plugin-dialog'
 import { fileName } from './textFile'
 import type { ProjectTreeOpenRequest, ProjectTreeOpenResult } from './projectTreeWindow'
@@ -40,6 +40,9 @@ const emit = defineEmits<{
 
 const pendingOpenRequest = ref<ProjectTreeOpenRequest | null>(null)
 const projectMenuOpen = ref(false)
+const nodeMenuActivator = ref<HTMLElement | null>(null)
+const nodeMenuList = ref<{ focus: (location: 'first') => void } | null>(null)
+let nodeMenuOpenedWithKeyboard = false
 type SelectionController = ReturnType<typeof useProjectTreeSelection>
 type ActionsController = ReturnType<typeof useProjectTreeActions>
 let selectionController: SelectionController | null = null
@@ -85,7 +88,10 @@ const selection = useProjectTreeSelection({
   unavailableNodeIds: props.unavailableNodeIds,
   onExpandedChange: (nodeIds) => emit('expanded-change', nodeIds),
   onUnavailableChange: (nodeIds) => emit('unavailable-change', nodeIds),
-  isDialogOpen: () => isDialogOpen(),
+  isDialogOpen: () => isDialogOpen() || nodeMenuOpen.value,
+  isBusy: () => isBusy.value,
+  onActivateNode: (node) => { void activateNode(node) },
+  onFocusNode: (nodeId, restoreOnly) => { void focusTreeNode(nodeId, restoreOnly) },
   onDeleteSelection: () => requestNodeRemove(),
   onEscape: () => closeNodeMenu(),
 })
@@ -129,6 +135,8 @@ const {
   expandedFolders,
   unavailableNodes,
   selectedNodeIds,
+  focusedNodeId,
+  setFocusedNode,
   visibleRows,
   setNodeSelection,
   selectNodeFromClick,
@@ -157,7 +165,7 @@ const {
   registerDroppedFiles,
   requestFolderCreate,
   openNameDialog,
-  openNodeMenu,
+  openNodeMenu: openNodeMenuAction,
   openRootMenu: openRootMenuAction,
   openTreeFile,
   applyOpenResult,
@@ -183,8 +191,40 @@ const {
 // テンプレートの ref 属性から composable が所有するスクロール要素へ接続する。
 void treeScrollElement
 
+/** 更新後の行を画面内へ移す。復帰時はツリー外の操作へフォーカスを奪わない。 */
+async function focusTreeNode(nodeId: number | null, restoreOnly: boolean): Promise<void> {
+  const tree = treeScrollElement.value
+  if (!tree || isDialogOpen() || (restoreOnly && !tree.contains(document.activeElement))) return
+  const previousElement = document.activeElement
+  await nextTick()
+  if (!tree.isConnected || isDialogOpen() || focusedNodeId.value !== nodeId) return
+  if (document.activeElement !== previousElement && document.activeElement !== document.body
+    && !tree.contains(document.activeElement)) return
+  const button = nodeId === null ? null : tree.querySelector<HTMLButtonElement>(`[data-node-id="${nodeId}"] .project-tree-main`)
+  const target = button && !button.disabled ? button : tree
+  target.focus({ preventScroll: true })
+  target.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+}
+
+/** キーボード起動の操作メニューは座標0ではなく、操作した行ボタンの直下へ開く。 */
+function openNodeMenu(event: MouseEvent, node: ProjectTreeNode): void {
+  nodeMenuOpenedWithKeyboard = event.detail === 0 && event.clientX === 0 && event.clientY === 0
+  nodeMenuActivator.value = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  openNodeMenuAction(event, node)
+  if (!nodeMenuOpenedWithKeyboard || !nodeMenuActivator.value) return
+  const bounds = nodeMenuActivator.value.getBoundingClientRect()
+  nodeMenuTarget.value = [bounds.left, bounds.bottom]
+}
+
+/** キーボードで開いたメニューは、描画完了後にVuetifyの一覧ナビゲーションへ渡す。 */
+function focusNodeMenu(): void {
+  if (!nodeMenuOpen.value || !nodeMenuOpenedWithKeyboard || isDialogOpen()) return
+  nodeMenuList.value?.focus('first')
+}
+
 /** ファイル・フォルダ行を選択し、ファイルなら既存エディターで開く要求を送る。 */
 async function activateNode(node: ProjectTreeNode): Promise<void> {
+  if (isBusy.value) return
   if (node.kind === 'folder') {
     toggleFolder(node.id)
     return
@@ -207,6 +247,8 @@ function activateNodeFromClick(event: MouseEvent, node: ProjectTreeNode): void {
 function openRootMenu(event: MouseEvent): void {
   const target = event.target instanceof Element ? event.target : null
   if (target?.closest('.project-tree-row')) return
+  nodeMenuOpenedWithKeyboard = false
+  nodeMenuActivator.value = null
   openRootMenuAction(event)
 }
 
@@ -230,6 +272,13 @@ watch(() => props.unavailableNodeIds, (nodeIds) => {
   selection.syncUnavailableNodeIds(nodeIds)
 }, { deep: true, immediate: true })
 watch(() => props.openResult, (result) => { void applyOpenResult(result) })
+watch(isBusy, (busy) => {
+  const tree = treeScrollElement.value
+  if (!tree || !tree.contains(document.activeElement)) return
+  // 操作中のbutton無効化でフォーカスがbodyへ落ちるのを防ぎ、完了後に現在行へ戻す。
+  if (busy) tree.focus({ preventScroll: true })
+  else void focusTreeNode(focusedNodeId.value, true)
+}, { flush: 'sync' })
 </script>
 
 <template>
@@ -295,7 +344,8 @@ watch(() => props.openResult, (result) => { void applyOpenResult(result) })
       role="tree"
       aria-label="ファイルと仮想フォルダ"
       aria-multiselectable="true"
-      tabindex="0"
+      :tabindex="visibleRows.length === 0 || isBusy ? 0 : -1"
+      :aria-busy="isBusy"
       @keydown="handleTreeKeydown"
       @click="handleTreeBackgroundClick"
       @contextmenu="openRootMenu"
@@ -322,12 +372,14 @@ watch(() => props.openResult, (result) => { void applyOpenResult(result) })
           :aria-expanded="row.node.kind === 'folder' ? expandedFolders.has(row.node.id) : undefined"
           :aria-selected="selectedNodeIds.has(row.node.id)"
           :aria-current="documentOrigin?.nodeId === row.node.id ? 'true' : undefined"
+          @focusin="setFocusedNode(row.node.id)"
           @contextmenu="openNodeMenu($event, row.node)"
         >
           <button
             class="project-tree-main"
             type="button"
             :disabled="isBusy"
+            :tabindex="focusedNodeId === row.node.id ? 0 : -1"
             @pointerdown="startPointerTreeDrag($event, row.node)"
             @lostpointercapture="cancelPointerTreeDrag"
             @click="activateNodeFromClick($event, row.node)"
@@ -347,7 +399,7 @@ watch(() => props.openResult, (result) => { void applyOpenResult(result) })
             <span class="project-tree-node-name">{{ row.node.name || (row.node.path ? fileName(row.node.path) : '名前なし') }}</span>
             <VIcon v-if="unavailableNodes.has(row.node.id)" class="project-tree-warning" icon="mdi-alert-circle-outline" title="ファイルを開けません。再指定してください。" aria-label="ファイルを開けません" />
           </button>
-          <VBtn class="project-tree-actions" icon size="x-small" variant="text" :disabled="isBusy" :aria-label="`${row.node.name} の操作`" @click="openNodeMenu($event, row.node)">
+          <VBtn class="project-tree-actions" icon size="x-small" variant="text" :disabled="isBusy" :tabindex="focusedNodeId === row.node.id ? 0 : -1" :aria-label="`${row.node.name} の操作`" @click="openNodeMenu($event, row.node)">
             <VIcon icon="mdi-dots-vertical" aria-hidden="true" />
           </VBtn>
         </div>
@@ -362,8 +414,8 @@ watch(() => props.openResult, (result) => { void applyOpenResult(result) })
       </template>
     </div>
 
-    <VMenu v-model="nodeMenuOpen" :target="nodeMenuTarget" location="bottom start" :close-on-content-click="true">
-      <VList v-if="contextNode" density="compact" min-width="220" role="menu" aria-label="ノード操作">
+    <VMenu v-model="nodeMenuOpen" :activator="nodeMenuActivator ?? undefined" :open-on-click="false" :open-on-arrow="false" :target="nodeMenuTarget" location="bottom start" :close-on-content-click="true" @after-enter="focusNodeMenu">
+      <VList v-if="contextNode" ref="nodeMenuList" density="compact" min-width="220" role="menu" aria-label="ノード操作">
         <template v-if="selectedNodes.length > 1">
           <VListItem role="menuitem" :title="`選択した${selectedNodes.length}件の登録を解除`" prepend-icon="mdi-delete-outline" @click="requestNodeRemove" />
         </template>
@@ -394,18 +446,13 @@ watch(() => props.openResult, (result) => { void applyOpenResult(result) })
       @save="saveProjectDialog"
     />
 
-    <VDialog v-model="dialogOpen" max-width="420" @keydown.enter="saveNameDialog">
-      <VCard>
-        <VCardTitle>{{ dialogTitle }}</VCardTitle>
-        <VCardText>
-          <VTextField v-model="dialogValue" autofocus label="名前" density="compact" variant="outlined" hide-details @keydown.enter.prevent="saveNameDialog" />
-        </VCardText>
-        <VCardActions>
-          <VSpacer />
-          <VBtn variant="text" @click="dialogOpen = false">キャンセル</VBtn>
-          <VBtn color="primary" variant="text" :disabled="!dialogValue.trim() || isBusy" @click="saveNameDialog">保存</VBtn>
-        </VCardActions>
-      </VCard>
-    </VDialog>
+    <ProjectNameDialog
+      v-model="dialogOpen"
+      :title="dialogTitle"
+      :value="dialogValue"
+      :disabled="isBusy"
+      @update:value="dialogValue = $event"
+      @save="saveNameDialog"
+    />
   </aside>
 </template>

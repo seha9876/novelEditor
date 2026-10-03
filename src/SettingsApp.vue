@@ -7,6 +7,7 @@ import TypographySettingsPage from './TypographySettingsPage.vue'
 import StorageSettingsPage from './StorageSettingsPage.vue'
 import BarSizeSettingsPage from './BarSizeSettingsPage.vue'
 import StatusBarSettingsPage from './StatusBarSettingsPage.vue'
+import AppearanceSettingsPage from './AppearanceSettingsPage.vue'
 import {
   resetToolbarPreferences,
   resetStatusBarPreferences,
@@ -37,6 +38,9 @@ import {
 } from './settingsDefinitions'
 import { useEditorSettingsDrafts } from './useEditorSettingsDrafts'
 import { useSettingsWindowChannel } from './useSettingsWindowChannel'
+import { useChildAppearance } from './useChildAppearance'
+
+useChildAppearance()
 
 let receiveChannelSnapshot: (nextSnapshot: SettingsSnapshot) => void = () => {}
 const settingsChannel = useSettingsWindowChannel({
@@ -244,6 +248,7 @@ function confirmAllDefaults(): void {
     statusBar,
     barSizes,
     flush: true,
+    resetAppearance: true,
   })
 }
 
@@ -394,6 +399,12 @@ onBeforeUnmount(() => {
             @update-editor="changeEditor" @number-input="onTypographyInput" @number-value="onTypographyValue" @number-commit="commitTypographyInput" @number-interaction="onTypographyInteraction"
             @restore-field="restoreField" @toggle-section="toggleSection"
           />
+          <AppearanceSettingsPage
+            v-else-if="page.id === 'appearance.colors'"
+            :appearance="snapshot.appearance" :file-busy="snapshot.appearanceFileBusy"
+            :heading-level="activeView === 'all' ? 4 : 2" :sections="page.sections" :expanded-section-ids="openedSectionIds"
+            @command="sendCommand" @toggle-section="toggleSection"
+          />
           <ToolbarSettingsPage
             v-else-if="page.id === 'appearance.toolbar'"
             :toolbar="snapshot.toolbar"
@@ -462,7 +473,7 @@ onBeforeUnmount(() => {
     </VDialog>
     <VDialog v-model="allResetDialog" max-width="440">
       <VCard title="すべての設定を初期値に戻しますか？">
-        <VCardText>本文表示、折り返し、ツールバー、ステータスバー、各バーのサイズを初期値へ変更し、自動保存します。データ保存先は変更しません。</VCardText>
+        <VCardText>本文表示、折り返し、ツールバー、ステータスバー、各バーのサイズ、現在の配色を初期値へ変更し、自動保存します。保存済みの配色プリセットとデータ保存先は変更しません。</VCardText>
         <VCardActions>
           <VSpacer />
           <VBtn variant="text" @click="allResetDialog = false">戻る</VBtn>

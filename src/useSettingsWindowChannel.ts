@@ -70,19 +70,28 @@ export function useSettingsWindowChannel(options: SettingsWindowChannelOptions =
     setupPromise = setupRun
     try {
       await setupRun
+    } catch (error) {
+      // 途中の購読失敗を残すと次回setupが開始済みと誤認し、接続を回復できない。
+      clearListeners()
+      throw error
     } finally {
       if (setupPromise === setupRun) setupPromise = null
     }
+  }
+
+  /** 開始済みの購読だけを解除し、部分失敗からも再登録できる状態へ戻す。 */
+  function clearListeners(): void {
+    unlistenState?.()
+    unlistenError?.()
+    unlistenState = undefined
+    unlistenError = undefined
   }
 
   /** イベント購読を解除し、破棄後の状態通知を止める。 */
   function dispose(): void {
     if (disposed) return
     disposed = true
-    unlistenState?.()
-    unlistenError?.()
-    unlistenState = undefined
-    unlistenError = undefined
+    clearListeners()
   }
 
   return {

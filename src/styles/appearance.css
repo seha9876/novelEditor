@@ -1,0 +1,55 @@
+/* 独自領域は部位別の色、Vuetifyの共通部品は共有テーマを使用する。 */
+.v-application .writing-area, .editor-host .cm-editor { background: var(--app-editorBackground); color: var(--app-editorText); }
+.editor-host .cm-content ::selection, .editor-host .cm-content::selection { background: var(--app-selection); color: var(--app-selectionText); }
+.editor-host .cm-highlightSpace { background-image: var(--app-space-image); background-size: 1ch 1em; }
+.editor-host .cm-highlightTab { background-image: var(--app-tab-image); background-size: 20px 1em; }
+.v-application .titlebar .v-toolbar__content { background: var(--app-menuBarBackground); color: var(--app-menuBarText); box-shadow: inset 0 -1px var(--app-menuBarBorder); }
+.v-application .toolbar-strip { background: var(--app-toolbarBackground); color: var(--app-toolbarText); border-color: var(--app-toolbarBorder); }
+.v-application .status-bar { background: var(--app-statusBackground); color: var(--app-statusText); box-shadow: inset 0 1px var(--app-statusBorder); }
+.v-application .project-navigation, .v-application .project-tree-sidebar { background: var(--app-treeBackground); color: var(--app-treeText); border-color: var(--app-treeBorder); }
+.project-tree-sidebar .project-tree-header, .project-tree-sidebar .project-tree-origin, .project-tree-sidebar .project-tree-root-drop { border-color: var(--app-treeBorder); }
+.project-tree-sidebar .project-tree-heading, .project-tree-sidebar .project-tree-origin, .project-tree-sidebar .project-tree-empty, .project-tree-sidebar .project-tree-root-drop { color: var(--app-treeMuted); }
+.project-tree-sidebar .project-tree-row:hover, .project-tree-sidebar .project-tree-row:focus-within { background: var(--app-treeHover); }
+.project-tree-sidebar .project-tree-row.is-active { background: var(--app-treeActive); }
+.project-tree-sidebar .project-tree-row.is-active .project-tree-node-name { color: var(--app-treeActiveText); }
+.project-tree-sidebar .project-tree-row.is-selected { background: var(--app-treeSelected); color: var(--app-treeSelectedText); }
+.project-tree-sidebar .project-tree-row.is-selected .project-tree-node-name { color: var(--app-treeSelectedText); }
+.project-tree-sidebar .project-tree-row.is-unavailable .project-tree-node-name { color: var(--app-error); }
+.v-application.settings-shell .settings-main { background: var(--app-settingsBackground); color: var(--app-settingsText); }
+.v-application.settings-shell .settings-navigation, .settings-navigation .v-list { background: var(--app-settingsNavBackground); color: var(--app-settingsNavText); }
+.v-application.settings-shell .v-app-bar { background: var(--app-settingsHeaderBackground); color: var(--app-settingsHeaderText); }
+.settings-shell .v-expansion-panel, .settings-shell .v-expansion-panel-text { background: var(--app-settingsPanel); color: var(--app-settingsText); }
+.v-application.search-shell { background: var(--app-searchBackground); color: var(--app-searchText); }
+.v-menu > .v-overlay__content > .v-list, .v-menu > .v-overlay__content > .v-card { background: var(--app-popupBackground); color: var(--app-popupText); }
+.v-dialog > .v-overlay__content > .v-card { background: var(--app-dialogBackground); color: var(--app-dialogText); }
+.v-application .setting-help, .v-application .setting-subsection-description, .v-application .search-help,
+.v-overlay .menu-shortcut, .v-application .storage-location-pending-description,
+.v-overlay .quick-open-summary, .v-overlay .quick-open-help, .v-overlay .quick-open-empty,
+.v-overlay .quick-open-location, .v-overlay .quick-open-path { color: var(--app-muted); }
+
+/* 状態色は透明な重ね合わせではなく指定したRGBを表示する。無効状態の透明度は維持する。 */
+.v-btn:not(:disabled):hover > .v-btn__overlay, .v-list-item:hover > .v-list-item__overlay { background: var(--app-hover); opacity: 1; }
+.v-btn > .v-btn__content, .v-btn > .v-btn__prepend, .v-btn > .v-btn__append,
+.v-list-item > .v-list-item__content, .v-list-item > .v-list-item__prepend, .v-list-item > .v-list-item__append { z-index: 1; }
+.v-list-item.v-list-item--active, .v-btn.v-btn--active { color: var(--app-onSelected); }
+.v-list-item.v-list-item--active > .v-list-item__overlay, .v-btn.v-btn--active > .v-btn__overlay { background: var(--app-selected); opacity: 1; }
+.v-application :focus-visible, .v-overlay :focus-visible { outline: 2px solid var(--app-focus); outline-offset: -2px; }
+.v-application .v-field__outline, .v-overlay .v-field__outline { color: var(--app-border); --v-field-border-opacity: 1; }
+.v-application .v-field__outline .v-label, .v-overlay .v-field__outline .v-label { color: rgb(var(--v-theme-on-surface)); }
+.v-application .v-field--focused .v-field__outline, .v-overlay .v-field--focused .v-field__outline { color: var(--app-focus); }
+.v-application .v-field--error .v-field__outline, .v-overlay .v-field--error .v-field__outline { color: var(--app-error); }
+.v-overlay .quick-open-result:hover { background: var(--app-hover); }
+.v-overlay .quick-open-result.is-selected { background: var(--app-selected); color: var(--app-onSelected); }
+
+/* 配色編集は狭い設定窓でもHEX入力と復元操作が収まるようにする。 */
+.appearance-settings { display: flex; flex-direction: column; gap: 16px; }
+.appearance-help { margin: 0; font-size: 0.8125rem; line-height: 1.65; color: var(--app-muted); }
+.appearance-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.color-setting-row { display: grid; grid-template-columns: minmax(80px, 1fr) 36px 126px 32px; align-items: start; gap: 10px; padding-block: 9px; border-bottom: 1px solid var(--app-border); }
+.color-setting-label { padding-top: 9px; font-size: 0.875rem; }
+.color-setting-row input[type="color"] { width: 36px; height: 36px; padding: 2px; border: 1px solid var(--app-border); border-radius: 4px; background: var(--app-surface); cursor: pointer; }
+.color-hex-input input { font-family: monospace; font-size: 0.875rem; }
+@media (max-width: 780px) {
+  .color-setting-row { grid-template-columns: minmax(65px, 1fr) 32px 108px 28px; gap: 5px; }
+  .color-setting-row input[type="color"] { width: 32px; }
+}

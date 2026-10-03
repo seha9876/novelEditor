@@ -10,6 +10,8 @@ export type EditorSettings = {
   fontFallback: 'serif' | 'sans-serif'
   fontSize: number
   lineHeight: number
+  showWhitespace: boolean
+  showLineNumbers: boolean
 }
 
 /** 初回移行時に限って読む、旧LocalStorage設定のキー。 */
@@ -23,6 +25,8 @@ export const defaultEditorSettings: EditorSettings = {
   fontFallback: 'serif',
   fontSize: 18,
   lineHeight: 1.9,
+  showWhitespace: false,
+  showLineNumbers: false,
 }
 
 /** 今回の選択候補。保存形式は候補IDに依存させず、任意のフォント名を保持する。 */
@@ -65,5 +69,9 @@ export function normalizeEditorSettings(value: unknown): EditorSettings {
       ? settings.fontSize : defaultEditorSettings.fontSize,
     lineHeight: typeof settings.lineHeight === 'number' && isValidTypographyNumber('lineHeight', settings.lineHeight)
       ? settings.lineHeight : defaultEditorSettings.lineHeight,
+    showWhitespace: typeof settings.showWhitespace === 'boolean'
+      ? settings.showWhitespace : defaultEditorSettings.showWhitespace,
+    showLineNumbers: typeof settings.showLineNumbers === 'boolean'
+      ? settings.showLineNumbers : defaultEditorSettings.showLineNumbers,
   }
 }

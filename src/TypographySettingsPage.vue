@@ -83,5 +83,25 @@ function chooseFont(value: string): void {
         <VBtn size="small" variant="outlined" @click="emit('restoreField', 'lineHeight')">初期値に戻す</VBtn>
       </template>
     </SettingSubsection>
+    <SettingSubsection title="行番号" :heading-level="headingLevel + 1">
+      <VSwitch
+        :model-value="editor.showLineNumbers" label="行番号を表示" color="primary" hide-details
+        @update:model-value="emit('updateEditor', { showLineNumbers: $event === true })"
+      />
+      <p class="setting-help">改行ごとの行番号を表示します。折り返しで増えた表示行には番号を付けません。</p>
+      <template #actions>
+        <VBtn size="small" variant="outlined" @click="emit('restoreField', 'showLineNumbers')">初期値に戻す</VBtn>
+      </template>
+    </SettingSubsection>
+    <SettingSubsection title="空白・タブ" :heading-level="headingLevel + 1">
+      <VSwitch
+        :model-value="editor.showWhitespace" label="空白・タブを表示" color="primary" hide-details
+        @update:model-value="emit('updateEditor', { showWhitespace: $event === true })"
+      />
+      <p class="setting-help">半角空白は点、全角空白は薄い枠、タブは矢印で表示します。本文やコピー内容は変わりません。</p>
+      <template #actions>
+        <VBtn size="small" variant="outlined" @click="emit('restoreField', 'showWhitespace')">初期値に戻す</VBtn>
+      </template>
+    </SettingSubsection>
   </SettingExpansionSection>
 </template>

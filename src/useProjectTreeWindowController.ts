@@ -19,7 +19,7 @@ type ProjectTreeWindowControllerOptions = {
   onOriginDetached: (nodeId: number) => void
 }
 
-/** ツリー幅と分離子窓を組み立て、Appへ既存の操作APIだけを公開する。 */
+/** ツリーの幅・開閉と分離子窓を組み立て、Appへ操作APIを公開する。 */
 export function useProjectTreeWindowController(options: ProjectTreeWindowControllerOptions) {
   const projectTreeDetached = ref(options.initialPreferences.ui.projectTree.detached)
   const paneLayout = useProjectTreePaneLayout({
@@ -65,6 +65,10 @@ export function useProjectTreeWindowController(options: ProjectTreeWindowControl
   }
 
   return {
+    projectTreeCollapsed: paneLayout.projectTreeCollapsed,
+    projectTreeVisuallyCollapsed: paneLayout.projectTreeVisuallyCollapsed,
+    projectTreeDrawerWidth: paneLayout.projectTreeDrawerWidth,
+    toggleProjectTreeCollapsed: paneLayout.toggleProjectTreeCollapsed,
     projectTreeDetached: detachedWindow.projectTreeDetached,
     projectTreeResizing: paneLayout.projectTreeResizing,
     expandedProjectTreeFolderIds: detachedWindow.expandedProjectTreeFolderIds,
@@ -80,6 +84,7 @@ export function useProjectTreeWindowController(options: ProjectTreeWindowControl
     startProjectTreeResize: paneLayout.startProjectTreeResize,
     moveProjectTreeResize: paneLayout.moveProjectTreeResize,
     endProjectTreeResize: paneLayout.endProjectTreeResize,
+    cancelProjectTreeResize: paneLayout.cancelProjectTreeResize,
     onProjectTreeResizeKeydown: paneLayout.onProjectTreeResizeKeydown,
     publishProjectTreeWindowState: detachedWindow.publishProjectTreeWindowState,
     openProjectTreeWindow: detachedWindow.openProjectTreeWindow,

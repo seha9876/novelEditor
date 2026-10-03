@@ -1,5 +1,7 @@
-/** エディター設定と画面構成をStoreへ永続化する。 */
+/** エディター設定・画面構成・配色プリセットをStoreへ永続化する。 */
 import { load, type Store } from '@tauri-apps/plugin-store'
+import { normalizeAppearance, type AppearancePreferences } from './appearance'
+import { exists } from '@tauri-apps/plugin-fs'
 import {
   SETTINGS_STORAGE_KEY,
   normalizeEditorSettings,
@@ -59,7 +61,11 @@ function removeLegacyEditorSettings(): void {
 export async function initializeApplicationPreferences(): Promise<PreferencesInitialization> {
   let stored: unknown
   try {
-    store = await load(getStorageFilePath(preferencesFileName), { autoSave: false })
+    const preferencesFile = getStorageFilePath(preferencesFileName)
+    const fileExists = await exists(preferencesFile)
+    store = await load(preferencesFile, { autoSave: false })
+    // loadは読込エラーも空Storeへ変えるため、既存ファイルを検証して再構築の通知を省略しない。
+    if (fileExists) await store.reload({ ignoreDefaults: true })
     stored = await store.get<unknown>(preferencesKey)
   } catch (error) {
     return recoverPreferences(String(error))
@@ -124,18 +130,20 @@ async function writePreferences(targetStore: Store, preferences: ApplicationPref
   await targetStore.save()
 }
 
-/** エディター・ツールバー・ステータスバー・バーサイズの現在値を一つのStore更新として保存する。 */
+/** 本文・各バー・配色とプリセットの現在値を一つのStore更新として保存する。 */
 export function saveSettingsPreferences(
   editor: EditorSettings,
   toolbar: ToolbarPreferences,
   barSizes: InterfaceBarSizes,
   statusBar?: StatusBarPreferences,
+  appearance?: AppearancePreferences,
 ): Promise<void> {
   return savePreferenceUpdate((current) => ({
     ...current,
     editor: normalizeEditorSettings(editor),
     ui: {
       ...current.ui,
+      appearance: appearance ? normalizeAppearance(appearance) : current.ui.appearance,
       toolbar: {
         visible: toolbar.visible,
         items: normalizeToolbarItems(toolbar.items),
@@ -146,7 +154,7 @@ export function saveSettingsPreferences(
   }))
 }
 
-/** ツリー幅とウィンドウ分離状態を既存の設定Storeへ保存する。 */
+/** ツリー幅・開閉・ウィンドウ分離状態を既存の設定Storeへ保存する。 */
 export function saveProjectTreePreferences(projectTree: ProjectTreePreferences): Promise<void> {
   return savePreferenceUpdate((current) => ({
     ...current,
@@ -155,6 +163,7 @@ export function saveProjectTreePreferences(projectTree: ProjectTreePreferences):
       projectTree: {
         width: Math.max(220, Math.min(480, Math.round(projectTree.width))),
         detached: projectTree.detached,
+        collapsed: projectTree.collapsed,
       },
     },
   }))

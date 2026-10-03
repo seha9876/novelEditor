@@ -7,14 +7,16 @@ use serde::Serialize;
 use tauri::{State, Window};
 
 mod database;
+pub(crate) mod git_history;
 mod nodes;
 mod ordering;
 mod projects;
 mod queries;
+pub(crate) mod recent_files;
 
 use database::initialize_database;
 
-/// 起動時の DB 障害をアプリ全体の起動失敗にせず、ツリー操作だけで報告する状態。
+/// 起動時のDB障害をアプリ全体の起動失敗にせず、ツリー・履歴操作で報告する状態。
 pub struct ProjectTreeState {
     connection: Mutex<Option<Connection>>,
     initialization_error: Mutex<Option<String>>,

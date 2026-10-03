@@ -58,6 +58,7 @@ export function useProjectTreeActions(options: ProjectTreeActionsOptions) {
   const dialogMode = ref<ProjectTreeDialogMode>('folder-create')
   const dialogTitle = ref('')
   const dialogValue = ref('')
+  const dialogProjectId = ref<number | null>(null)
   const dialogParentId = ref<number | null>(null)
   const dialogNodeId = ref<number | null>(null)
 
@@ -75,6 +76,7 @@ export function useProjectTreeActions(options: ProjectTreeActionsOptions) {
     dialogMode.value = mode
     dialogTitle.value = title
     dialogValue.value = initialValue
+    dialogProjectId.value = options.snapshot.value.activeProjectId
     dialogParentId.value = ids.parentId ?? null
     dialogNodeId.value = ids.nodeId ?? null
     dialogOpen.value = true
@@ -85,22 +87,27 @@ export function useProjectTreeActions(options: ProjectTreeActionsOptions) {
     const name = dialogValue.value.trim()
     if (!name || options.isBusy()) return
     const previousNodeIds = new Set(options.snapshot.value.nodes.map((node) => node.id))
+    // 別ウィンドウで表示プロジェクトが変わっても、入力を開始した対象へ保存する。
+    const projectId = dialogProjectId.value
+    const parentId = dialogParentId.value
+    const nodeId = dialogNodeId.value
+    const mode = dialogMode.value
 
     let action: () => Promise<void>
-    if (dialogMode.value === 'folder-create' && options.snapshot.value.activeProjectId !== null) {
-      action = () => createProjectFolder(options.snapshot.value.activeProjectId!, dialogParentId.value, name)
-    } else if (dialogMode.value === 'folder-rename' && dialogNodeId.value !== null) {
-      action = () => renameProjectFolder(dialogNodeId.value!, name)
+    if (mode === 'folder-create' && projectId !== null) {
+      action = () => createProjectFolder(projectId, parentId, name)
+    } else if (mode === 'folder-rename' && nodeId !== null) {
+      action = () => renameProjectFolder(nodeId, name)
     } else {
       return
     }
 
     if (await options.runMutation(action)) {
       dialogOpen.value = false
-      if (dialogMode.value === 'folder-create') {
+      if (mode === 'folder-create') {
         const createdFolder = options.snapshot.value.nodes.find((node) => !previousNodeIds.has(node.id)
           && node.kind === 'folder' && node.name === name
-          && node.parentId === dialogParentId.value && node.projectId === options.snapshot.value.activeProjectId)
+          && node.parentId === parentId && node.projectId === projectId)
         if (createdFolder) options.expandFolderPath(createdFolder.id)
       }
     }

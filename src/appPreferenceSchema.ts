@@ -1,5 +1,6 @@
 /** アプリ設定の保存形式、既定値、検証・複製処理をまとめる。 */
 import type { CommandId } from './appCommands'
+import { cloneAppearance, createDefaultAppearance, normalizeAppearance, type AppearancePreferences } from './appearance'
 import { getToolbarCommandDefinitions, isCommandId } from './appCommands'
 import {
   defaultEditorSettings,
@@ -91,12 +92,14 @@ const removedToolbarCommandIds = new Set([
 export type ProjectTreePreferences = {
   width: number
   detached: boolean
+  collapsed: boolean
 }
 
 export type ApplicationPreferencesV1 = {
   schemaVersion: 1
   editor: EditorSettings
   ui: {
+    appearance: AppearancePreferences
     toolbar: ToolbarPreferences
     statusBar: StatusBarPreferences
     barSizes: InterfaceBarSizes
@@ -110,13 +113,14 @@ export function createDefaultApplicationPreferences(): ApplicationPreferencesV1 
     schemaVersion: 1,
     editor: { ...defaultEditorSettings },
     ui: {
+      appearance: createDefaultAppearance(),
       toolbar: {
         visible: true,
         items: createDefaultToolbarItems(),
       },
       statusBar: createDefaultStatusBarPreferences(),
       barSizes: createDefaultInterfaceBarSizes(),
-      projectTree: { width: defaultProjectTreeWidth, detached: false },
+      projectTree: { width: defaultProjectTreeWidth, detached: false, collapsed: false },
     },
   }
 }
@@ -277,6 +281,7 @@ export function normalizeApplicationPreferences(value: unknown): ApplicationPref
     schemaVersion: 1,
     editor: normalizeEditorSettings(raw.editor),
     ui: {
+      appearance: normalizeAppearance(rawUi.appearance),
       toolbar: {
         visible: typeof rawToolbar.visible === 'boolean' ? rawToolbar.visible : true,
         items: normalizeToolbarItems(rawToolbar.items),
@@ -286,6 +291,7 @@ export function normalizeApplicationPreferences(value: unknown): ApplicationPref
       projectTree: {
         width: Math.max(220, Math.min(480, projectTreeWidth)),
         detached: typeof rawProjectTree.detached === 'boolean' ? rawProjectTree.detached : false,
+        collapsed: typeof rawProjectTree.collapsed === 'boolean' ? rawProjectTree.collapsed : false,
       },
     },
   }
@@ -297,6 +303,7 @@ export function cloneApplicationPreferences(value: ApplicationPreferencesV1): Ap
     schemaVersion: 1,
     editor: { ...value.editor },
     ui: {
+      appearance: cloneAppearance(value.ui.appearance),
       toolbar: {
         visible: value.ui.toolbar.visible,
         items: value.ui.toolbar.items.map((item) => ({ ...item })),

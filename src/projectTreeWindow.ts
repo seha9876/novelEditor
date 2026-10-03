@@ -30,6 +30,8 @@ export type ProjectTreeOpenRequest = {
   requestId: string
   nodeId: number
   projectId: number
+  /** 検索時の参照先。指定時は再指定された候補を開かず、再検索を促す。 */
+  expectedPath?: string
 }
 
 export type ProjectTreeWindowCommand =

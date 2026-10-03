@@ -11,6 +11,7 @@ const props = defineProps<{
   menuHeight: number
   toolbarHeight: number
   toolbarVisible: boolean
+  focusMode: boolean
   toolbarItems: ToolbarItem[]
   editorSettings: EditorSettings
   displayName: string
@@ -50,13 +51,14 @@ function closeMainMenusForToolbar(): void {
   <VAppBar
     class="titlebar"
     :height="props.menuHeight"
-    :extended="props.toolbarVisible"
+    :extended="props.toolbarVisible && !props.focusMode"
     :extension-height="props.toolbarHeight"
     flat
   >
     <MainMenuBar
       ref="mainMenuBar"
       :toolbar-visible="props.toolbarVisible"
+      :focus-mode="props.focusMode"
       :editor-settings="props.editorSettings"
       :display-name="props.displayName"
       :document-path="props.documentPath"
@@ -77,7 +79,7 @@ function closeMainMenusForToolbar(): void {
     />
     <template #extension>
       <EditorToolbar
-        v-if="props.toolbarVisible"
+        v-if="props.toolbarVisible && !props.focusMode"
         :toolbar-items="props.toolbarItems"
         :editor-settings="props.editorSettings"
         :app-commands="props.appCommands"

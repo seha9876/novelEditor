@@ -1,7 +1,8 @@
 /** 描画直前に最新値をまとめる。背景窓で描画が止まっても50ms以内に処理を開始する。 */
 export function createFrameTask(run: () => void) {
-  const requestFrame = globalThis.requestAnimationFrame?.bind(globalThis)
-  const cancelFrame = globalThis.cancelAnimationFrame?.bind(globalThis)
+  // APIがない環境ではタイマーを使う。生成時に保持し、後で環境が変わっても予約を解除できるようにする。
+  const requestFrame = typeof globalThis.requestAnimationFrame === 'function' ? globalThis.requestAnimationFrame.bind(globalThis) : undefined
+  const cancelFrame = typeof globalThis.cancelAnimationFrame === 'function' ? globalThis.cancelAnimationFrame.bind(globalThis) : undefined
   let frame: number | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
   let disposed = false

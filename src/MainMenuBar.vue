@@ -9,6 +9,7 @@ import { useMainMenuState } from './useMainMenuState'
 
 type MainMenuBarProps = {
   toolbarVisible: boolean
+  focusMode: boolean
   editorSettings: EditorSettings
   displayName: string
   documentPath: string | null
@@ -34,6 +35,7 @@ const emit = defineEmits<{
 
 const {
   toolbarVisible,
+  focusMode,
   editorSettings,
   displayName,
   documentPath,
@@ -102,6 +104,11 @@ defineExpose({ closeMenus })
         <VListItem role="menuitem" :disabled="isCommandDisabled('document.open')" title="開く" @click="runMenuCommand('document.open')">
           <template #append><span class="menu-shortcut">{{ getCommandShortcut('document.open') }}</span></template>
         </VListItem>
+        <VListItem role="menuitem" :disabled="isCommandDisabled('document.quickOpen')" title="プロジェクト内ファイルを開く" @click="runMenuCommand('document.quickOpen')">
+          <template #append><span class="menu-shortcut">{{ getCommandShortcut('document.quickOpen') }}</span></template>
+        </VListItem>
+        <VListItem role="menuitem" :disabled="isCommandDisabled('document.recentFiles')" title="最近開いたファイル…" @click="runMenuCommand('document.recentFiles')" />
+        <VListItem role="menuitem" :disabled="isCommandDisabled('document.gitHistory')" title="履歴とバックアップ…" @click="runMenuCommand('document.gitHistory')" />
         <VListItem role="menuitem" :disabled="isCommandDisabled('document.save')" title="保存" @click="runMenuCommand('document.save')">
           <template #append><span class="menu-shortcut">{{ getCommandShortcut('document.save') }}</span></template>
         </VListItem>
@@ -120,6 +127,9 @@ defineExpose({ closeMenus })
         </VListItem>
         <VListItem role="menuitem" :disabled="isCommandDisabled('edit.replace')" title="置換" @click="runMenuCommand('edit.replace')">
           <template #append><span class="menu-shortcut">{{ getCommandShortcut('edit.replace') }}</span></template>
+        </VListItem>
+        <VListItem role="menuitem" :disabled="isCommandDisabled('edit.goToLine')" title="行へ移動" @click="runMenuCommand('edit.goToLine')">
+          <template #append><span class="menu-shortcut">{{ getCommandShortcut('edit.goToLine') }}</span></template>
         </VListItem>
       </VList>
     </VMenu>
@@ -165,6 +175,17 @@ defineExpose({ closeMenus })
         <VBtn v-bind="displayMenuProps" class="menu-heading" size="small" variant="text">表示</VBtn>
       </template>
       <VList density="compact" min-width="240" role="menu" aria-label="表示">
+        <VListItem v-for="item in [{ id: 'toggle', label: 'サイドバーを開閉' }, { id: 'project', label: 'プロジェクトパネル' }, { id: 'search', label: '検索パネル' }, { id: 'history', label: '履歴パネル' }, { id: 'outline', label: 'アウトラインパネル' }]" :key="item.id" role="menuitem" :title="item.label" :disabled="isCommandDisabled(`view.sidebar.${item.id}` as CommandId)" @click="runMenuCommand(`view.sidebar.${item.id}` as CommandId)" />
+        <VListItem role="menuitemcheckbox" :aria-checked="focusMode" :active="focusMode" :disabled="isCommandDisabled('view.focusMode.toggle')" title="集中モード" @click="runMenuCommand('view.focusMode.toggle')">
+          <template #prepend><VIcon icon="mdi-check" :style="{ visibility: focusMode ? 'visible' : 'hidden' }" aria-hidden="true" /></template>
+          <template #append><span class="menu-shortcut">{{ getCommandShortcut('view.focusMode.toggle') }}</span></template>
+        </VListItem>
+        <VListItem role="menuitemcheckbox" :aria-checked="editorSettings.showLineNumbers" :active="editorSettings.showLineNumbers" :disabled="isCommandDisabled('view.lineNumbers.toggle')" title="行番号を表示" @click="runMenuCommand('view.lineNumbers.toggle')">
+          <template #prepend><VIcon icon="mdi-check" :style="{ visibility: editorSettings.showLineNumbers ? 'visible' : 'hidden' }" aria-hidden="true" /></template>
+        </VListItem>
+        <VListItem role="menuitemcheckbox" :aria-checked="editorSettings.showWhitespace" :active="editorSettings.showWhitespace" :disabled="isCommandDisabled('view.whitespace.toggle')" title="空白・タブを表示" @click="runMenuCommand('view.whitespace.toggle')">
+          <template #prepend><VIcon icon="mdi-check" :style="{ visibility: editorSettings.showWhitespace ? 'visible' : 'hidden' }" aria-hidden="true" /></template>
+        </VListItem>
         <VListItem role="menuitemcheckbox" :aria-checked="toolbarVisible" :active="toolbarVisible" title="ツールバーを表示" @click="runMenuCommand('view.toolbar.toggle')">
           <template #prepend><VIcon icon="mdi-check" :style="{ visibility: toolbarVisible ? 'visible' : 'hidden' }" aria-hidden="true" /></template>
         </VListItem>

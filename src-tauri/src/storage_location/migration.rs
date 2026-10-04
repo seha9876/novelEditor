@@ -202,7 +202,7 @@ pub(super) fn fingerprint_data_files(directory: &Path) -> Result<BTreeMap<String
         let file_path = directory.join(file_name);
         match fs::symlink_metadata(&file_path) {
             Ok(metadata) if metadata.file_type().is_file() => {
-                fingerprints.insert(file_name.to_string(), fingerprint_file(&file_path)?);
+                fingerprints.insert(file_name.to_string(), fingerprint_data_file(&file_path)?);
             }
             Ok(_) => {
                 return Err(format!(
@@ -215,6 +215,60 @@ pub(super) fn fingerprint_data_files(directory: &Path) -> Result<BTreeMap<String
         }
     }
     Ok(fingerprints)
+}
+
+/// SQLite の未チェックポイント更新も指紋に含め、DB 本体だけでは見落とす変更を検出する。
+/// 補助ファイルがない場合は従来の指紋と一致させ、保存済みポインタとの互換性を保つ。
+pub(super) fn fingerprint_data_file(path: &Path) -> Result<String, String> {
+    let main_fingerprint = fingerprint_file(path)?;
+    if path.file_name().and_then(|name| name.to_str()) != Some(PROJECT_TREE_FILE) {
+        return Ok(main_fingerprint);
+    }
+    let mut sidecar_fingerprints = Vec::new();
+    for suffix in ["-wal", "-journal"] {
+        let sidecar = path.with_file_name(format!("{PROJECT_TREE_FILE}{suffix}"));
+        match fs::symlink_metadata(&sidecar) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                // 読み取り専用の SQLite 接続でも空 WAL が作られるため、内容がある場合だけ含める。
+                if metadata.len() > 0 {
+                    sidecar_fingerprints.push((suffix, fingerprint_file(&sidecar)?));
+                }
+            }
+            Ok(_) => {
+                return Err(format!(
+                    "SQLite 補助ファイルが通常ファイルではありません: {}",
+                    sidecar.display()
+                ))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("SQLite 補助ファイルを確認できません: {error}")),
+        }
+    }
+    if sidecar_fingerprints.is_empty() {
+        return Ok(main_fingerprint);
+    }
+    let mut digest = Sha256::new();
+    digest.update(main_fingerprint.as_bytes());
+    for (suffix, fingerprint) in sidecar_fingerprints {
+        digest.update(suffix.as_bytes());
+        digest.update(fingerprint.as_bytes());
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+/// SQLite の未反映更新を残すため、内容のある補助ファイルが残る間は旧 DB の削除を止める。
+/// 読み取り専用接続が生成した空 WAL は更新を持たないため、片付けを妨げない。
+pub(super) fn verify_sqlite_cleanup_safe(directory: &Path) -> Result<(), String> {
+    for suffix in ["-wal", "-journal"] {
+        let sidecar = directory.join(format!("{PROJECT_TREE_FILE}{suffix}"));
+        match fs::symlink_metadata(&sidecar) {
+            Ok(metadata) if metadata.file_type().is_file() && metadata.len() == 0 => {}
+            Ok(_) => return Err(format!("旧データに SQLite の更新情報が残っているため削除しませんでした。使用中のアプリを閉じて再試行するか、旧データを残してください: {}", sidecar.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("旧データの SQLite 更新情報を確認できません: {error}")),
+        }
+    }
+    Ok(())
 }
 
 /// SQLite が大きくても全体をメモリへ読み込まず fingerprint を計算する。
@@ -260,6 +314,91 @@ mod tests {
         connection
             .execute("INSERT INTO documents(name) VALUES (?1)", params!["third"])
             .unwrap();
+    }
+
+    /// 原稿本文を含まない履歴テーブルも、IDと並び順を保って保存先へ移す。
+    #[test]
+    fn migrates_recent_files_with_stable_ids_and_order() {
+        let directory = TestDirectory::new();
+        let source = directory.path().join("source");
+        let target = directory.path().join("target");
+        crate::project_tree::prepare_new_database_file(&source.join(PROJECT_TREE_FILE)).unwrap();
+        let connection = Connection::open(source.join(PROJECT_TREE_FILE)).unwrap();
+        connection.execute_batch("INSERT INTO recent_files(id, path, path_key, last_used) VALUES (9, 'C:/原稿.txt', 'c:/原稿.txt', 2), (12, 'D:/原稿.txt', 'd:/原稿.txt', 1);").unwrap();
+        drop(connection);
+        migrate_data_files(&source, &target).unwrap();
+        assert!(sqlite_contents_match(
+            &source.join(PROJECT_TREE_FILE),
+            &target.join(PROJECT_TREE_FILE)
+        )
+        .unwrap());
+        assert!(
+            !crate::project_tree::is_empty_database_file(&target.join(PROJECT_TREE_FILE)).unwrap()
+        );
+        let connection = Connection::open(target.join(PROJECT_TREE_FILE)).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT id FROM recent_files ORDER BY last_used DESC LIMIT 1",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            9
+        );
+    }
+
+    /// WAL だけに追記された変更も検知し、通常 DB の指紋は旧形式と一致する。
+    #[test]
+    fn database_fingerprint_includes_uncheckpointed_wal_updates() {
+        let test_directory = TestDirectory::new();
+        let database_path = test_directory.path().join(PROJECT_TREE_FILE);
+        create_test_database(&database_path);
+        assert_eq!(
+            fingerprint_data_file(&database_path).unwrap(),
+            fingerprint_file(&database_path).unwrap()
+        );
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;")
+            .unwrap();
+        let before_main = fingerprint_file(&database_path).unwrap();
+        let before_data = fingerprint_data_file(&database_path).unwrap();
+
+        connection
+            .execute("INSERT INTO documents(name) VALUES ('wal update')", [])
+            .unwrap();
+
+        assert_eq!(fingerprint_file(&database_path).unwrap(), before_main);
+        assert_ne!(fingerprint_data_file(&database_path).unwrap(), before_data);
+        assert!(verify_sqlite_cleanup_safe(test_directory.path()).is_err());
+        drop(connection);
+    }
+
+    /// Git登録と保管先・記録者も既存DBの移行に含め、原稿リポジトリ自体は移動しない。
+    #[test]
+    fn migrates_git_workspaces_and_backup_locations() {
+        let directory = TestDirectory::new();
+        let source = directory.path().join("source");
+        let target = directory.path().join("target");
+        crate::project_tree::prepare_new_database_file(&source.join(PROJECT_TREE_FILE)).unwrap();
+        let connection = Connection::open(source.join(PROJECT_TREE_FILE)).unwrap();
+        connection.execute("INSERT INTO git_workspaces(root, backup, author_name, author_email) VALUES ('C:/原稿', 'D:/backup.git', '作者', '')", []).unwrap();
+        drop(connection);
+        migrate_data_files(&source, &target).unwrap();
+        assert!(sqlite_contents_match(
+            &source.join(PROJECT_TREE_FILE),
+            &target.join(PROJECT_TREE_FILE)
+        )
+        .unwrap());
+        let connection = Connection::open(target.join(PROJECT_TREE_FILE)).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT backup FROM git_workspaces", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            "D:/backup.git"
+        );
     }
 
     /// 各データファイルが任意に欠けていても、存在する分だけを移行できる。

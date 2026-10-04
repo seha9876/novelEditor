@@ -14,6 +14,7 @@ export type ProjectTreeOpenResult = {
   nodeId: number
   error?: string
   unavailable?: boolean
+  outcome?: 'opened' | 'cancelled' | 'failed'
 }
 
 export type ProjectTreeWindowState = {
@@ -30,6 +31,10 @@ export type ProjectTreeOpenRequest = {
   requestId: string
   nodeId: number
   projectId: number
+  /** 検索時の参照先。指定時は再指定された候補を開かず、再検索を促す。 */
+  expectedPath?: string
+  /** 本文検索時の元バイト列。異なる内容では位置移動のために読み込まない。 */
+  searchFingerprint?: string
 }
 
 export type ProjectTreeWindowCommand =

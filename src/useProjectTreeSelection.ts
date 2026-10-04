@@ -1,5 +1,5 @@
 /** プロジェクトツリーの展開、選択、表示行、キーボード操作を画面構成から分離する。 */
-import { computed, ref, type Ref } from 'vue'
+import { computed, ref, watch, type Ref } from 'vue'
 import {
   projectTreeSelectionAfterClick,
   projectTreeSelectionAfterContextMenu,
@@ -17,6 +17,9 @@ type ProjectTreeSelectionOptions = {
   onExpandedChange: (nodeIds: number[]) => void
   onUnavailableChange: (nodeIds: number[]) => void
   isDialogOpen: () => boolean
+  isBusy: () => boolean
+  onActivateNode: (node: ProjectTreeNode) => void
+  onFocusNode: (nodeId: number | null, restoreOnly: boolean) => void
   onDeleteSelection: () => void
   onEscape: () => void
 }
@@ -27,6 +30,7 @@ export function useProjectTreeSelection(options: ProjectTreeSelectionOptions) {
   const unavailableNodes = ref(new Set<number>(options.unavailableNodeIds))
   const selectedNodeIds = ref(new Set<number>())
   const selectionAnchorNodeId = ref<number | null>(null)
+  const focusedNodeId = ref<number | null>(null)
 
   /** 保存順を保ったまま、選択中プロジェクトの展開済み行を階層順に並べる。 */
   const visibleRows = computed<VisibleProjectTreeRow[]>(() => {
@@ -48,6 +52,45 @@ export function useProjectTreeSelection(options: ProjectTreeSelectionOptions) {
     appendChildren(null, 0)
     return rows
   })
+
+  // DOMの更新前に旧行を参照し、折りたたみ・削除後も親か近隣へ移れるようにする。
+  watch(visibleRows, (rows, previousRows = []) => {
+    if (rows.some((row) => row.node.id === focusedNodeId.value)) return
+    const previousId = focusedNodeId.value
+    const previousIndex = previousRows.findIndex((row) => row.node.id === previousId)
+    const previousNodes = new Map(previousRows.map((row) => [row.node.id, row.node]))
+    const visibleIds = new Set(rows.map((row) => row.node.id))
+    let parentId = previousId === null ? null : previousNodes.get(previousId)?.parentId ?? null
+    const visited = new Set<number>()
+    while (parentId !== null && !visibleIds.has(parentId) && !visited.has(parentId)) {
+      visited.add(parentId)
+      parentId = previousNodes.get(parentId)?.parentId ?? null
+    }
+    focusedNodeId.value = parentId !== null && visibleIds.has(parentId)
+      ? parentId
+      : rows[Math.min(Math.max(previousIndex, 0), rows.length - 1)]?.node.id ?? null
+    pruneSelectionToVisibleRows()
+    if (previousId !== null) options.onFocusNode(focusedNodeId.value, true)
+  }, { flush: 'sync', immediate: true })
+
+  /** 行ボタンへのフォーカスやクリックをTab移動先へ反映する。選択は変更しない。 */
+  function setFocusedNode(nodeId: number): void {
+    if (visibleRows.value.some((row) => row.node.id === nodeId)) focusedNodeId.value = nodeId
+  }
+
+  /** キーボード移動先へフォーカスし、修飾キーに応じて既存の範囲選択を適用する。 */
+  function focusNode(nodeId: number, event: KeyboardEvent): void {
+    const anchorId = selectionAnchorNodeId.value ?? focusedNodeId.value
+    focusedNodeId.value = nodeId
+    if (event.shiftKey || !(event.ctrlKey || event.metaKey)) {
+      const change = projectTreeSelectionAfterClick(
+        visibleRows.value.map((row) => row.node.id), selectedNodeIds.value, anchorId, nodeId,
+        { ctrlKey: event.ctrlKey || event.metaKey, shiftKey: event.shiftKey },
+      )
+      setNodeSelection(change.selectedNodeIds, change.anchorNodeId)
+    }
+    options.onFocusNode(nodeId, false)
+  }
 
   /** ツリーの選択状態を置き換え、範囲選択の基準行も更新する。 */
   function setNodeSelection(nodeIds: number[], anchorNodeId: number | null = nodeIds.at(-1) ?? null): void {
@@ -73,6 +116,7 @@ export function useProjectTreeSelection(options: ProjectTreeSelectionOptions) {
 
   /** ツリーの表示行に対するクリック選択を適用する。 */
   function selectNodeFromClick(event: MouseEvent, node: ProjectTreeNode): boolean {
+    setFocusedNode(node.id)
     const change = projectTreeSelectionAfterClick(
       visibleRows.value.map((row) => row.node.id),
       selectedNodeIds.value,
@@ -86,6 +130,7 @@ export function useProjectTreeSelection(options: ProjectTreeSelectionOptions) {
 
   /** 右クリック対象が未選択なら単独選択し、選択済みなら既存の選択を維持する。 */
   function selectNodeFromContextMenu(node: ProjectTreeNode): void {
+    setFocusedNode(node.id)
     const change = projectTreeSelectionAfterContextMenu(
       visibleRows.value.map((row) => row.node.id),
       selectedNodeIds.value,
@@ -172,11 +217,49 @@ export function useProjectTreeSelection(options: ProjectTreeSelectionOptions) {
     return false
   }
 
-  /** ツリー内のキーボード選択操作と一括解除を処理する。 */
+  /** 可視行の移動・展開・選択・起動を処理し、入力中や処理中の操作を抑止する。 */
   function handleTreeKeydown(event: KeyboardEvent): void {
-    if (options.isDialogOpen()) return
-    const target = event.target instanceof HTMLElement ? event.target : null
-    if (target?.closest('input, textarea, [contenteditable="true"], [role="combobox"]')) return
+    if (options.isDialogOpen() || options.isBusy() || event.isComposing || event.keyCode === 229 || event.altKey) return
+    const target = typeof HTMLElement !== 'undefined' && event.target instanceof HTMLElement ? event.target : null
+    if (target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="combobox"]')) return
+
+    const rows = visibleRows.value
+    const index = rows.findIndex((row) => row.node.id === focusedNodeId.value)
+    const node = rows[index]?.node
+    const control = event.ctrlKey || event.metaKey
+    if (['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault()
+      const nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
+        : event.key === 'ArrowDown' ? Math.min(index + 1, rows.length - 1) : Math.max(index - 1, 0)
+      const nextNode = rows[nextIndex]?.node
+      if (nextNode) focusNode(nextNode.id, event)
+      return
+    }
+    if (node && (event.key === 'ArrowRight' || event.key === 'ArrowLeft')) {
+      event.preventDefault()
+      if (event.key === 'ArrowRight') {
+        const child = rows[index + 1]?.node
+        if (node.kind === 'folder' && !expandedFolders.value.has(node.id)) toggleFolder(node.id)
+        else if (child?.parentId === node.id) focusNode(child.id, event)
+      } else if (node.kind === 'folder' && expandedFolders.value.has(node.id)) toggleFolder(node.id)
+      else if (node.parentId !== null) focusNode(node.parentId, event)
+      return
+    }
+    if (node && event.key === ' ' && control) {
+      event.preventDefault()
+      const ids = new Set(selectedNodeIds.value)
+      if (ids.has(node.id)) ids.delete(node.id)
+      else ids.add(node.id)
+      setNodeSelection([...ids], node.id)
+      return
+    }
+    if (node && event.key === 'Enter' && !control && !event.shiftKey
+      && !target?.closest('.project-tree-actions')) {
+      event.preventDefault()
+      setNodeSelection([node.id])
+      options.onActivateNode(node)
+      return
+    }
 
     if (event.key === 'Escape') {
       event.preventDefault()
@@ -208,6 +291,8 @@ export function useProjectTreeSelection(options: ProjectTreeSelectionOptions) {
     expandedFolders,
     unavailableNodes,
     selectedNodeIds,
+    focusedNodeId,
+    setFocusedNode,
     visibleRows,
     setNodeSelection,
     clearNodeSelection,

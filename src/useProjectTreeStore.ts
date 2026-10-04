@@ -146,13 +146,14 @@ export function useProjectTreeStore(options: ProjectTreeStoreOptions) {
     try {
       await action()
       mutationSucceeded = true
+      // DB更新は画面の寿命や再読込の成否と独立して完了するため、他画面へ先に通知する。
+      changeRevision += 1
+      void notifyProjectTreeChanged(sourceId, changeRevision).catch((error) => {
+        console.error('プロジェクトツリーの変更通知を送信できませんでした。', error)
+      })
       if (!isActive(generation)) return false
       await refreshSnapshot()
       if (!isActive(generation)) return false
-      changeRevision += 1
-      void notifyProjectTreeChanged(sourceId, changeRevision).catch((error) => {
-        if (!disposed) console.error('プロジェクトツリーの変更通知を送信できませんでした。', error)
-      })
       return true
     } catch (error) {
       if (!isActive(generation)) return false

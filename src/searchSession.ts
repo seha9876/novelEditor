@@ -3,6 +3,15 @@ export type SearchConditions = { search: string; replace: string; caseSensitive:
 export type SearchField = 'search' | 'replace'
 export type SearchAction = 'next' | 'previous' | 'replace' | 'replaceAll'
 export type SearchStatus = 'empty' | 'invalid' | 'notFound' | 'found'
+export type SearchScopeAction = 'capture' | 'clear'
+export type SearchScopeStatus = {
+  enabled: boolean
+  empty: boolean
+  canCapture: boolean
+  startLine: number | null
+  endLine: number | null
+  reason: string
+}
 
 export const SEARCH_COMMAND_EVENT = 'editor-search-command'
 export const SEARCH_STATE_EVENT = 'editor-search-state'
@@ -10,6 +19,14 @@ export const SEARCH_STATE_EVENT = 'editor-search-state'
 export type SearchCommand =
   | { type: 'ready'; sessionId: string }
   | { type: 'close'; sessionId: string; sequence: number; documentRevision: number; conditions?: SearchConditions }
+  | {
+      type: 'scope'
+      sessionId: string
+      sequence: number
+      documentRevision: number
+      conditions: SearchConditions
+      scopeAction: SearchScopeAction
+    }
   | {
       type: 'change' | 'action'
       sessionId: string
@@ -23,6 +40,7 @@ export type SearchSnapshot = {
   sessionId: string
   conditions: SearchConditions
   status: SearchStatus
+  scope: SearchScopeStatus
   locked: boolean
   documentRevision: number
   acknowledgedSequence: number
@@ -34,6 +52,11 @@ export type SearchSnapshot = {
 /** 検索条件の初期値を返す。条件はファイルへ保存せずアプリのセッション内だけで保持する。 */
 export function createSearchConditions(): SearchConditions {
   return { search: '', replace: '', caseSensitive: false, regexp: false }
+}
+
+/** 本文が未接続のときの範囲状態を返す。範囲や選択内容は永続保存しない。 */
+export function createSearchScopeStatus(): SearchScopeStatus {
+  return { enabled: false, empty: false, canCapture: false, startLine: null, endLine: null, reason: '本文で検索対象の範囲を選択してください。' }
 }
 
 /** 条件の更新順序と文書ロックの境界を管理し、遅延した置換を別文書へ適用させない。 */
@@ -63,7 +86,7 @@ export class SearchSession {
   }
 
   /** 最新条件を受け取り、同じ文書世代で操作可能な要求にだけ実行許可を返す。 */
-  receive(command: Exclude<SearchCommand, { type: 'ready' }>): { accepted: boolean; action?: SearchAction } {
+  receive(command: Exclude<SearchCommand, { type: 'ready' }>): { accepted: boolean; action?: SearchAction; scopeAction?: SearchScopeAction } {
     if (command.sessionId !== this.sessionId || command.sequence <= this.sequence) return { accepted: false }
     this.sequence = command.sequence
     if (command.conditions) this.conditions = { ...command.conditions }
@@ -71,6 +94,8 @@ export class SearchSession {
       accepted: true,
       action: command.type === 'action' && !this.locked && command.documentRevision === this.documentRevision
         ? command.action : undefined,
+      scopeAction: command.type === 'scope' && !this.locked && command.documentRevision === this.documentRevision
+        ? command.scopeAction : undefined,
     }
   }
 }

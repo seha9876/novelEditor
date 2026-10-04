@@ -8,7 +8,10 @@ use std::{
 };
 
 use super::{
-    migration::{fingerprint_data_files, fingerprint_file, migrate_data_files},
+    migration::{
+        fingerprint_data_file, fingerprint_data_files, migrate_data_files,
+        verify_sqlite_cleanup_safe,
+    },
     paths::{
         display_path, same_existing_path, APP_DATA_DIRECTORY, DATA_FILES, POINTER_FILE,
         PROJECT_TREE_FILE,
@@ -190,6 +193,7 @@ impl StorageLocationState {
         if same_existing_path(&cleanup_directory, &active_directory) {
             return Err("移行元と現在の保存先が同じため、旧データを削除できません".to_string());
         }
+        verify_sqlite_cleanup_safe(&cleanup_directory)?;
 
         let mut files_to_remove = Vec::new();
         for file_name in DATA_FILES {
@@ -203,7 +207,7 @@ impl StorageLocationState {
                         .ok_or_else(|| {
                             format!("旧保存先の検証情報がありません: {}", file_path.display())
                         })?;
-                    if fingerprint_file(&file_path)? != *expected {
+                    if fingerprint_data_file(&file_path)? != *expected {
                         return Err(format!(
                             "移行後に旧データが変更されたため削除しませんでした。ファイルを確認してから旧データを整理してください: {}",
                             file_path.display()
@@ -226,6 +230,9 @@ impl StorageLocationState {
                 }
             }
         }
+        // Windows で別接続が DB を保持している場合、設定だけを先に消さず最初に失敗させる。
+        files_to_remove
+            .sort_by_key(|path| path.file_name() != Some(std::ffi::OsStr::new(PROJECT_TREE_FILE)));
         for file_path in files_to_remove {
             fs::remove_file(&file_path).map_err(|error| {
                 format!(
@@ -706,6 +713,145 @@ mod tests {
             b"written by another process"
         );
         assert!(state.status().unwrap().cleanup_pending);
+    }
+
+    /// 読み取り検証が残した空 WAL は、正常な移行後の片付けを妨げない。
+    #[test]
+    fn empty_wal_allows_cleanup_after_migration() {
+        let test_directory = TestDirectory::new();
+        let default_directory = test_directory.path().join("default");
+        let selected_parent = test_directory.path().join("selected");
+        fs::create_dir_all(&default_directory).unwrap();
+        fs::create_dir_all(&selected_parent).unwrap();
+        let database_path = default_directory.join(PROJECT_TREE_FILE);
+        create_project_tree_database(&database_path);
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch("PRAGMA journal_mode = WAL;")
+            .unwrap();
+        drop(connection);
+        fs::write(default_directory.join(PREFERENCES_FILE), b"preferences").unwrap();
+        let state = StorageLocationState::new(default_directory.clone());
+        state
+            .schedule_change(selected_parent.to_str().unwrap())
+            .unwrap();
+        let active_directory = state.bootstrap().unwrap();
+        assert_eq!(
+            fs::metadata(default_directory.join(format!("{PROJECT_TREE_FILE}-wal")))
+                .unwrap()
+                .len(),
+            0
+        );
+
+        assert!(!state.confirm_startup().unwrap().cleanup_pending);
+
+        assert!(!database_path.exists());
+        assert!(!default_directory.join(PREFERENCES_FILE).exists());
+        crate::project_tree::validate_database_file(&active_directory.join(PROJECT_TREE_FILE))
+            .unwrap();
+        assert_eq!(
+            fs::read(active_directory.join(PREFERENCES_FILE)).unwrap(),
+            b"preferences"
+        );
+    }
+
+    /// Windows の共有ロック中は空 WAL でも旧設定を残し、接続終了後は片付けを再試行できる。
+    #[cfg(windows)]
+    #[test]
+    fn open_database_with_empty_wal_preserves_all_old_files_until_connection_closes() {
+        let test_directory = TestDirectory::new();
+        let default_directory = test_directory.path().join("default");
+        let selected_parent = test_directory.path().join("selected");
+        fs::create_dir_all(&default_directory).unwrap();
+        fs::create_dir_all(&selected_parent).unwrap();
+        let database_path = default_directory.join(PROJECT_TREE_FILE);
+        create_project_tree_database(&database_path);
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch("PRAGMA journal_mode = WAL;")
+            .unwrap();
+        drop(connection);
+        fs::write(default_directory.join(PREFERENCES_FILE), b"preferences").unwrap();
+        let state = StorageLocationState::new(default_directory.clone());
+        state
+            .schedule_change(selected_parent.to_str().unwrap())
+            .unwrap();
+        state.bootstrap().unwrap();
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .query_row("SELECT COUNT(*) FROM projects", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(
+            fs::metadata(default_directory.join(format!("{PROJECT_TREE_FILE}-wal")))
+                .unwrap()
+                .len(),
+            0
+        );
+
+        assert!(state.confirm_startup().is_err());
+
+        assert!(database_path.exists());
+        assert!(default_directory.join(PREFERENCES_FILE).exists());
+        assert!(state.status().unwrap().cleanup_pending);
+        drop(connection);
+        assert!(!state.confirm_startup().unwrap().cleanup_pending);
+        assert!(!database_path.exists());
+        assert!(!default_directory.join(PREFERENCES_FILE).exists());
+    }
+
+    /// 本体の指紋が同じでも、別接続の WAL 更新がある旧 DB と他の旧ファイルを削除しない。
+    #[test]
+    fn uncheckpointed_database_updates_block_all_cleanup() {
+        let test_directory = TestDirectory::new();
+        let default_directory = test_directory.path().join("default");
+        let selected_parent = test_directory.path().join("selected");
+        fs::create_dir_all(&default_directory).unwrap();
+        fs::create_dir_all(&selected_parent).unwrap();
+        let database_path = default_directory.join(PROJECT_TREE_FILE);
+        create_project_tree_database(&database_path);
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch("PRAGMA journal_mode = WAL;")
+            .unwrap();
+        drop(connection);
+        fs::write(
+            default_directory.join(PREFERENCES_FILE),
+            b"preserve preferences",
+        )
+        .unwrap();
+        let state = StorageLocationState::new(default_directory.clone());
+        state
+            .schedule_change(selected_parent.to_str().unwrap())
+            .unwrap();
+        state.bootstrap().unwrap();
+        let before = fs::read(&database_path).unwrap();
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects(name) VALUES ('written after migration')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(fs::read(&database_path).unwrap(), before);
+
+        assert!(state.confirm_startup().unwrap_err().contains("SQLite"));
+
+        assert!(database_path.exists());
+        assert!(default_directory.join(PREFERENCES_FILE).exists());
+        assert!(state.status().unwrap().cleanup_pending);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM projects WHERE name = 'written after migration'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        drop(connection);
     }
 
     /// 明示的な後片付け解除は旧ファイルを残し、ポインタ上の予約だけを消す。

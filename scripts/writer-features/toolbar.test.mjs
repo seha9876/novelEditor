@@ -86,7 +86,7 @@ test('ステータスバー項目は保存順に描画し、設定画面だけ�
     assert.match(schema, new RegExp(`'${itemId}'`))
   }
   assert.match(controller, /normalizeStatusBarPreferences\(options\.initialPreferences\.ui\.statusBar\)/)
-  assert.match(controller, /saveSettingsPreferences\(snapshot\.editor, snapshot\.toolbar, snapshot\.barSizes, snapshot\.statusBar\)/)
+  assert.match(controller, /saveSettingsPreferences\(snapshot\.editor, snapshot\.toolbar, snapshot\.barSizes, snapshot\.statusBar, snapshot\.appearance, snapshot\.outline\)/)
   assert.match(settings, /page\.id === 'appearance\.statusBar'/)
   assert.match(settings, /resetDialogOpen/)
   assert.match(settings, /statusBarResetDialog\.value/)
@@ -137,8 +137,8 @@ test('バーサイズの初期化範囲は全設定とツールバー構成で�
   assert.match(settings, /const toolbar = resetToolbarPreferences\(snapshot\.value\.toolbar\)/)
   assert.doesNotMatch(settings.slice(settings.indexOf('function confirmToolbarDefaults'), settings.indexOf('/** 全設定初期化の確認画面を開く。')), /barSizes/)
   assert.match(settingsController, /function cloneCurrentSettings\(\): SettingsValues/)
-  assert.match(settingsController, /updateCurrentSettings\(previous\.editor, previous\.toolbar, false, false, previous\.barSizes\)/)
-  assert.match(settingsController, /updateCurrentSettings\(next\.editor, next\.toolbar, false, false, next\.barSizes\)/)
+  assert.match(settingsController, /updateCurrentSettings\(previous\.editor, previous\.toolbar, false, false, previous\.barSizes, previous\.statusBar, previous\.appearance, undefined, previous\.outline\)/)
+  assert.match(settingsController, /updateCurrentSettings\(next\.editor, next\.toolbar, false, false, next\.barSizes, next\.statusBar, next\.appearance, undefined, next\.outline\)/)
   assert.match(mediumPreset, /medium:\s*\{[\s\S]*?toolbar:\s*\{\s*height:\s*48,\s*buttonHeight:\s*40,\s*buttonWidth:\s*40,\s*iconSize:\s*20,[\s\S]*?padding:\s*4/)
 })
 

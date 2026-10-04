@@ -1,22 +1,27 @@
 /** 検索セッション、検索ウィンドウ、本文との検索連携をメイン画面から分離する。 */
-import { watch, type Ref } from 'vue'
+import { ref, watch, type Ref } from 'vue'
 import { emitTo, listen } from '@tauri-apps/api/event'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import {
   SEARCH_COMMAND_EVENT,
   SEARCH_STATE_EVENT,
   SearchSession,
+  createSearchScopeStatus,
   type SearchAction,
   type SearchCommand,
   type SearchConditions,
   type SearchField,
   type SearchSnapshot,
   type SearchStatus,
+  type SearchScopeAction,
+  type SearchScopeStatus,
 } from './searchSession'
 
 export type SearchEditorAdapter = {
   setSearch: (conditions: SearchConditions, active: boolean) => void
   runSearch: (action: SearchAction) => void
+  getSearchScope: () => SearchScopeStatus
+  setSearchScope: (action: SearchScopeAction) => boolean
   focus: () => void
 }
 
@@ -36,6 +41,9 @@ export type SearchControllerOptions = {
 /** 検索状態を配信し、遅着した子ウィンドウ操作をセッションIDで拒否する。 */
 export function useSearchController(options: SearchControllerOptions) {
   const searchSession = new SearchSession()
+  const conditions = ref<SearchConditions>({ ...searchSession.conditions })
+  let appliedConditions = { ...searchSession.conditions }
+  const searchScope = ref(createSearchScopeStatus())
   let searchWindow: WebviewWindow | null = null
   let searchWindowOpening = false
   let searchWindowReady = false
@@ -55,6 +63,7 @@ export function useSearchController(options: SearchControllerOptions) {
       sessionId: searchSession.sessionId,
       conditions: { ...searchSession.conditions },
       status: searchStatus,
+      scope: options.editor.value?.getSearchScope() ?? searchScope.value,
       locked: options.documentLocked.value,
       documentRevision: searchSession.documentRevision,
       acknowledgedSequence: searchSession.sequence,
@@ -75,6 +84,13 @@ export function useSearchController(options: SearchControllerOptions) {
     void publishSearchState()
   }
 
+  /** 選択可否と固定した検索範囲を同期し、検索窓を閉じた後も限定中の表示を残す。 */
+  function onScope(scope: SearchScopeStatus): void {
+    if (disposed || JSON.stringify(searchScope.value) === JSON.stringify(scope)) return
+    searchScope.value = { ...scope }
+    void publishSearchState()
+  }
+
   /** 検索窓の破棄を反映する。条件は残し、通常の終了時だけ本文へフォーカスを戻す。 */
   function handleSearchWindowDestroyed(destroyedWindow: WebviewWindow): void {
     if (searchWindow !== destroyedWindow) return
@@ -83,10 +99,12 @@ export function useSearchController(options: SearchControllerOptions) {
     searchWindowClosing = false
     searchWindowReady = false
     searchSession.stop()
-    if (!disposed) options.editor.value?.setSearch(searchSession.conditions, false)
+    if (!disposed) options.editor.value?.setSearch(appliedConditions, false)
     if (!options.mainCloseInProgress.value && !disposed) {
-      void options.appWindow.setFocus().then(() => options.editor.value?.focus()).catch((error: unknown) => {
-        options.showPersistenceNotice(`本文へフォーカスを戻せません。${String(error)}`)
+      void options.appWindow.setFocus().then(() => {
+        if (!disposed && !searchWindow && !options.mainCloseInProgress.value) options.editor.value?.focus()
+      }).catch((error: unknown) => {
+        if (!disposed) options.showPersistenceNotice(`本文へフォーカスを戻せません。${String(error)}`)
       })
     }
   }
@@ -134,18 +152,20 @@ export function useSearchController(options: SearchControllerOptions) {
         parent: 'main',
         center: true,
         width: 640,
-        height: 380,
+        height: 470,
         minWidth: 480,
-        minHeight: 340,
+        minHeight: 400,
         resizable: true,
         decorations: true,
         dragDropEnabled: false,
       })
       searchWindow = createdWindow
       void createdWindow.once('tauri://destroyed', () => handleSearchWindowDestroyed(createdWindow))
-      void createdWindow.once('tauri://created', () => { searchWindowOpening = false })
+      void createdWindow.once('tauri://created', () => {
+        if (searchWindow === createdWindow) searchWindowOpening = false
+      })
       void createdWindow.once('tauri://error', (event) => {
-        if (disposed) return
+        if (disposed || searchWindow !== createdWindow) return
         handleSearchWindowDestroyed(createdWindow)
         void options.showError('検索画面を開く操作', event.payload)
       })
@@ -156,13 +176,15 @@ export function useSearchController(options: SearchControllerOptions) {
     }
   }
 
-  /** 本文側のF3は条件があればそのまま検索し、未指定なら検索画面を開く。 */
+  /** 本文側のF3は適用済み条件を再利用する。未適用の正規表現は独立窓の検索へ引き継ぐ。 */
   function onNavigate(action: SearchAction): void {
     if (disposed || options.documentLocked.value || options.mainCloseInProgress.value) return
-    if (!searchSession.conditions.search) {
+    const changed = ['search', 'caseSensitive', 'regexp'].some(key => searchSession.conditions[key as keyof SearchConditions] !== appliedConditions[key as keyof SearchConditions])
+    if (!searchSession.conditions.search || changed && searchSession.conditions.regexp && !searchWindowReady) {
       void open('search')
       return
     }
+    if (changed) { appliedConditions = { ...searchSession.conditions }; options.editor.value?.setSearch(appliedConditions, searchWindowReady) }
     options.editor.value?.runSearch(action)
   }
 
@@ -172,11 +194,20 @@ export function useSearchController(options: SearchControllerOptions) {
     searchWindowError = ''
     if (command.type === 'ready') {
       searchWindowReady = true
-      options.editor.value?.setSearch(searchSession.conditions, true)
+      appliedConditions = { ...searchSession.conditions }
+      options.editor.value?.setSearch(appliedConditions, true)
     } else {
       const result = searchSession.receive(command)
       if (!result.accepted) return
-      options.editor.value?.setSearch(searchSession.conditions, true)
+      conditions.value = { ...searchSession.conditions }
+      if (result.scopeAction && options.editor.value) {
+        if (!options.editor.value.setSearchScope(result.scopeAction)) {
+          searchWindowError = options.editor.value.getSearchScope().reason
+        }
+        onScope(options.editor.value.getSearchScope())
+      }
+      appliedConditions = { ...searchSession.conditions }
+      options.editor.value?.setSearch(appliedConditions, true)
       if (result.action) options.editor.value?.runSearch(result.action)
       if (command.type === 'close') {
         void close().catch((error: unknown) => options.showError('検索画面を閉じる操作', error))
@@ -226,12 +257,31 @@ export function useSearchController(options: SearchControllerOptions) {
   const stopDocumentLockWatch = watch(options.documentLocked, () => {
     searchSession.setLocked(options.documentLocked.value)
     void publishSearchState()
-  }, { flush: 'sync' })
+  }, { flush: 'sync', immediate: true })
+
+  /** サイドバー入力を検索窓と共有し、置換文字列を意図せず初期化しない。 */
+  function setSidebarConditions(patch: Partial<SearchConditions>): void {
+    if (disposed) return
+    searchSession.conditions = { ...searchSession.conditions, ...patch }
+    conditions.value = { ...searchSession.conditions }
+    if (searchWindowReady) { appliedConditions = { ...searchSession.conditions }; options.editor.value?.setSearch(appliedConditions, true) }
+    void publishSearchState()
+  }
+
+  /** サイドバーは解析済み位置を描画し、検索窓が閉じている間は正規表現をUIで走査しない。 */
+  function setSidebarActive(active: boolean): void {
+    if (!disposed && !searchWindowReady && !active) options.editor.value?.setSearch(appliedConditions, false)
+  }
 
   return {
+    conditions,
+    setSidebarConditions,
+    setSidebarActive,
     open,
     close,
     onStatus,
+    onScope,
+    searchScope,
     onNavigate,
     setup,
     dispose,

@@ -24,6 +24,7 @@
     "dialog:allow-ask",
     "dialog:allow-message",
     "fs:allow-read-file",
+    "fs:allow-stat",
     "fs:allow-write-file",
     {
       "identifier": "fs:allow-exists",

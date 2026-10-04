@@ -1,5 +1,8 @@
+import { cloneOutline, normalizeOutline, type OutlinePreferences } from './outline'
 /** 設定値の適用と表示メトリクスをまとめ、保存・履歴・設定子窓へ橋渡しする。 */
 import { computed, ref } from 'vue'
+import { applyAppearanceAction, cloneAppearance, colorDefinitions, isHexColor, createDefaultAppearance, findColorPreset, type AppearancePreferences, type Palette } from './appearance'
+import { readColorPreset, writeColorPreset } from './appearanceFile'
 import {
   isValidTypographyNumber,
   normalizeEditorSettings,
@@ -36,10 +39,19 @@ export type SettingsControllerOptions = {
   initialPreferences: ApplicationPreferencesV1
   showPersistenceNotice: SaveErrorNotifier
   showError: OperationErrorNotifier
+  onAppearanceChanged?: (colors: Palette) => void
+  onAppearanceFlush?: () => Promise<void>
 }
 
 /** 設定値を正規化し、設定ウィンドウと永続Storeの間を接続する。 */
 export function useSettingsController(options: SettingsControllerOptions) {
+  const outline = ref(normalizeOutline(options.initialPreferences.outline))
+  const appearance = ref(cloneAppearance(options.initialPreferences.ui.appearance))
+  let appearanceFileBusy = false
+  let colorInteractionId: string | undefined
+  let appearanceEpoch = 0
+  let colorOnly = false
+  let lastColorState: Parameters<ReturnType<typeof useSettingsWindowBridge>['publishColorState']>[0] | null = null
   const editorSettings = ref<EditorSettings>({ ...options.initialPreferences.editor })
   const toolbarPreferences = ref<ToolbarPreferences>({
     visible: options.initialPreferences.ui.toolbar.visible,
@@ -71,6 +83,8 @@ export function useSettingsController(options: SettingsControllerOptions) {
   /** 現在の設定値を履歴・保存用スナップショットへ複製する。 */
   function cloneCurrentSettings(): SettingsValues {
     return cloneSettingsValues({
+      outline: outline.value,
+      appearance: appearance.value,
       editor: editorSettings.value,
       toolbar: toolbarPreferences.value,
       statusBar: statusBarPreferences.value,
@@ -83,6 +97,10 @@ export function useSettingsController(options: SettingsControllerOptions) {
   /** 設定子窓へ配信する値を、保存対象と同じく参照独立な形で作る。 */
   function createSettingsSnapshot(): Omit<SettingsSnapshot, 'revision'> {
     return {
+      outline: cloneOutline(outline.value),
+      appearance: cloneAppearance(appearance.value),
+      appearanceFileBusy,
+      appearanceEpoch,
       editor: { ...editorSettings.value },
       toolbar: cloneToolbarPreferences(toolbarPreferences.value),
       statusBar: cloneStatusBarPreferences(statusBarPreferences.value),
@@ -105,11 +123,44 @@ export function useSettingsController(options: SettingsControllerOptions) {
 
   /** 設定子窓が存在するときだけ状態を配信する。 */
   function publishSettingsState(): Promise<void> {
+    if (colorOnly && lastColorState && settingsWindowBridge?.publishColorState) return settingsWindowBridge.publishColorState(lastColorState)
     return settingsWindowBridge?.publishState() ?? Promise.resolve()
+  }
+
+  /** 復元・プリセット操作の前に旧入力を無効化する。世代は保存ファイルへ含めない。 */
+  function invalidateColorInputs(): void { appearanceEpoch++; colorInteractionId = undefined; colorOnly = false; lastColorState = null }
+
+  /** 1色だけを変更し、本文設定・ルール・プリセットの参照と計算結果を保つ。 */
+  function updateColor(command: Extract<SettingsCommand, { type: 'appearance' }>): void {
+    const action = command.action
+    if (action.type !== 'color') return
+    if (command.colorInput && command.colorInput.epoch !== appearanceEpoch) { void settingsWindowBridge.publishState(); return }
+    if (command.colorInput && (!Number.isSafeInteger(command.colorInput.sequence) || command.colorInput.sequence < 1)) throw new Error('色入力の順序情報が不正です。')
+    if (!Object.prototype.hasOwnProperty.call(colorDefinitions, action.key) || !isHexColor(action.value)) throw new Error('色は #RRGGBB 形式で指定してください。')
+    const input = command.colorInput && action.interactionId ? { interactionId: action.interactionId, sequence: command.colorInput.sequence } : undefined
+    if (input && lastColorState?.input?.interactionId === input.interactionId && input.sequence <= lastColorState.input.sequence) return
+    const value = action.value.toUpperCase()
+    if (appearance.value.colors[action.key] !== value) {
+      if (!action.interactionId || action.interactionId !== colorInteractionId) settingsHistory.push(cloneCurrentSettings())
+      colorInteractionId = action.interactionId
+      appearance.value.colors[action.key] = value
+      options.onAppearanceChanged?.(appearance.value.colors)
+      colorOnly = true
+      lastColorState = { appearanceEpoch, changes: { [action.key]: value }, history: { canUndo: settingsHistory.canUndo, canRedo: settingsHistory.canRedo }, input }
+      settingsPersistence.markChanged()
+    } else if (input) {
+      lastColorState = { appearanceEpoch, changes: { [action.key]: value }, history: { canUndo: settingsHistory.canUndo, canRedo: settingsHistory.canRedo }, input }
+      void settingsWindowBridge.publishColorState(lastColorState)
+    }
   }
 
   /** Store書き込み失敗時に設定を戻し、既存の通知文言を維持する。 */
   function applySettingsRollback(snapshot: SettingsValues): void {
+    invalidateColorInputs()
+    appearance.value = cloneAppearance(snapshot.appearance)
+    colorInteractionId = undefined
+    options.onAppearanceChanged?.(appearance.value.colors)
+    outline.value = cloneOutline(snapshot.outline)
     editorSettings.value = { ...snapshot.editor }
     toolbarPreferences.value = cloneToolbarPreferences(snapshot.toolbar)
     statusBarPreferences.value = normalizeStatusBarPreferences(snapshot.statusBar)
@@ -132,7 +183,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
   const settingsPersistence = useSettingsPersistence<SettingsValues>({
     clone: cloneSettingsValues,
     getSnapshot: cloneCurrentSettings,
-    save: (snapshot) => saveSettingsPreferences(snapshot.editor, snapshot.toolbar, snapshot.barSizes, snapshot.statusBar),
+    save: (snapshot) => saveSettingsPreferences(snapshot.editor, snapshot.toolbar, snapshot.barSizes, snapshot.statusBar, snapshot.appearance, snapshot.outline),
     applyRollback: applySettingsRollback,
     notifyRollback: notifySettingsRollback,
     notifyUnexpectedError: notifyUnexpectedSettingsSaveError,
@@ -147,6 +198,9 @@ export function useSettingsController(options: SettingsControllerOptions) {
     recordHistory = true,
     barSizesPatch?: Partial<InterfaceBarSizes>,
     statusBarPatch?: Partial<StatusBarPreferences>,
+    nextAppearance: AppearancePreferences = appearance.value,
+    interactionId?: string,
+    nextOutline: OutlinePreferences = outline.value,
   ): void {
     const nextEditor = normalizeEditorSettings({ ...editorSettings.value, ...editorPatch })
     const nextToolbar = {
@@ -158,7 +212,9 @@ export function useSettingsController(options: SettingsControllerOptions) {
     }
     const nextBarSizes = normalizeInterfaceBarSizes({ ...barSizes.value, ...barSizesPatch })
     const nextStatusBar = normalizeStatusBarPreferences({ ...statusBarPreferences.value, ...statusBarPatch })
-    const hasChanged = JSON.stringify(nextEditor) !== JSON.stringify(editorSettings.value) ||
+    const hasChanged = JSON.stringify(nextOutline) !== JSON.stringify(outline.value) ||
+      JSON.stringify(nextEditor) !== JSON.stringify(editorSettings.value) ||
+      JSON.stringify(nextAppearance) !== JSON.stringify(appearance.value) ||
       JSON.stringify(nextToolbar) !== JSON.stringify(toolbarPreferences.value) ||
       JSON.stringify(nextBarSizes) !== JSON.stringify(barSizes.value) ||
       JSON.stringify(nextStatusBar) !== JSON.stringify(statusBarPreferences.value)
@@ -167,7 +223,14 @@ export function useSettingsController(options: SettingsControllerOptions) {
       return
     }
 
-    if (recordHistory) settingsHistory.push(cloneCurrentSettings())
+    colorOnly = false
+
+    if (recordHistory && (!interactionId || interactionId !== colorInteractionId)) settingsHistory.push(cloneCurrentSettings())
+    colorInteractionId = interactionId
+    const colorsChanged = JSON.stringify(nextAppearance.colors) !== JSON.stringify(appearance.value.colors)
+    outline.value = cloneOutline(nextOutline)
+    appearance.value = cloneAppearance(nextAppearance)
+    if (colorsChanged) options.onAppearanceChanged?.(appearance.value.colors)
     editorSettings.value = nextEditor
     toolbarPreferences.value = nextToolbar
     statusBarPreferences.value = nextStatusBar
@@ -188,24 +251,25 @@ export function useSettingsController(options: SettingsControllerOptions) {
 
   /** Undoで直前状態を適用し、現在状態をRedo履歴へ移す。 */
   function undoSettingsChange(): void {
+    invalidateColorInputs()
     const previous = settingsHistory.undo(cloneCurrentSettings())
     if (!previous) return
-    updateCurrentSettings(previous.editor, previous.toolbar, false, false, previous.barSizes)
-    updateCurrentSettings(undefined, undefined, false, false, undefined, previous.statusBar)
+    updateCurrentSettings(previous.editor, previous.toolbar, false, false, previous.barSizes, previous.statusBar, previous.appearance, undefined, previous.outline)
     void publishSettingsState()
   }
 
   /** Redoで取り消した状態を適用し、現在状態をUndo履歴へ移す。 */
   function redoSettingsChange(): void {
+    invalidateColorInputs()
     const next = settingsHistory.redo(cloneCurrentSettings())
     if (!next) return
-    updateCurrentSettings(next.editor, next.toolbar, false, false, next.barSizes)
-    updateCurrentSettings(undefined, undefined, false, false, undefined, next.statusBar)
+    updateCurrentSettings(next.editor, next.toolbar, false, false, next.barSizes, next.statusBar, next.appearance, undefined, next.outline)
     void publishSettingsState()
   }
 
   /** 設定ウィンドウが閉じても確定済み設定を維持し、進行中の保存を続ける。 */
   function handleSettingsWindowDestroyed(): void {
+    colorInteractionId = undefined
     endSettingsHistorySession()
   }
 
@@ -214,20 +278,58 @@ export function useSettingsController(options: SettingsControllerOptions) {
     if (disposed) return
     try {
       if (command.type === 'ready') {
-        if (!settingsHistory.active) beginSettingsHistorySession()
+        colorOnly = false
+        if (!settingsHistory.active) { invalidateColorInputs(); beginSettingsHistorySession() }
         await publishSettingsState()
       } else if (command.type === 'navigate') {
         settingsPage.value = command.page
-        await publishSettingsState()
+        await settingsWindowBridge.publishState()
       } else if (command.type === 'undo') {
         undoSettingsChange()
       } else if (command.type === 'redo') {
         redoSettingsChange()
       } else if (command.type === 'change') {
-        updateCurrentSettings(command.editor, command.toolbar, command.flush ?? false, true, command.barSizes, command.statusBar)
+        if (command.resetAppearance) invalidateColorInputs()
+        if (command.outline && normalizeOutline(command.outline).rules.length !== command.outline.rules.length) throw new Error('見出しルールを保存できません。入力を見直してください。')
+        const nextAppearance = command.resetAppearance
+          ? { ...createDefaultAppearance(), presets: cloneAppearance(appearance.value).presets }
+          : appearance.value
+        updateCurrentSettings(command.editor, command.toolbar, command.flush ?? false, true, command.barSizes, command.statusBar, nextAppearance, undefined, command.outline ? normalizeOutline(command.outline) : outline.value)
+      } else if (command.type === 'appearance') {
+        if (command.action.type === 'color') updateColor(command)
+        else {
+          invalidateColorInputs()
+          const next = applyAppearanceAction(appearance.value, command.action)
+          updateCurrentSettings(undefined, undefined, true, true, undefined, undefined, next)
+        }
+      } else if (command.type === 'appearance-file') {
+        await handleAppearanceFile(command)
       }
     } catch (error) {
       if (!disposed) await settingsWindowBridge?.publishError(String(error))
+    }
+  }
+
+  /** ファイル選択中の多重実行を防ぎ、検証済みプリセットだけを最新状態へ追加する。 */
+  async function handleAppearanceFile(command: Extract<SettingsCommand, { type: 'appearance-file' }>): Promise<void> {
+    if (appearanceFileBusy) return
+    appearanceFileBusy = true
+    await publishSettingsState()
+    try {
+      if (command.operation === 'import') {
+        const preset = await readColorPreset()
+        if (disposed || !preset) return
+        const next = applyAppearanceAction(appearance.value, { type: 'import', preset })
+        invalidateColorInputs()
+        updateCurrentSettings(undefined, undefined, true, true, undefined, undefined, next)
+      } else {
+        const preset = command.presetId ? findColorPreset(appearance.value, command.presetId) : undefined
+        if (!preset) throw new Error('エクスポートする保存済みプリセットを選んでください。')
+        await writeColorPreset({ ...preset, colors: { ...preset.colors } })
+      }
+    } finally {
+      appearanceFileBusy = false
+      await publishSettingsState()
     }
   }
 
@@ -262,6 +364,20 @@ export function useSettingsController(options: SettingsControllerOptions) {
     updateCurrentSettings(undefined, { visible: !toolbarPreferences.value.visible })
   }
 
+  /** 空白の表示だけを切り替え、設定画面と同じ履歴・自動保存経路へ送る。 */
+  async function toggleWhitespace(): Promise<void> {
+    if (disposed) return
+    updateCurrentSettings({ showWhitespace: !editorSettings.value.showWhitespace })
+    await publishSettingsState()
+  }
+
+  /** 行番号の表示を切り替え、設定画面と同じ履歴・自動保存経路へ送る。 */
+  async function toggleLineNumbers(): Promise<void> {
+    if (disposed) return
+    updateCurrentSettings({ showLineNumbers: !editorSettings.value.showLineNumbers })
+    await publishSettingsState()
+  }
+
   /** 設定イベント購読を開始する。終了処理は同じコントローラーのdisposeへ集約する。 */
   async function setup(): Promise<void> {
     if (disposed) return
@@ -270,7 +386,9 @@ export function useSettingsController(options: SettingsControllerOptions) {
 
   /** 終了前に遅延中の設定保存をすべて完了させる。 */
   async function flush(): Promise<void> {
+    await settingsWindowBridge.flushInputs?.()
     await settingsPersistence.flush()
+    await options.onAppearanceFlush?.()
   }
 
   /** 設定イベント、タイマー、設定ウィンドウを解除する。 */
@@ -283,6 +401,8 @@ export function useSettingsController(options: SettingsControllerOptions) {
   }
 
   return {
+    outline,
+    appearance,
     editorSettings,
     displayedToolbarItems,
     displayedToolbarVisible,
@@ -291,6 +411,8 @@ export function useSettingsController(options: SettingsControllerOptions) {
     interfaceBarMetrics,
     interfaceBarStyle,
     toggleToolbarVisibility,
+    toggleWhitespace,
+    toggleLineNumbers,
     chooseWrapMode,
     adjustToolbarFontSize,
     adjustToolbarLineHeight,

@@ -1,12 +1,16 @@
 <script setup lang="ts">
 // 設定ページを切り替えながら編集し、変更を共通経路へ反映して自動保存する。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { getCurrentWindow, type CloseRequestedEvent } from '@tauri-apps/api/window'
+import OutlineSettingsPage from './OutlineSettingsPage.vue'
+import { createDefaultOutline } from './outline'
 import ToolbarSettingsPage from './ToolbarSettingsPage.vue'
 import WrappingSettingsPage from './WrappingSettingsPage.vue'
 import TypographySettingsPage from './TypographySettingsPage.vue'
 import StorageSettingsPage from './StorageSettingsPage.vue'
 import BarSizeSettingsPage from './BarSizeSettingsPage.vue'
 import StatusBarSettingsPage from './StatusBarSettingsPage.vue'
+import AppearanceSettingsPage from './AppearanceSettingsPage.vue'
 import {
   resetToolbarPreferences,
   resetStatusBarPreferences,
@@ -37,12 +41,31 @@ import {
 } from './settingsDefinitions'
 import { useEditorSettingsDrafts } from './useEditorSettingsDrafts'
 import { useSettingsWindowChannel } from './useSettingsWindowChannel'
+import { useChildAppearance } from './useChildAppearance'
+
+useChildAppearance()
 
 let receiveChannelSnapshot: (nextSnapshot: SettingsSnapshot) => void = () => {}
 const settingsChannel = useSettingsWindowChannel({
   onSnapshot: (nextSnapshot) => receiveChannelSnapshot(nextSnapshot),
 })
 const { snapshot, errorMessage, sendCommand } = settingsChannel
+let removeCloseListener: (() => void) | undefined
+let closing = false, allowClose = false
+
+/** 設定窓を閉じる前に保留入力のメイン側反映を確認し、確認できない場合は窓を残す。 */
+async function onCloseRequested(event: CloseRequestedEvent): Promise<void> {
+  if (allowClose) return
+  event.preventDefault()
+  if (closing) return
+  closing = true
+  try { await settingsChannel.flush(); allowClose = true; await getCurrentWindow().close() }
+  catch (error) { allowClose = false; errorMessage.value = String(error) }
+  finally { closing = false }
+}
+
+/** ピッカー確定時に最終色を送り、通信失敗を画面内へ表示する。 */
+function flushColors(): void { void settingsChannel.flushColors().catch(error => { errorMessage.value = String(error) }) }
 const activeView = ref<SettingsViewId>('editor.wrapping')
 const openedGroups = ref(['editor', 'appearance', 'application'])
 const openedSectionIds = ref<SettingsSectionId[]>([...allSettingsSectionIds])
@@ -244,6 +267,8 @@ function confirmAllDefaults(): void {
     statusBar,
     barSizes,
     flush: true,
+    resetAppearance: true,
+    outline: createDefaultOutline(),
   })
 }
 
@@ -275,12 +300,14 @@ function onKeydown(event: KeyboardEvent): void {
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
   await settingsChannel.setup()
+  removeCloseListener = await getCurrentWindow().onCloseRequested(onCloseRequested)
   await sendCommand({ type: 'ready' })
 })
 
 // 設定ウィンドウを破棄する際に状態イベントの購読を解除する。
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  removeCloseListener?.()
   settingsChannel.dispose()
 })
 </script>
@@ -394,6 +421,13 @@ onBeforeUnmount(() => {
             @update-editor="changeEditor" @number-input="onTypographyInput" @number-value="onTypographyValue" @number-commit="commitTypographyInput" @number-interaction="onTypographyInteraction"
             @restore-field="restoreField" @toggle-section="toggleSection"
           />
+          <OutlineSettingsPage v-else-if="page.id === 'editor.outline'" :preferences="snapshot.outline" @change="sendCommand({ type: 'change', outline: $event })" />
+          <AppearanceSettingsPage
+            v-else-if="page.id === 'appearance.colors'"
+            :appearance="snapshot.appearance" :epoch="snapshot.appearanceEpoch" :file-busy="snapshot.appearanceFileBusy"
+            :heading-level="activeView === 'all' ? 4 : 2" :sections="page.sections" :expanded-section-ids="openedSectionIds"
+            @command="sendCommand" @flush-colors="flushColors" @toggle-section="toggleSection"
+          />
           <ToolbarSettingsPage
             v-else-if="page.id === 'appearance.toolbar'"
             :toolbar="snapshot.toolbar"
@@ -462,7 +496,7 @@ onBeforeUnmount(() => {
     </VDialog>
     <VDialog v-model="allResetDialog" max-width="440">
       <VCard title="すべての設定を初期値に戻しますか？">
-        <VCardText>本文表示、折り返し、ツールバー、ステータスバー、各バーのサイズを初期値へ変更し、自動保存します。データ保存先は変更しません。</VCardText>
+        <VCardText>本文表示、折り返し、見出し判定、ツールバー、ステータスバー、各バーのサイズ、現在の配色を初期値へ変更し、自動保存します。保存済みの配色プリセットとデータ保存先は変更しません。</VCardText>
         <VCardActions>
           <VSpacer />
           <VBtn variant="text" @click="allResetDialog = false">戻る</VBtn>

@@ -1,4 +1,4 @@
-<!-- プロジェクトの作成・名称変更で共有する入力ダイアログ。 -->
+<!-- プロジェクトと仮想フォルダの作成・名称変更で共有する入力ダイアログ。 -->
 <script setup lang="ts">
 const props = defineProps<{
   modelValue: boolean
@@ -13,13 +13,15 @@ const emit = defineEmits<{
   save: []
 }>()
 
-/** 入力値を親のProjectActionsへ反映する。 */
+/** 入力値を親のプロジェクト・フォルダ操作へ反映する。 */
 function updateValue(value: string): void {
   emit('update:value', value)
 }
 
-/** Enter入力を保存操作として親へ渡す。 */
-function saveOnEnter(): void {
+/** 日本語変換の確定Enterを妨げず、通常のEnterだけ保存操作として親へ渡す。 */
+function saveOnEnter(event: KeyboardEvent): void {
+  if (event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
   if (!props.disabled && props.value.trim()) emit('save')
 }
 </script>
@@ -37,7 +39,7 @@ function saveOnEnter(): void {
           variant="outlined"
           hide-details
           @update:model-value="updateValue"
-          @keydown.enter.prevent="saveOnEnter"
+          @keydown.enter="saveOnEnter"
         />
       </VCardText>
       <VCardActions>

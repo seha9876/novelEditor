@@ -19,7 +19,7 @@ test('分離ツリーControllerは購読待ちの破棄後に遅着unlistenを�
   try {
     const { ref } = require('vue')
     const controllerModule = loadSourceModule('src/useProjectTreeWindowController.ts', {
-      './appPreferences': { saveProjectTreePreferences: async () => {} },
+      './appPreferences': { saveSidebarPreferences: async () => {} },
       '@tauri-apps/api/event': {
         async emitTo() {},
         async listen() { return listenDeferred.promise },
@@ -29,7 +29,7 @@ test('分離ツリーControllerは購読待ちの破棄後に遅着unlistenを�
       },
     })
     const controller = controllerModule.useProjectTreeWindowController({
-      initialPreferences: { ui: { projectTree: { width: 280, detached: false } } },
+      initialPreferences: { ui: { sidebar: { width: 280, collapsed: false, activePanel: 'project' }, projectTree: { width: 280, detached: false } } },
       busy: ref(false),
       documentLocked: ref(false),
       documentOrigin: ref(null),
@@ -77,7 +77,7 @@ test('分離ツリー生成の破棄後イベントは状態保存や通知を�
     }
     const controllerModule = loadSourceModule('src/useProjectTreeWindowController.ts', {
       './appPreferences': {
-        saveProjectTreePreferences: async (preferences) => { savedPreferences.push(preferences) },
+        saveSidebarPreferences: async (preferences) => { savedPreferences.push(preferences) },
       },
       '@tauri-apps/api/event': {
         async emitTo() {},
@@ -86,7 +86,7 @@ test('分離ツリー生成の破棄後イベントは状態保存や通知を�
       '@tauri-apps/api/webviewWindow': { WebviewWindow: MockWebviewWindow },
     })
     const controller = controllerModule.useProjectTreeWindowController({
-      initialPreferences: { ui: { projectTree: { width: 280, detached: false } } },
+      initialPreferences: { ui: { sidebar: { width: 280, collapsed: false, activePanel: 'project' }, projectTree: { width: 280, detached: false } } },
       busy: ref(false),
       documentLocked: ref(false),
       documentOrigin: ref(null),
@@ -135,7 +135,7 @@ function createProjectTreeWindowHarness(destroyImplementation = () => Promise.re
   }
   const controllerModule = loadSourceModule('src/useProjectTreeWindowController.ts', {
     './appPreferences': {
-      saveProjectTreePreferences: async (preferences) => { savedPreferences.push(preferences) },
+      saveSidebarPreferences: async (preferences) => { savedPreferences.push(preferences) },
     },
     '@tauri-apps/api/event': {
       async emitTo(_label, _event, state) { emittedStates.push(state) },
@@ -144,7 +144,7 @@ function createProjectTreeWindowHarness(destroyImplementation = () => Promise.re
     '@tauri-apps/api/webviewWindow': { WebviewWindow: MockWebviewWindow },
   }, new Map())
   const controller = controllerModule.useProjectTreeWindowController({
-    initialPreferences: { ui: { projectTree: { width: 280, detached: false } } },
+    initialPreferences: { ui: { sidebar: { width: 280, collapsed: false, activePanel: 'project' }, projectTree: { width: 280, detached: false } } },
     busy: ref(false),
     documentLocked: ref(false),
     documentOrigin: ref(null),

@@ -23,13 +23,13 @@ test('旧設定の補完は既存項目を保ち、任意の書体名と数値�
 test('プロジェクトツリー設定は旧データを補完し、保存幅を220～480pxに制限する', () => {
   const preferences = loadSourceModule('src/appPreferenceSchema.ts')
   const defaults = preferences.createDefaultApplicationPreferences()
-  assert.deepEqual(defaults.ui.projectTree, { width: 280, detached: false })
+  assert.deepEqual(defaults.ui.projectTree, { width: 280, detached: false, collapsed: false })
 
   const old = preferences.normalizeApplicationPreferences({ schemaVersion: 1, ui: { toolbar: { visible: false } } })
-  assert.deepEqual(old.ui.projectTree, { width: 280, detached: false })
+  assert.deepEqual(old.ui.projectTree, { width: 280, detached: false, collapsed: false })
   assert.equal(preferences.normalizeApplicationPreferences({ ui: { projectTree: { width: 200, detached: true } } }).ui.projectTree.width, 220)
   assert.equal(preferences.normalizeApplicationPreferences({ ui: { projectTree: { width: 700, detached: true } } }).ui.projectTree.width, 480)
-  assert.deepEqual(preferences.normalizeApplicationPreferences({ ui: { projectTree: { width: 'wide', detached: 'yes' } } }).ui.projectTree, { width: 280, detached: false })
+  assert.deepEqual(preferences.normalizeApplicationPreferences({ ui: { projectTree: { width: 'wide', detached: 'yes' } } }).ui.projectTree, { width: 280, detached: false, collapsed: false })
 })
 
 test('ステータスバー設定は旧データを既定値で補完し、不正値と重複だけを除去する', () => {
@@ -134,7 +134,7 @@ test('バーサイズ設定の保存はStoreへ正規化済みの実値を書き
     ui: {
       toolbar: { visible: true, items: [] },
       barSizes: { menu: 'small', toolbar: 'invalid', status: 'large' },
-      projectTree: { width: 280, detached: false },
+      projectTree: { width: 280, detached: false, collapsed: false },
     },
   }
   let setCount = 0
@@ -142,8 +142,12 @@ test('バーサイズ設定の保存はStoreへ正規化済みの実値を書き
     async get() { return storedValue },
     async set(_key, value) { storedValue = value; setCount += 1 },
     async save() {},
+    async reload() {},
   }
-  const mocks = { '@tauri-apps/plugin-store': { load: async () => store } }
+  const mocks = {
+    '@tauri-apps/plugin-store': { load: async () => store },
+    '@tauri-apps/plugin-fs': { exists: async () => true },
+  }
   const cache = new Map()
   const storage = loadSourceModule('src/storageLocation.ts', mocks, cache)
   storage.setActiveStorageDirectory('C:\\bar-size-test')
@@ -163,6 +167,74 @@ test('バーサイズ設定の保存はStoreへ正規化済みの実値を書き
   assert.ok(setCount >= 2)
   assert.equal(schema.normalizeInterfaceSize('not-a-size'), 'medium')
   assert.equal(schema.normalizeToolbarSize('not-a-size'), 'medium')
+})
+
+test('設定の初回起動は存在しないファイルをreloadせず、通常の初期設定を保存する', async () => {
+  let reloadCount = 0
+  let saves = 0
+  const { initializeApplicationPreferences } = loadSourceModule('src/appPreferences.ts', {
+    './storageLocation': { getStorageFilePath: () => 'preferences.json' },
+    '@tauri-apps/plugin-fs': { exists: async () => false },
+    '@tauri-apps/plugin-store': { load: async () => ({
+      get: async () => undefined,
+      set: async () => {},
+      save: async () => { saves += 1 },
+      reload: async () => { reloadCount += 1; throw new Error('ファイル不在') },
+    }) },
+  })
+  const result = await initializeApplicationPreferences()
+  assert.equal(result.persistenceState, 'ready')
+  assert.equal(reloadCount, 0)
+  assert.equal(saves, 1)
+})
+
+test('破損した設定JSONをreloadで検出し、再構築を通知して移行成功と誤認しない', async () => {
+  const loadOptions = []
+  let saves = 0
+  const { initializeApplicationPreferences } = loadSourceModule('src/appPreferences.ts', {
+    './storageLocation': { getStorageFilePath: () => 'preferences.json' },
+    '@tauri-apps/plugin-fs': { exists: async () => true },
+    '@tauri-apps/plugin-store': { load: async (_path, options) => {
+      loadOptions.push(options)
+      return {
+        get: async () => undefined,
+        set: async () => {},
+        save: async () => { saves += 1 },
+        reload: async (reloadOptions) => {
+          assert.deepEqual(reloadOptions, { ignoreDefaults: true })
+          throw new Error('破損JSON')
+        },
+      }
+    } },
+  })
+  const result = await initializeApplicationPreferences()
+  assert.equal(result.persistenceState, 'recovered')
+  assert.match(result.error, /破損JSON/)
+  assert.equal(loadOptions.length, 2)
+  assert.equal(loadOptions[1].createNew, true)
+  assert.equal(saves, 1)
+})
+
+test('既存の正常な設定はreload後の実値を読み込み、不要な書き直しをしない', async () => {
+  const schema = loadSourceModule('src/appPreferenceSchema.ts')
+  const expected = schema.createDefaultApplicationPreferences()
+  expected.editor.fontSize = 28
+  let reloaded = false
+  let saves = 0
+  const { initializeApplicationPreferences } = loadSourceModule('src/appPreferences.ts', {
+    './storageLocation': { getStorageFilePath: () => 'preferences.json' },
+    '@tauri-apps/plugin-fs': { exists: async () => true },
+    '@tauri-apps/plugin-store': { load: async () => ({
+      get: async () => { assert.equal(reloaded, true); return expected },
+      reload: async () => { reloaded = true },
+      set: async () => {},
+      save: async () => { saves += 1 },
+    }) },
+  })
+  const result = await initializeApplicationPreferences()
+  assert.equal(result.persistenceState, 'ready')
+  assert.deepEqual(result.preferences, expected)
+  assert.equal(saves, 0)
 })
 
 test('バーサイズとツールバー初期化の境界を純粋関数で保持する', () => {

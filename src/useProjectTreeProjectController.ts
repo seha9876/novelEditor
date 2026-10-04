@@ -48,6 +48,7 @@ export function useProjectTreeProjectController(options: ProjectTreeProjectContr
   }
 
   return {
+    snapshot: computed(() => store.snapshot.value),
     projects,
     activeProjectId,
     busy,

@@ -3,7 +3,7 @@ import { ref, type Ref } from 'vue'
 import type { ApplicationPreferencesV1 } from './appPreferenceSchema'
 import type { ProjectTreeOpenRequest } from './projectTreeWindow'
 import { useDetachedProjectTreeWindow, type DetachedProjectTreeDocumentOrigin } from './useDetachedProjectTreeWindow'
-import { useProjectTreePaneLayout } from './useProjectTreePaneLayout'
+import { useSidebarPaneLayout } from './useSidebarPaneLayout'
 
 type ProjectTreeDocumentOrigin = DetachedProjectTreeDocumentOrigin
 
@@ -19,24 +19,24 @@ type ProjectTreeWindowControllerOptions = {
   onOriginDetached: (nodeId: number) => void
 }
 
-/** ツリー幅と分離子窓を組み立て、Appへ既存の操作APIだけを公開する。 */
+/** ツリーの幅・開閉と分離子窓を組み立て、Appへ操作APIを公開する。 */
 export function useProjectTreeWindowController(options: ProjectTreeWindowControllerOptions) {
   const projectTreeDetached = ref(options.initialPreferences.ui.projectTree.detached)
-  const paneLayout = useProjectTreePaneLayout({
+  const paneLayout = useSidebarPaneLayout({
     initialPreferences: options.initialPreferences,
     detached: projectTreeDetached,
     showPersistenceNotice: options.showPersistenceNotice,
   })
   const detachedWindow = useDetachedProjectTreeWindow({
     detached: projectTreeDetached,
-    projectTreeDisplayWidth: paneLayout.projectTreeDisplayWidth,
+    projectTreeDisplayWidth: paneLayout.sidebarDisplayWidth,
     busy: options.busy,
     documentLocked: options.documentLocked,
     documentOrigin: options.documentOrigin,
     mainCloseInProgress: options.mainCloseInProgress,
     showPersistenceNotice: options.showPersistenceNotice,
     showError: options.showError,
-    scheduleProjectTreePreferencesSave: paneLayout.scheduleProjectTreePreferencesSave,
+    scheduleProjectTreePreferencesSave: paneLayout.scheduleSidebarPreferencesSave,
     openProjectTreeFile: options.openProjectTreeFile,
     onOriginDetached: options.onOriginDetached,
   })
@@ -65,22 +65,30 @@ export function useProjectTreeWindowController(options: ProjectTreeWindowControl
   }
 
   return {
+    dockProjectTreeWindow: detachedWindow.dockProjectTreeWindow,
+    activeSidebarPanel: paneLayout.activePanel,
+    selectSidebarPanel: paneLayout.selectPanel,
+    projectTreeCollapsed: paneLayout.sidebarCollapsed,
+    projectTreeVisuallyCollapsed: paneLayout.sidebarVisuallyCollapsed,
+    projectTreeDrawerWidth: paneLayout.sidebarDrawerWidth,
+    toggleProjectTreeCollapsed: paneLayout.toggleSidebarCollapsed,
     projectTreeDetached: detachedWindow.projectTreeDetached,
-    projectTreeResizing: paneLayout.projectTreeResizing,
+    projectTreeResizing: paneLayout.sidebarResizing,
     expandedProjectTreeFolderIds: detachedWindow.expandedProjectTreeFolderIds,
     projectTreeUnavailableNodeIds: detachedWindow.projectTreeUnavailableNodeIds,
     projectTreeOpenResult: detachedWindow.projectTreeOpenResult,
     projectTreeWindowDisabled: detachedWindow.projectTreeWindowDisabled,
-    projectTreeMaximumWidth: paneLayout.projectTreeMaximumWidth,
-    projectTreeDisplayWidth: paneLayout.projectTreeDisplayWidth,
+    projectTreeMaximumWidth: paneLayout.sidebarMaximumWidth,
+    projectTreeDisplayWidth: paneLayout.sidebarDisplayWidth,
     updateExpandedProjectTreeFolders: detachedWindow.updateExpandedProjectTreeFolders,
     updateProjectTreeUnavailableNodeIds: detachedWindow.updateProjectTreeUnavailableNodeIds,
     consumeProjectTreeOpenResult: detachedWindow.consumeProjectTreeOpenResult,
     reportProjectTreeOpenResult: detachedWindow.reportProjectTreeOpenResult,
-    startProjectTreeResize: paneLayout.startProjectTreeResize,
-    moveProjectTreeResize: paneLayout.moveProjectTreeResize,
-    endProjectTreeResize: paneLayout.endProjectTreeResize,
-    onProjectTreeResizeKeydown: paneLayout.onProjectTreeResizeKeydown,
+    startProjectTreeResize: paneLayout.startSidebarResize,
+    moveProjectTreeResize: paneLayout.moveSidebarResize,
+    endProjectTreeResize: paneLayout.endSidebarResize,
+    cancelProjectTreeResize: paneLayout.cancelSidebarResize,
+    onProjectTreeResizeKeydown: paneLayout.onSidebarResizeKeydown,
     publishProjectTreeWindowState: detachedWindow.publishProjectTreeWindowState,
     openProjectTreeWindow: detachedWindow.openProjectTreeWindow,
     closeProjectTreeWindowForExit: detachedWindow.closeProjectTreeWindowForExit,

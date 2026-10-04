@@ -1,5 +1,6 @@
 <!-- メイン画面とイベント同期して表示する分離プロジェクトツリー。 -->
 <script setup lang="ts">
+import { useChildAppearance } from './useChildAppearance'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { emitTo, listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -13,6 +14,7 @@ import {
   type ProjectTreeWindowState,
 } from './projectTreeWindow'
 
+useChildAppearance()
 const windowId = new URLSearchParams(window.location.search).get('windowId') ?? ''
 const state = ref<ProjectTreeWindowState>({
   windowId,

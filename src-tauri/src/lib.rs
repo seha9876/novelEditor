@@ -1,12 +1,13 @@
 mod project_order;
 mod project_tree;
 mod storage_location;
+mod text_file;
 
 use project_tree::ProjectTreeState;
 use storage_location::{allow_storage_files, StorageLocationState};
 use tauri::Manager;
 
-// Tauri 本体と、ファイル操作・設定永続化に必要なプラグインを登録して起動する。
+/// Tauri本体と、文書・Git履歴・永続設定のコマンドやプラグインを登録して起動する。
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -37,6 +38,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            project_tree::git_history::git_history,
+            text_file::text_file_inspect,
+            text_file::text_file_save_conditional,
             project_tree::project_tree_snapshot,
             project_tree::project_create,
             project_tree::project_rename,
@@ -49,6 +53,11 @@ pub fn run() {
             project_tree::project_nodes_remove,
             project_tree::project_node_move,
             project_tree::project_file_authorize,
+            project_tree::recent_files::recent_files_list,
+            project_tree::recent_files::recent_file_record,
+            project_tree::recent_files::recent_files_remove,
+            project_tree::recent_files::recent_files_clear,
+            project_tree::recent_files::recent_file_authorize,
             storage_location::storage_status,
             storage_location::storage_schedule_change,
             storage_location::storage_schedule_default,

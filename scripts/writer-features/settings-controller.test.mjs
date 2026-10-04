@@ -12,6 +12,8 @@ test('設定履歴moduleはセッション・上限・Undo/Redoを独立して�
   const { createSettingsHistory } = loadSourceModule('src/settingsHistory.ts')
   const defaults = preferences.createDefaultApplicationPreferences()
   const base = {
+    outline: defaults.outline,
+    appearance: defaults.ui.appearance,
     editor: { ...defaults.editor },
     toolbar: { ...defaults.ui.toolbar, items: defaults.ui.toolbar.items.map((item) => ({ ...item })) },
     statusBar: { ...defaults.ui.statusBar, items: [...defaults.ui.statusBar.items] },
@@ -84,11 +86,81 @@ test('設定channelはrevision順の状態だけを保持し、購読を破棄�
   const { useSettingsWindowChannel } = loadSourceModule('src/useSettingsWindowChannel.ts', mocks)
   const channel = useSettingsWindowChannel()
   await channel.setup()
-  handlers[0]({ payload: { revision: 2, editor: {}, toolbar: {}, barSizes: {}, page: 'editor.wrapping', history: { canUndo: false, canRedo: false } } })
+  const appearance = loadSourceModule('src/appearance.ts').createDefaultAppearance()
+  handlers[0]({ payload: { revision: 2, appearance, appearanceEpoch: 0, editor: {}, toolbar: {}, barSizes: {}, page: 'editor.wrapping', history: { canUndo: false, canRedo: false } } })
   handlers[0]({ payload: { revision: 1, editor: { stale: true }, toolbar: {}, barSizes: {}, page: 'editor.typography', history: { canUndo: true, canRedo: false } } })
   assert.equal(channel.snapshot.value.revision, 2)
   channel.dispose()
-  assert.deepEqual(unlistenCounts, [1, 1])
+  assert.deepEqual(unlistenCounts, [1, 1, 1, 1, 1])
+})
+
+test('設定channelは途中の購読失敗を解除し、再試行で両方の購読を回復する', async () => {
+  let attempt = 0
+  const activeSubscriptions = new Set()
+  const { useSettingsWindowChannel } = loadSourceModule('src/useSettingsWindowChannel.ts', {
+    '@tauri-apps/api/event': {
+      async listen(event) {
+        attempt += 1
+        if (attempt === 2) throw new Error('エラー購読失敗')
+        activeSubscriptions.add(event)
+        return () => activeSubscriptions.delete(event)
+      },
+    },
+  })
+  const channel = useSettingsWindowChannel()
+  await assert.rejects(channel.setup(), /エラー購読失敗/)
+  assert.equal(activeSubscriptions.size, 0)
+  await channel.setup()
+  assert.equal(activeSubscriptions.size, 5)
+  channel.dispose()
+  assert.equal(activeSubscriptions.size, 0)
+})
+
+test('設定窓を再度前面へ出しても破棄通知を維持し、次の窓へ古い通知を適用しない', async () => {
+  let nativeWindow = null
+  let destroyedCount = 0
+  const instances = []
+  const { useSettingsWindowBridge } = loadSourceModule('src/useSettingsWindowBridge.ts', {
+    '@tauri-apps/api/event': { async emitTo() {} },
+    '@tauri-apps/api/webviewWindow': {
+      WebviewWindow: class {
+        /** テスト用の実体と、窓作成時のラッパーを記録する。 */
+        constructor() {
+          this.handlers = {}
+          nativeWindow = { owner: this }
+          instances.push(this)
+        }
+        /** Tauriと同じく、検索するたびに別のラッパーを返す。 */
+        static async getByLabel() {
+          return nativeWindow ? { setFocus: async () => {}, once: (...args) => nativeWindow.owner.once(...args) } : null
+        }
+        /** ウィンドウのイベント通知を任意の時点で発生させる。 */
+        async once(event, handler) { this.handlers[event] = handler; return () => {} }
+        /** アプリ終了時の窓破棄を模擬する。 */
+        async destroy() { this.handlers['tauri://destroyed']?.() }
+      },
+    },
+  })
+  const bridge = useSettingsWindowBridge({
+    getSnapshot: () => ({}),
+    onCommand: async () => {},
+    showError: async () => {},
+    onDestroyed: () => { destroyedCount += 1 },
+  })
+  await bridge.open()
+  const firstWindow = instances[0]
+  firstWindow.handlers['tauri://created']()
+  await bridge.open()
+  assert.equal(instances.length, 1)
+  nativeWindow = null
+  firstWindow.handlers['tauri://destroyed']()
+  assert.equal(bridge.settingsWindowOpen.value, false)
+  assert.equal(destroyedCount, 1)
+  await bridge.open()
+  firstWindow.handlers['tauri://destroyed']()
+  assert.equal(bridge.settingsWindowOpen.value, true)
+  assert.equal(destroyedCount, 1)
+  await bridge.dispose()
 })
 
 test('本文設定draftは入力検証と保存待ち状態を実動作で同期する', async () => {
@@ -162,6 +234,15 @@ test('設定Controllerは変更を履歴化し、Undo/Redoと直列保存を実�
   assert.equal(controller.interfaceBarMetrics.value.menu.height, 32)
   await controller.setup()
   commandHandler({ payload: { type: 'ready' } })
+  const outlineDefaults = JSON.parse(JSON.stringify(controller.outline.value))
+  const customOutline = globalThis.structuredClone(outlineDefaults)
+  customOutline.rules[0].level = 3
+  commandHandler({ payload: { type: 'change', outline: customOutline } })
+  assert.equal(controller.outline.value.rules[0].level, 3)
+  commandHandler({ payload: { type: 'undo' } })
+  assert.deepEqual(controller.outline.value, outlineDefaults)
+  commandHandler({ payload: { type: 'redo' } })
+  assert.equal(controller.outline.value.rules[0].level, 3)
   const originalSize = controller.editorSettings.value.fontSize
   commandHandler({ payload: { type: 'change', editor: { fontSize: originalSize + 1 } } })
   commandHandler({ payload: { type: 'undo' } })

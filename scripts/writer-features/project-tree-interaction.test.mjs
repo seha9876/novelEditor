@@ -91,6 +91,9 @@ test('選択Composableは展開状態・表示行・選択を実際の状態と�
     onExpandedChange: (ids) => expandedChanges.push(ids),
     onUnavailableChange: (ids) => unavailableChanges.push(ids),
     isDialogOpen: () => false,
+    isBusy: () => false,
+    onActivateNode: () => {},
+    onFocusNode: () => {},
     onDeleteSelection: () => {},
     onEscape: () => {},
   })
@@ -137,6 +140,9 @@ test('snapshot更新で削除済みの参照切れIDを親へ通知する', () =
     onExpandedChange: () => {},
     onUnavailableChange: (ids) => unavailableChanges.push(ids),
     isDialogOpen: () => false,
+    isBusy: () => false,
+    onActivateNode: () => {},
+    onFocusNode: () => {},
     onDeleteSelection: () => {},
     onEscape: () => {},
   })
@@ -146,6 +152,261 @@ test('snapshot更新で削除済みの参照切れIDを親へ通知する', () =
 
   assert.deepEqual([...selection.unavailableNodes.value], [12])
   assert.deepEqual(unavailableChanges, [[12]])
+})
+
+/** 実際の選択Composableへキーを送り、開く要求・フォーカス・選択を検証する。 */
+function createTreeKeyboardHarness() {
+  const { ref } = require('vue')
+  const snapshot = ref({
+    projects: [{ id: 1, name: '作品' }, { id: 2, name: '資料' }],
+    activeProjectId: 1,
+    nodes: [
+      { id: 10, projectId: 1, parentId: null, kind: 'folder', name: '章' },
+      { id: 11, projectId: 1, parentId: 10, kind: 'folder', name: '節' },
+      { id: 12, projectId: 1, parentId: 11, kind: 'file', name: '本文.txt' },
+      { id: 13, projectId: 1, parentId: null, kind: 'file', name: 'あとがき.txt' },
+      { id: 20, projectId: 2, parentId: null, kind: 'file', name: '資料.txt' },
+    ],
+  })
+  const state = { busy: false, dialogOpen: false, deleted: 0 }
+  const activated = []
+  const focused = []
+  const selection = loadSourceModule('src/useProjectTreeSelection.ts').useProjectTreeSelection({
+    snapshot, expandedFolderIds: [], unavailableNodeIds: [],
+    onExpandedChange: () => {}, onUnavailableChange: () => {},
+    isDialogOpen: () => state.dialogOpen, isBusy: () => state.busy,
+    onActivateNode: (node) => {
+      activated.push(node.id)
+      if (node.kind === 'folder') selection.toggleFolder(node.id)
+    },
+    onFocusNode: (nodeId, restoreOnly) => focused.push({ nodeId, restoreOnly }),
+    onDeleteSelection: () => { state.deleted += 1 }, onEscape: () => {},
+  })
+  return {
+    selection, snapshot, state, activated, focused,
+    key(key, modifiers = {}) {
+      let prevented = false
+      selection.handleTreeKeydown({
+        key, ctrlKey: false, metaKey: false, shiftKey: false, isComposing: false,
+        preventDefault: () => { prevented = true }, ...modifiers,
+      })
+      return prevented
+    },
+  }
+}
+
+test('ツリーの矢印・Home・Endは開かずに移動し、Enterだけ既存の開く処理を呼ぶ', () => {
+  const h = createTreeKeyboardHarness()
+  assert.equal(h.selection.focusedNodeId.value, 10)
+  h.key('ArrowRight')
+  assert.deepEqual([...h.selection.expandedFolders.value], [10])
+  h.key('ArrowRight')
+  assert.equal(h.selection.focusedNodeId.value, 11)
+  h.key('Enter')
+  assert.deepEqual(h.activated, [11])
+  h.key('ArrowRight')
+  assert.equal(h.selection.focusedNodeId.value, 12)
+  h.key('ArrowLeft')
+  assert.equal(h.selection.focusedNodeId.value, 11)
+  h.key('ArrowLeft')
+  assert.equal(h.selection.expandedFolders.value.has(11), false)
+  h.key('End')
+  assert.equal(h.selection.focusedNodeId.value, 13)
+  h.key('ArrowDown')
+  assert.equal(h.selection.focusedNodeId.value, 13)
+  h.key('Home')
+  assert.equal(h.selection.focusedNodeId.value, 10)
+  h.key('ArrowUp')
+  assert.equal(h.selection.focusedNodeId.value, 10)
+  assert.deepEqual(h.activated, [11])
+  h.key('End')
+  h.key('Enter')
+  assert.deepEqual(h.activated, [11, 13])
+})
+
+test('ツリーはShift範囲選択・Ctrlフォーカス移動・Ctrl Space切替を組み合わせられる', () => {
+  const h = createTreeKeyboardHarness()
+  h.key('ArrowRight')
+  h.key('Home')
+  h.key('ArrowDown', { shiftKey: true })
+  h.key('ArrowDown', { shiftKey: true })
+  assert.deepEqual([...h.selection.selectedNodeIds.value], [10, 11, 13])
+  h.key('ArrowUp', { shiftKey: true })
+  assert.deepEqual([...h.selection.selectedNodeIds.value], [10, 11])
+  h.key('ArrowDown', { ctrlKey: true })
+  assert.equal(h.selection.focusedNodeId.value, 13)
+  assert.deepEqual([...h.selection.selectedNodeIds.value], [10, 11])
+  h.key(' ', { ctrlKey: true })
+  assert.deepEqual([...h.selection.selectedNodeIds.value], [10, 11, 13])
+  h.key(' ', { ctrlKey: true })
+  assert.deepEqual([...h.selection.selectedNodeIds.value], [10, 11])
+  h.key('Escape')
+  assert.equal(h.selection.selectedNodeIds.value.size, 0)
+  assert.equal(h.selection.focusedNodeId.value, 13)
+})
+
+test('ツリーは折りたたみ・削除・別画面更新・空ツリーでフォーカスを復帰する', () => {
+  const h = createTreeKeyboardHarness()
+  h.selection.syncExpandedFolderIds([10, 11])
+  h.selection.setFocusedNode(12)
+  h.selection.setNodeSelection([12])
+  h.selection.syncExpandedFolderIds([])
+  assert.equal(h.selection.focusedNodeId.value, 10)
+  assert.equal(h.selection.selectedNodeIds.value.size, 0)
+  assert.deepEqual(h.focused.at(-1), { nodeId: 10, restoreOnly: true })
+  h.selection.syncExpandedFolderIds([10, 11])
+  h.selection.setFocusedNode(12)
+  h.snapshot.value = { ...h.snapshot.value, nodes: h.snapshot.value.nodes.filter((node) => node.id !== 12) }
+  assert.equal(h.selection.focusedNodeId.value, 11)
+  h.key('End')
+  h.snapshot.value = { ...h.snapshot.value, nodes: h.snapshot.value.nodes.filter((node) => node.id !== 13) }
+  assert.equal(h.selection.focusedNodeId.value, 11)
+  h.snapshot.value = { ...h.snapshot.value, activeProjectId: 2 }
+  assert.equal(h.selection.focusedNodeId.value, 20)
+  h.snapshot.value = { ...h.snapshot.value, nodes: [] }
+  assert.equal(h.selection.focusedNodeId.value, null)
+  assert.doesNotThrow(() => h.key('ArrowDown'))
+  assert.deepEqual(h.focused.at(-1), { nodeId: null, restoreOnly: true })
+})
+
+test('ツリーのキー操作はIME・入力欄・処理中・ダイアログ中に動かず、操作ボタンのEnterを奪わない', () => {
+  const h = createTreeKeyboardHarness()
+  const previousHTMLElement = globalThis.HTMLElement
+  class TreeKeyTarget {
+    constructor(selector) { this.selector = selector }
+    closest(selector) { return selector.includes(this.selector) ? this : null }
+  }
+  globalThis.HTMLElement = TreeKeyTarget
+  try {
+    for (const modifiers of [{ isComposing: true }, { keyCode: 229 }, { altKey: true },
+      { target: new TreeKeyTarget('input') }, { target: new TreeKeyTarget('contenteditable') }]) {
+      assert.equal(h.key('ArrowDown', modifiers), false)
+      assert.equal(h.key('Enter', modifiers), false)
+    }
+    h.state.busy = true
+    assert.equal(h.key('ArrowDown'), false)
+    h.state.busy = false
+    h.state.dialogOpen = true
+    assert.equal(h.key('ArrowDown'), false)
+    h.state.dialogOpen = false
+    assert.equal(h.key('Enter', { target: new TreeKeyTarget('.project-tree-actions') }), false)
+    assert.equal(h.selection.focusedNodeId.value, 10)
+    assert.deepEqual(h.activated, [])
+  } finally {
+    if (previousHTMLElement === undefined) delete globalThis.HTMLElement
+    else globalThis.HTMLElement = previousHTMLElement
+  }
+  const source = readFileSync(resolve(projectRoot, 'src/ProjectTreeSidebar.vue'), 'utf8')
+  assert.equal((source.match(/:tabindex="focusedNodeId === row.node.id \? 0 : -1"/g) ?? []).length, 2)
+  assert.match(source, /:tabindex="visibleRows.length === 0 \|\| isBusy \? 0 : -1"/)
+  assert.match(source, /scrollIntoView\(\{ block: 'nearest', inline: 'nearest' \}\)/)
+})
+
+test('ツリーのDOMフォーカス復帰は画面内へスクロールし、外部へ移ったフォーカスを奪わない', async () => {
+  const source = readFileSync(resolve(projectRoot, 'src/ProjectTreeSidebar.vue'), 'utf8')
+  const script = source.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
+  const sourceFile = ts.createSourceFile('ProjectTreeSidebar.ts', script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const declaration = sourceFile.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === 'focusTreeNode')
+  assert.ok(declaration)
+  const compiled = ts.transpileModule(declaration.getText(sourceFile), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText
+  const focusCalls = []
+  const scrollCalls = []
+  const rowButton = { disabled: false, focus: (options) => focusCalls.push(['row', options]), scrollIntoView: (options) => scrollCalls.push(options) }
+  const oldRowButton = {}
+  const external = {}
+  const document = { body: {}, activeElement: oldRowButton }
+  const tree = {
+    isConnected: true,
+    contains: (element) => [tree, rowButton, oldRowButton].includes(element),
+    querySelector: () => rowButton,
+    focus: () => focusCalls.push(['tree']), scrollIntoView: (options) => scrollCalls.push(options),
+  }
+  const focusedNodeId = { value: 12 }
+  let dialogOpen = false
+  const move = new Function('treeScrollElement', 'focusedNodeId', 'document', 'nextTick', 'isDialogOpen', `${compiled}\nreturn focusTreeNode`)(
+    { value: tree }, focusedNodeId, document, () => Promise.resolve(), () => dialogOpen,
+  )
+  await move(12, false)
+  assert.deepEqual(focusCalls, [['row', { preventScroll: true }]])
+  assert.deepEqual(scrollCalls, [{ block: 'nearest', inline: 'nearest' }])
+  document.activeElement = external
+  await move(12, true)
+  assert.equal(focusCalls.length, 1)
+  document.activeElement = oldRowButton
+  const moving = move(12, true)
+  document.activeElement = external
+  await moving
+  assert.equal(focusCalls.length, 1)
+  document.activeElement = oldRowButton
+  const removedRow = move(12, true)
+  document.activeElement = document.body
+  await removedRow
+  assert.equal(focusCalls.length, 2)
+  document.activeElement = oldRowButton
+  const staleMove = move(12, false)
+  focusedNodeId.value = 13
+  await staleMove
+  assert.equal(focusCalls.length, 2)
+  focusedNodeId.value = null
+  await move(null, true)
+  assert.deepEqual(focusCalls.at(-1), ['tree'])
+  focusedNodeId.value = 12
+  const beforeDialog = move(12, true)
+  dialogOpen = true
+  await beforeDialog
+  await move(12, true)
+  assert.equal(focusCalls.length, 3)
+})
+
+test('操作メニューはキーボード起動で最初の項目へ移り、Esc復帰先とマウス座標を維持する', () => {
+  const source = readFileSync(resolve(projectRoot, 'src/ProjectTreeSidebar.vue'), 'utf8')
+  const script = source.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
+  const sourceFile = ts.createSourceFile('ProjectTreeSidebar.ts', script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const declaration = sourceFile.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === 'openNodeMenu')
+  const focusDeclaration = sourceFile.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === 'focusNodeMenu')
+  assert.ok(declaration)
+  assert.ok(focusDeclaration)
+  const compiled = ts.transpileModule(`${declaration.getText(sourceFile)}\n${focusDeclaration.getText(sourceFile)}`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText
+  class MenuButton {
+    getBoundingClientRect() { return { left: 200, bottom: 140 } }
+  }
+  const nodeMenuTarget = { value: [0, 0] }
+  const nodeMenuActivator = { value: null }
+  const nodeMenuOpen = { value: true }
+  const calls = []
+  const focused = []
+  let dialogOpen = false
+  const { open, focus } = new Function('openNodeMenuAction', 'nodeMenuTarget', 'HTMLElement', 'nodeMenuActivator', 'nodeMenuList', 'nodeMenuOpen', 'isDialogOpen',
+    `let nodeMenuOpenedWithKeyboard = false\n${compiled}\nreturn { open: openNodeMenu, focus: focusNodeMenu }`)(
+    (event, node) => { calls.push(node.id); nodeMenuTarget.value = [event.clientX, event.clientY] }, nodeMenuTarget, MenuButton,
+    nodeMenuActivator, { value: { focus: (location) => focused.push(location) } }, nodeMenuOpen, () => dialogOpen,
+  )
+  const button = new MenuButton()
+  open({ detail: 0, clientX: 0, clientY: 0, currentTarget: button }, { id: 12 })
+  assert.equal(nodeMenuActivator.value, button)
+  assert.deepEqual(nodeMenuTarget.value, [200, 140])
+  focus()
+  assert.deepEqual(focused, ['first'])
+  nodeMenuOpen.value = false
+  focus()
+  nodeMenuOpen.value = true
+  dialogOpen = true
+  focus()
+  dialogOpen = false
+  assert.equal(focused.length, 1)
+  open({ detail: 1, clientX: 214, clientY: 122, currentTarget: new MenuButton() }, { id: 13 })
+  assert.deepEqual(nodeMenuTarget.value, [214, 122])
+  focus()
+  assert.equal(focused.length, 1)
+  assert.deepEqual(calls, [12, 13])
+  assert.match(source, /:activator="nodeMenuActivator \?\? undefined" :open-on-click="false"/)
+  assert.match(source, /:open-on-arrow="false"/)
+  assert.match(source, /@after-enter="focusNodeMenu"/)
+  assert.match(source, /isDialogOpen: \(\) => isDialogOpen\(\) \|\| nodeMenuOpen.value/)
 })
 
 test('ツリーActionsの開く結果は既存の参照切れ状態を保ったまま更新する', async () => {
@@ -295,6 +556,60 @@ test('ツリー空欄の右クリックは選択を解除し、ルートへ追�
   assert.equal(clearSelectionCount, 3)
 })
 
+test('フォルダ名入力中のプロジェクト切替でも作成先は入力開始時のプロジェクトを保つ', async () => {
+  const { ref } = require('vue')
+  const folderCalls = []
+  const snapshot = ref({ projects: [{ id: 1 }, { id: 2 }], nodes: [], activeProjectId: 1 })
+  const actions = loadSourceModule('src/useProjectTreeActions.ts', {
+    './projectTreeClient': {
+      createProjectFolder: async (...args) => { folderCalls.push(args) },
+    },
+  }).useProjectTreeActions({
+    snapshot,
+    isBusy: () => false,
+    runMutation: async (action) => { await action(); return true },
+    expandFolderPath: () => {},
+  })
+
+  actions.requestFolderCreate()
+  actions.dialogValue.value = '第一章'
+  snapshot.value = { ...snapshot.value, activeProjectId: 2 }
+  await actions.saveNameDialog()
+  assert.deepEqual(folderCalls, [[1, null, '第一章']])
+})
+
+test('共通名前ダイアログはIME確定Enterを保存せず、通常Enterだけ一度保存する', () => {
+  const source = readFileSync(resolve(projectRoot, 'src/ProjectNameDialog.vue'), 'utf8')
+  const script = source.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
+  const compiled = ts.transpileModule(script, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText
+  const props = { modelValue: true, title: '名前', value: '第一章', disabled: false }
+  const events = []
+  const saveOnEnter = new Function('defineProps', 'defineEmits', `${compiled}\nreturn saveOnEnter`)(
+    () => props, () => (event) => events.push(event),
+  )
+  let prevented = 0
+  const event = { isComposing: false, keyCode: 13, preventDefault: () => { prevented += 1 } }
+  saveOnEnter({ ...event, isComposing: true })
+  saveOnEnter({ ...event, keyCode: 229 })
+  assert.deepEqual(events, [])
+  assert.equal(prevented, 0)
+
+  saveOnEnter(event)
+  assert.deepEqual(events, ['save'])
+  assert.equal(prevented, 1)
+  props.disabled = true
+  saveOnEnter(event)
+  props.disabled = false
+  props.value = '  '
+  saveOnEnter(event)
+  assert.deepEqual(events, ['save'])
+  assert.match(source, /@keydown\.enter="saveOnEnter"/)
+  const sidebar = readFileSync(resolve(projectRoot, 'src/ProjectTreeSidebar.vue'), 'utf8')
+  assert.match(sidebar, /<ProjectNameDialog\s+v-model="dialogOpen"/)
+})
+
 test('ツリー幅Layoutはドラッグ結果を実際の保存処理へ渡す', async () => {
   const { ref } = require('vue')
   const previousWindow = globalThis.window
@@ -306,14 +621,14 @@ test('ツリー幅Layoutはドラッグ結果を実際の保存処理へ渡す',
     removeEventListener: () => {},
   }
   try {
-    const layoutModule = loadSourceModule('src/useProjectTreePaneLayout.ts', {
+    const layoutModule = loadSourceModule('src/useSidebarPaneLayout.ts', {
       './appPreferences': {
-        saveProjectTreePreferences: async (preferences) => { saved.push(preferences) },
+        saveSidebarPreferences: async (preferences, detached) => { saved.push({ ...preferences, detached }) },
       },
     })
     const detached = ref(false)
-    const layout = layoutModule.useProjectTreePaneLayout({
-      initialPreferences: { ui: { projectTree: { width: 280, detached: false } } },
+    const layout = layoutModule.useSidebarPaneLayout({
+      initialPreferences: { ui: { sidebar: { width: 280, activePanel: 'project', collapsed: false }, projectTree: { detached: false } } },
       detached,
       showPersistenceNotice: () => {},
     })
@@ -324,14 +639,14 @@ test('ツリー幅Layoutはドラッグ結果を実際の保存処理へ渡す',
       pointerId: 8,
       clientX: 300,
       preventDefault: () => {},
-      currentTarget: { setPointerCapture: () => {} },
+      currentTarget: { setPointerCapture: () => {}, hasPointerCapture: () => false },
     }
-    layout.startProjectTreeResize(event)
-    layout.moveProjectTreeResize({ pointerId: 8, clientX: 325 })
-    layout.endProjectTreeResize(event)
+    layout.startSidebarResize(event)
+    layout.moveSidebarResize({ pointerId: 8, clientX: 325 })
+    layout.endSidebarResize({ ...event, clientX: 325 })
     await layout.flush()
-    assert.equal(layout.projectTreeDisplayWidth.value, 305)
-    assert.deepEqual(saved, [{ width: 305, detached: false }])
+    assert.equal(layout.sidebarDisplayWidth.value, 305)
+    assert.deepEqual(saved, [{ width: 305, detached: false, collapsed: false, activePanel: 'project' }])
     await layout.dispose()
   } finally {
     if (previousWindow === undefined) delete globalThis.window
@@ -662,88 +977,12 @@ test('分離ツリーは開く結果を反映してからドックし、復帰�
 
 test('ツリー幅ドラッグ中だけ遷移を止め、ポインター中は保存を遅らせる', () => {
   const app = readFileSync(resolve(projectRoot, 'src/App.vue'), 'utf8')
-  const main = readFileSync(resolve(projectRoot, 'src/useProjectTreePaneLayout.ts'), 'utf8')
   const styles = readFileSync(resolve(projectRoot, 'src/styles/project-tree.css'), 'utf8')
 
   assert.match(app, /:class="\{ 'is-project-tree-resizing': projectTreeResizing \}"/)
-  assert.match(main, /setProjectTreeWidth\(projectTreeResizeStart\.startWidth \+ event\.clientX - projectTreeResizeStart\.startX, false\)/)
-  assert.match(app, /@lostpointercapture="endProjectTreeResize"/)
-  assert.match(main, /projectTreeResizing\.value = false\s*scheduleProjectTreePreferencesSave\(\)/)
-  assert.match(main, /if \(persist\) scheduleProjectTreePreferencesSave\(\)/)
+  assert.match(app, /@lostpointercapture="cancelProjectTreeResize"/)
+  assert.match(app, /@pointercancel="cancelProjectTreeResize"/)
   assert.match(styles, /\.app-shell\.is-project-tree-resizing \.project-navigation,[\s\S]*?\.writing-area \{ transition: none; \}/)
-})
-
-test('ドラッグ開始時は未実行の幅保存だけを取り消し、終了処理は一度だけ保存する', () => {
-  const controller = readFileSync(resolve(projectRoot, 'src/useProjectTreePaneLayout.ts'), 'utf8')
-  const sourceFile = ts.createSourceFile('useProjectTreePaneLayout.ts', controller, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
-  const functions = new Map()
-  const findResizeFunctions = (node) => {
-    if (ts.isFunctionDeclaration(node) && node.name
-      && ['startProjectTreeResize', 'endProjectTreeResize'].includes(node.name.text)) {
-      functions.set(node.name.text, node.getText(sourceFile))
-    }
-    ts.forEachChild(node, findResizeFunctions)
-  }
-  findResizeFunctions(sourceFile)
-  assert.ok(functions.has('startProjectTreeResize'))
-  assert.ok(functions.has('endProjectTreeResize'))
-
-  const harnessSource = `
-    let projectTreeSaveTimer = initialTimer
-    let projectTreeResizeStart = null
-    let disposed = false
-    const projectTreeDisplayWidth = { value: 280 }
-    const projectTreeResizing = { value: false }
-    const projectTreeSavePromise = activeSavePromise
-    let scheduledSaveCount = 0
-    function scheduleProjectTreePreferencesSave() { scheduledSaveCount += 1 }
-    ${functions.get('startProjectTreeResize')}
-    ${functions.get('endProjectTreeResize')}
-    return {
-      start: (event) => startProjectTreeResize(event),
-      end: (event) => endProjectTreeResize(event),
-      get timer() { return projectTreeSaveTimer },
-      get resizeStart() { return projectTreeResizeStart },
-      get isResizing() { return projectTreeResizing.value },
-      get scheduledSaveCount() { return scheduledSaveCount },
-      savePromise: projectTreeSavePromise,
-    }
-  `
-  const executable = ts.transpileModule(harnessSource, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
-  }).outputText
-  const createHarness = new Function('initialTimer', 'activeSavePromise', 'clearTimeout', executable)
-  const clearedTimers = []
-  const inFlightSavePromise = Promise.resolve('既に開始済み')
-  const harness = createHarness(123, inFlightSavePromise, (timer) => clearedTimers.push(timer))
-  let capturedPointerId = null
-  const event = {
-    button: 0,
-    pointerId: 7,
-    clientX: 300,
-    preventDefault() {},
-    currentTarget: { setPointerCapture: (pointerId) => { capturedPointerId = pointerId } },
-  }
-
-  harness.start(event)
-  assert.deepEqual(clearedTimers, [123])
-  assert.equal(harness.timer, undefined)
-  assert.equal(harness.scheduledSaveCount, 0)
-  assert.equal(harness.isResizing, true)
-  assert.equal(capturedPointerId, 7)
-  assert.equal(harness.savePromise, inFlightSavePromise)
-
-  harness.end(event)
-  assert.equal(harness.isResizing, false)
-  assert.equal(harness.resizeStart, null)
-  assert.equal(harness.scheduledSaveCount, 1)
-  harness.end(event)
-  assert.equal(harness.scheduledSaveCount, 1)
-
-  const withoutPendingTimer = createHarness(undefined, inFlightSavePromise, (timer) => clearedTimers.push(timer))
-  withoutPendingTimer.start(event)
-  assert.deepEqual(clearedTimers, [123])
-  assert.equal(withoutPendingTimer.savePromise, inFlightSavePromise)
 })
 
 test('プロジェクトツリーStoreは初期読込と更新後再取得を実動作で直列化する', async () => {
@@ -973,4 +1212,44 @@ test('プロジェクトツリーStoreは破棄後の遅着DB結果と進捗表�
   refreshRaceStore.dispose()
   refreshDeferred.release({ projects: [], nodes: [], activeProjectId: 2 })
   assert.equal(await refreshMutation, false)
+})
+
+test('DB更新成功は再読込失敗や画面破棄後も他画面へ通知し、更新失敗は通知しない', async () => {
+  const notifications = []
+  const { useProjectTreeStore } = loadSourceModule('src/useProjectTreeStore.ts', {
+    './projectTreeClient': {
+      notifyProjectTreeChanged: async (...args) => { notifications.push(args) },
+    },
+  })
+  let loadCount = 0
+  const store = useProjectTreeStore({
+    sourceId: 'refresh-failure',
+    loadSnapshot: async () => {
+      if (loadCount++ > 0) throw new Error('再読込失敗')
+      return { projects: [], nodes: [], activeProjectId: null }
+    },
+    canMutate: () => true,
+    showError: async () => {},
+  })
+  await store.initializeTree()
+  assert.equal(await store.runMutation(async () => { throw new Error('更新失敗') }), false)
+  assert.deepEqual(notifications, [])
+  assert.equal(await store.runMutation(async () => {}), false)
+  assert.deepEqual(notifications, [['refresh-failure', 1]])
+  assert.equal(store.treeError.value, 'Error: 再読込失敗')
+  store.dispose()
+
+  const action = deferred()
+  const disposedStore = useProjectTreeStore({
+    sourceId: 'disposed',
+    loadSnapshot: async () => ({ projects: [], nodes: [], activeProjectId: null }),
+    canMutate: () => true,
+    showError: async () => {},
+  })
+  await disposedStore.initializeTree()
+  const mutation = disposedStore.runMutation(() => action.promise)
+  disposedStore.dispose()
+  action.release()
+  assert.equal(await mutation, false)
+  assert.deepEqual(notifications, [['refresh-failure', 1], ['disposed', 1]])
 })

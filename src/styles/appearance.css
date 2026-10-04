@@ -46,10 +46,34 @@
 .appearance-help { margin: 0; font-size: 0.8125rem; line-height: 1.65; color: var(--app-muted); }
 .appearance-actions { display: flex; flex-wrap: wrap; gap: 4px; }
 .color-setting-row { display: grid; grid-template-columns: minmax(80px, 1fr) 36px 126px 32px; align-items: start; gap: 10px; padding-block: 9px; border-bottom: 1px solid var(--app-border); }
-.color-setting-label { padding-top: 9px; font-size: 0.875rem; }
+.color-setting-caption { padding-top: 9px; min-width: 0; }
+.color-setting-label { font-size: 0.875rem; }
+.color-setting-description { margin: 4px 0 0; font-size: 0.75rem; line-height: 1.5; color: var(--app-muted); overflow-wrap: anywhere; }
 .color-setting-row input[type="color"] { width: 36px; height: 36px; padding: 2px; border: 1px solid var(--app-border); border-radius: 4px; background: var(--app-surface); cursor: pointer; }
 .color-hex-input input { font-family: monospace; font-size: 0.875rem; }
+
+/* 配色の見本は色一覧のスクロール中も残し、狭い窓では横に広げない。 */
+.appearance-preview { position: sticky; top: 8px; z-index: 3; padding: 12px; border: 1px solid var(--app-border); border-radius: 8px; background: var(--app-settingsPanel); color: var(--app-settingsText); box-shadow: 0 2px 6px #0002; }
+.appearance-preview-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 0.875rem; }
+.appearance-preview-kind { flex: none; border: 1px solid currentColor; border-radius: 4px; padding: 1px 5px; font-size: 0.75rem; }
+.appearance-preview-description { margin: 4px 0 8px; font-size: 0.75rem; line-height: 1.5; }
+.appearance-preview-parts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; }
+.appearance-preview-part { min-width: 0; }
+.appearance-preview-part-label { display: block; margin-bottom: 3px; font-size: 0.6875rem; }
+.appearance-preview-sample { min-height: 24px; border: 2px solid; border-radius: 3px; padding: 2px 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.75rem; }
+.appearance-preview-sample.is-target { outline: 2px solid #000; box-shadow: 0 0 0 4px #fff; }
+.appearance-preview-sample.is-target[data-target-kind="文字"], .appearance-preview-sample.is-target[data-target-kind="記号"] { outline: none; box-shadow: none; }
+.appearance-preview-sample.is-target[data-target-kind="文字"] > span, .appearance-preview-sample.is-target[data-target-kind="記号"] > span { outline: 2px solid #000; box-shadow: 0 0 0 4px #fff; }
+.appearance-preview-note { margin: 8px 0 0; font-size: 0.6875rem; }
+
+/* 白黒の二重枠はどの配色でも見分けられ、装飾は操作もレイアウトも妨げない。 */
+.appearance-target-overlay { position: fixed; inset: 0; z-index: 10000; pointer-events: none; contain: strict; }
+.appearance-target-marker { position: absolute; border: 2px solid #fff; box-shadow: inset 0 0 0 2px #000; }
+.appearance-target-label { position: absolute; top: 10px; left: 10px; max-width: min(340px, calc(100vw - 24px)); padding: 2px 6px; background: #fff; color: #000; border: 1px solid #000; font: 12px/1.5 sans-serif; white-space: normal; }
+.appearance-target-pointer { position: absolute; left: 0; top: 0; border-top: 1px solid #000; box-shadow: 0 -1px #fff; transform-origin: left center; }
 @media (max-width: 780px) {
   .color-setting-row { grid-template-columns: minmax(65px, 1fr) 32px 108px 28px; gap: 5px; }
   .color-setting-row input[type="color"] { width: 32px; }
+  .appearance-preview { padding: 8px; }
+  .appearance-preview-parts { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 8px; }
 }

@@ -1,7 +1,10 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import SettingExpansionSection from './SettingExpansionSection.vue'
 import ColorSettingInput from './ColorSettingInput.vue'
+import AppearancePreview from './AppearancePreview.vue'
+import { createColorTargetInteraction } from './appearanceTargets'
+import { createAppearanceTargetSender } from './appearanceTargetChannel'
 import { builtInPresets, colorDefinitions, colorKeys, findColorPreset, isAppearanceModified, presetNameError, type AppearancePreferences, type ColorKey } from './appearance'
 import type { SettingsCommand } from './settingsSession'
 import type { SettingsSectionDefinition, SettingsSectionId } from './settingsDefinitions'
@@ -13,6 +16,8 @@ const props = defineProps<{
   headingLevel: number
   sections: readonly SettingsSectionDefinition[]
   expandedSectionIds: readonly SettingsSectionId[]
+  suspended: boolean
+  targetResetKey: string
 }>()
 const emit = defineEmits<{
   command: [command: SettingsCommand]
@@ -27,6 +32,24 @@ const groups = [...new Set(colorKeys.map((key) => colorDefinitions[key][0]))]
 const colorGroups = groups.map((label) => ({ label, keys: colorKeys.filter((key) => colorDefinitions[key][0] === label) }))
 const pendingSwitch = ref<string | null>(null)
 const dialog = ref<'switch' | 'name' | 'delete' | null>(null)
+const activeKey = ref<ColorKey | null>(null)
+const sender = createAppearanceTargetSender(new URLSearchParams(window.location.search).get('appearanceTargetSession') ?? '')
+const interaction = createColorTargetInteraction((key) => {
+  activeKey.value = key
+  sender.update(key)
+})
+
+/** ダイアログ・折りたたみ・ページ変更では、残ったホバーやフォーカスを破棄する。 */
+function clearTarget(): void { interaction.clear() }
+
+watch(() => [props.suspended, props.fileBusy, props.targetResetKey, props.expandedSectionIds.includes('appearance.colors.palette'), dialog.value], clearTarget)
+onBeforeUnmount(() => { clearTarget(); sender.dispose() })
+
+/** ダイアログ表示中の背面操作から対象を再設定しない。 */
+function hoverTarget(key: ColorKey, active: boolean): void { if (!props.suspended && !props.fileBusy && !dialog.value) interaction.hover(key, active) }
+
+/** 入力中の行を優先して、見本と実画面へ同じ対象を送る。 */
+function focusTarget(key: ColorKey, active: boolean): void { if (!props.suspended && !props.fileBusy && !dialog.value) interaction.focus(key, active) }
 const dialogOpen = computed({ get: () => dialog.value !== null, set: (open: boolean) => { if (!open) dialog.value = null } })
 const nameMode = ref<'save' | 'rename' | 'switch'>('save')
 const presetName = ref('')
@@ -101,10 +124,11 @@ function confirmDelete(): void {
         <VBtn size="small" variant="text" prepend-icon="mdi-export" :disabled="fileBusy || !appearance.basePresetId" @click="emit('command', { type: 'appearance-file', operation: 'export', presetId: appearance.basePresetId ?? undefined })">エクスポート</VBtn>
       </div>
       <p class="appearance-help">エクスポートは選択したプリセットの保存済みの色を書き出します。各色の「戻す」は基準プリセットの色へ戻します。</p>
-      <VExpansionPanels multiple variant="accordion">
+      <AppearancePreview :colors="appearance.colors" :active-key="activeKey" />
+      <VExpansionPanels multiple variant="accordion" @update:model-value="clearTarget">
         <VExpansionPanel v-for="group in colorGroups" :key="group.label" :title="group.label">
           <VExpansionPanelText>
-            <ColorSettingInput v-for="key in group.keys" :key="key" :color-key="key" :label="colorDefinitions[key][1]" :value="appearance.colors[key]" :baseline="baseline.colors[key]" :epoch="epoch" @change="changeColor" @finish="emit('flushColors')" />
+            <ColorSettingInput v-for="key in group.keys" :key="key" :color-key="key" :label="colorDefinitions[key][1]" :value="appearance.colors[key]" :baseline="baseline.colors[key]" :epoch="epoch" @change="changeColor" @finish="emit('flushColors')" @target-hover="hoverTarget" @target-focus="focusTarget" />
           </VExpansionPanelText>
         </VExpansionPanel>
       </VExpansionPanels>

@@ -34,6 +34,8 @@ import { recordRecentFile } from './recentFiles'
 import ExternalFileDialog from './ExternalFileDialog.vue'
 import { useExternalFileMonitor } from './useExternalFileMonitor'
 import { createAppearanceHost } from './appearanceChannel'
+import { createAppearanceTargetHost } from './appearanceTargetChannel'
+import { createAppearanceTargetOverlay } from './appearanceTargetOverlay'
 import { applyAppearance } from './appearancePresentation'
 
 const props = defineProps<{
@@ -154,12 +156,15 @@ const externalFileMonitor = useExternalFileMonitor({
   onError: (error) => showPersistenceNotice(`外部更新の監視を開始できません。保存時の確認は有効です。${String(error)}`),
 })
 const appearanceHost = createAppearanceHost(props.initialPreferences.ui.appearance.colors, applyAppearance)
+const appearanceTargetOverlay = createAppearanceTargetOverlay()
+const appearanceTargetHost = createAppearanceTargetHost(appearanceTargetOverlay.update)
 const settingsController = useSettingsController({
   initialPreferences: props.initialPreferences,
   showPersistenceNotice,
   showError,
   onAppearanceChanged: appearanceHost.update,
   onAppearanceFlush: appearanceHost.flush,
+  onAppearanceTargetSession: appearanceTargetHost.setSession,
 })
 const searchController = useSearchController({
   editor,
@@ -489,6 +494,8 @@ onMounted(async () => {
   if (!isAppLifecycleActive(generation)) return
   await appearanceHost.setup()
   if (!isAppLifecycleActive(generation)) return
+  await appearanceTargetHost.setup()
+  if (!isAppLifecycleActive(generation)) return
   await setupProjectController()
   if (!isAppLifecycleActive(generation)) return
   await setupSearchController()
@@ -531,6 +538,8 @@ onBeforeUnmount(() => {
   disposeMainWindowController()
   void settingsController.dispose()
   appearanceHost.dispose()
+  appearanceTargetHost.dispose()
+  appearanceTargetOverlay.dispose()
   void disposeSearchController()
   disposeProjectController()
 })

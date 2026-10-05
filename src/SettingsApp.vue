@@ -424,7 +424,7 @@ onBeforeUnmount(() => {
           <OutlineSettingsPage v-else-if="page.id === 'editor.outline'" :preferences="snapshot.outline" @change="sendCommand({ type: 'change', outline: $event })" />
           <AppearanceSettingsPage
             v-else-if="page.id === 'appearance.colors'"
-            :appearance="snapshot.appearance" :epoch="snapshot.appearanceEpoch" :file-busy="snapshot.appearanceFileBusy"
+            :appearance="snapshot.appearance" :epoch="snapshot.appearanceEpoch" :file-busy="snapshot.appearanceFileBusy" :suspended="resetDialogOpen || closing" :target-reset-key="activeView"
             :heading-level="activeView === 'all' ? 4 : 2" :sections="page.sections" :expanded-section-ids="openedSectionIds"
             @command="sendCommand" @flush-colors="flushColors" @toggle-section="toggleSection"
           />

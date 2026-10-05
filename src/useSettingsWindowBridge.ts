@@ -20,6 +20,7 @@ type SettingsWindowBridgeOptions = {
   onCommand: (command: SettingsCommand) => Promise<void>
   showError: (action: string, error: unknown) => Promise<void>
   onDestroyed: (destroyedWindow: WebviewWindow) => void
+  onAppearanceTargetSession?: (session: string | null) => void
 }
 
 /** 設定イベントと設定ウィンドウのライフサイクルを所有する。 */
@@ -114,6 +115,7 @@ export function useSettingsWindowBridge(options: SettingsWindowBridgeOptions) {
     settingsWindow = null
     settingsWindowOpening = false
     settingsWindowOpen.value = false
+    options.onAppearanceTargetSession?.(null)
     if (!disposed) options.onDestroyed(destroyedWindow)
   }
 
@@ -121,6 +123,7 @@ export function useSettingsWindowBridge(options: SettingsWindowBridgeOptions) {
   async function open(): Promise<void> {
     if (disposed || settingsWindowOpening) return
     settingsWindowOpening = true
+    let openingTargetSession: string | null = null
     try {
       const existing = await WebviewWindow.getByLabel('settings')
       if (disposed) return
@@ -138,8 +141,11 @@ export function useSettingsWindowBridge(options: SettingsWindowBridgeOptions) {
       }
 
       settingsWindowOpen.value = true
+      const appearanceTargetSession = crypto.randomUUID()
+      openingTargetSession = appearanceTargetSession
+      options.onAppearanceTargetSession?.(appearanceTargetSession)
       const createdSettingsWindow = new WebviewWindow('settings', {
-        url: 'settings.html',
+        url: `settings.html?appearanceTargetSession=${appearanceTargetSession}`,
         title: '設定',
         parent: 'main',
         center: true,
@@ -153,15 +159,19 @@ export function useSettingsWindowBridge(options: SettingsWindowBridgeOptions) {
       })
       settingsWindow = createdSettingsWindow
       void createdSettingsWindow.once('tauri://destroyed', () => handleWindowDestroyed(createdSettingsWindow))
-      void createdSettingsWindow.once('tauri://created', () => { settingsWindowOpening = false })
+      // 旧窓の遅着通知で、開き直した窓の対象表示や作成状態を解除しない。
+      void createdSettingsWindow.once('tauri://created', () => { if (!disposed && settingsWindow === createdSettingsWindow) settingsWindowOpening = false })
       void createdSettingsWindow.once('tauri://error', (event) => {
+        if (disposed || settingsWindow !== createdSettingsWindow) return
         settingsWindowOpening = false
         settingsWindowOpen.value = false
+        options.onAppearanceTargetSession?.(null)
         if (!disposed) void options.showError('設定画面を開く操作', event.payload)
       })
     } catch (error) {
       settingsWindowOpening = false
       settingsWindowOpen.value = false
+      if (openingTargetSession) options.onAppearanceTargetSession?.(null)
       if (!disposed) await options.showError('設定画面を開く操作', error)
     }
   }
@@ -204,6 +214,7 @@ export function useSettingsWindowBridge(options: SettingsWindowBridgeOptions) {
     unlistenSettingsCommand?.()
     unlistenSettingsCommand = undefined
     settingsWindowOpen.value = false
+    options.onAppearanceTargetSession?.(null)
     settingsWindowOpening = false
     const closingWindow = settingsWindow
     settingsWindow = null

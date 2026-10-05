@@ -1,4 +1,5 @@
 /** 設定履歴、保存、window bridge、draftを検証する。 */
+import { URL } from 'node:url'
 import {
   assert,
   deferred,
@@ -120,12 +121,14 @@ test('設定窓を再度前面へ出しても破棄通知を維持し、次の�
   let nativeWindow = null
   let destroyedCount = 0
   const instances = []
+  const targetSessions = []
   const { useSettingsWindowBridge } = loadSourceModule('src/useSettingsWindowBridge.ts', {
     '@tauri-apps/api/event': { async emitTo() {} },
     '@tauri-apps/api/webviewWindow': {
       WebviewWindow: class {
         /** テスト用の実体と、窓作成時のラッパーを記録する。 */
-        constructor() {
+        constructor(_label, options) {
+          this.url = options.url
           this.handlers = {}
           nativeWindow = { owner: this }
           instances.push(this)
@@ -146,21 +149,30 @@ test('設定窓を再度前面へ出しても破棄通知を維持し、次の�
     onCommand: async () => {},
     showError: async () => {},
     onDestroyed: () => { destroyedCount += 1 },
+    onAppearanceTargetSession: session => { targetSessions.push(session) },
   })
   await bridge.open()
   const firstWindow = instances[0]
+  assert.equal(new URL(firstWindow.url, 'http://localhost').searchParams.get('appearanceTargetSession'), targetSessions[0])
   firstWindow.handlers['tauri://created']()
   await bridge.open()
   assert.equal(instances.length, 1)
+  assert.equal(targetSessions.length, 1)
   nativeWindow = null
   firstWindow.handlers['tauri://destroyed']()
   assert.equal(bridge.settingsWindowOpen.value, false)
   assert.equal(destroyedCount, 1)
+  assert.equal(targetSessions.at(-1), null)
   await bridge.open()
+  const secondSession = targetSessions.at(-1)
+  assert.notEqual(secondSession, targetSessions[0])
   firstWindow.handlers['tauri://destroyed']()
+  firstWindow.handlers['tauri://error']({ payload: '旧窓の作成エラー' })
   assert.equal(bridge.settingsWindowOpen.value, true)
   assert.equal(destroyedCount, 1)
+  assert.equal(targetSessions.at(-1), secondSession)
   await bridge.dispose()
+  assert.equal(targetSessions.at(-1), null)
 })
 
 test('本文設定draftは入力検証と保存待ち状態を実動作で同期する', async () => {

@@ -1,9 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { isHexColor, type ColorKey } from './appearance'
+import { colorTargets } from './appearanceTargets'
 
 const props = defineProps<{ colorKey: ColorKey; label: string; value: string; baseline: string; epoch: number }>()
-const emit = defineEmits<{ change: [key: ColorKey, value: string, interactionId: string]; finish: [] }>()
+const emit = defineEmits<{
+  change: [key: ColorKey, value: string, interactionId: string]; finish: []
+  targetHover: [key: ColorKey, active: boolean]; targetFocus: [key: ColorKey, active: boolean]
+}>()
 const draft = ref(props.value)
 const editing = ref(false)
 const error = computed(() => isHexColor(draft.value) ? '' : '#RRGGBB の6桁で入力してください。')
@@ -46,17 +50,26 @@ function restore(): void {
   change(props.baseline)
   finish()
 }
+
+/** 行内のピッカー・HEX入力・復元ボタン間の移動では強調を解除しない。 */
+function leaveFocus(event: FocusEvent): void {
+  if (event.relatedTarget instanceof Node && (event.currentTarget as HTMLElement).contains(event.relatedTarget)) return
+  emit('targetFocus', props.colorKey, false)
+}
 </script>
 
 <template>
-  <div class="color-setting-row">
-    <label :for="`color-${colorKey}`" class="color-setting-label">{{ label }}</label>
+  <div class="color-setting-row" @pointerenter="emit('targetHover', colorKey, true)" @pointerleave="emit('targetHover', colorKey, false)" @focusin="emit('targetFocus', colorKey, true)" @focusout="leaveFocus">
+    <div class="color-setting-caption">
+      <label :for="`color-${colorKey}`" class="color-setting-label">{{ label }}</label>
+      <p :id="`color-help-${colorKey}`" class="color-setting-description">{{ colorTargets[colorKey].description }}</p>
+    </div>
     <input
-      :id="`color-${colorKey}`" type="color" :value="isHexColor(draft) ? draft : value" :aria-label="`${label}のカラーピッカー`"
+      :id="`color-${colorKey}`" type="color" :value="isHexColor(draft) ? draft : value" :aria-label="`${label}のカラーピッカー`" :aria-describedby="`color-help-${colorKey}`"
       @focus="begin" @pointerdown="begin" @input="change(($event.target as HTMLInputElement).value)" @change="finish" @blur="finish"
     >
     <VTextField
-      :model-value="draft" :aria-label="`${label}のHEX値`" density="compact" variant="outlined"
+      :model-value="draft" :aria-label="`${label}のHEX値`" :aria-describedby="`color-help-${colorKey}`" density="compact" variant="outlined"
       :error-messages="error" hide-details="auto" spellcheck="false" maxlength="7" class="color-hex-input"
       @focus="editing = true; begin()" @blur="finish" @update:model-value="inputHex"
     />

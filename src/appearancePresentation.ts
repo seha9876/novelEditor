@@ -10,6 +10,11 @@ function isDark(color: string): boolean {
   return red * 0.299 + green * 0.587 + blue * 0.114 < 145
 }
 
+/** 通知の背景に合わせた文字色を、実画面と配色の見本で共通に選ぶ。 */
+export function notificationTextColor(color: string): string {
+  return isDark(color) ? '#FFFFFF' : '#000000'
+}
+
 /** 装飾用SVGだけを生成し、空白文字の幅やコピー内容には触れない。 */
 function whitespaceImage(shape: string, color: string): string {
   return `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20"><g stroke="${color}" fill="none" opacity=".65">${shape}</g></svg>`)}")`
@@ -35,9 +40,9 @@ export function applyAppearance(colors: Palette): void {
     'on-background': colors.text, 'on-surface': colors.text, 'on-surface-light': colors.text,
     primary: colors.primary, 'on-primary': colors.onPrimary,
     error: colors.error, warning: colors.warning, info: colors.info,
-    'on-error': isDark(colors.error) ? '#FFFFFF' : '#000000',
-    'on-warning': isDark(colors.warning) ? '#FFFFFF' : '#000000',
-    'on-info': isDark(colors.info) ? '#FFFFFF' : '#000000',
+    'on-error': notificationTextColor(colors.error),
+    'on-warning': notificationTextColor(colors.warning),
+    'on-info': notificationTextColor(colors.info),
   }
   for (const [key, value] of Object.entries(mapped)) if (theme.colors[key] !== value) theme.colors[key] = value
   if (colors.border !== previous.border) theme.variables['border-color'] = colors.border

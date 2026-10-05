@@ -41,6 +41,7 @@ export type SettingsControllerOptions = {
   showError: OperationErrorNotifier
   onAppearanceChanged?: (colors: Palette) => void
   onAppearanceFlush?: () => Promise<void>
+  onAppearanceTargetSession?: (session: string | null) => void
 }
 
 /** 設定値を正規化し、設定ウィンドウと永続Storeの間を接続する。 */
@@ -118,6 +119,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
     onCommand: handleSettingsCommand,
     showError: options.showError,
     onDestroyed: handleSettingsWindowDestroyed,
+    onAppearanceTargetSession: options.onAppearanceTargetSession,
   })
   const settingsWindowOpen = settingsWindowBridge.settingsWindowOpen
 

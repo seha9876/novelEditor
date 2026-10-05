@@ -1,4 +1,6 @@
-import { cloneOutline, normalizeOutline, type OutlinePreferences } from './outline'
+import { cloneOutline, createDefaultOutline, normalizeOutline, parseOutlineRules, type OutlinePreferences } from './outline'
+import { applyOutlineAction, findOutlinePreset } from './outlinePresets'
+import { readOutlinePreset, writeOutlinePreset } from './outlinePresetFile'
 /** 設定値の適用と表示メトリクスをまとめ、保存・履歴・設定子窓へ橋渡しする。 */
 import { computed, ref } from 'vue'
 import { applyAppearanceAction, cloneAppearance, colorDefinitions, isHexColor, createDefaultAppearance, findColorPreset, type AppearancePreferences, type Palette } from './appearance'
@@ -47,6 +49,9 @@ export type SettingsControllerOptions = {
 /** 設定値を正規化し、設定ウィンドウと永続Storeの間を接続する。 */
 export function useSettingsController(options: SettingsControllerOptions) {
   const outline = ref(normalizeOutline(options.initialPreferences.outline))
+  let outlineEpoch = 0
+  let outlineFileBusy = false
+  let outlineFileAbort: AbortController | null = null
   const appearance = ref(cloneAppearance(options.initialPreferences.ui.appearance))
   let appearanceFileBusy = false
   let colorInteractionId: string | undefined
@@ -99,6 +104,8 @@ export function useSettingsController(options: SettingsControllerOptions) {
   function createSettingsSnapshot(): Omit<SettingsSnapshot, 'revision'> {
     return {
       outline: cloneOutline(outline.value),
+      outlineEpoch,
+      outlineFileBusy,
       appearance: cloneAppearance(appearance.value),
       appearanceFileBusy,
       appearanceEpoch,
@@ -132,6 +139,9 @@ export function useSettingsController(options: SettingsControllerOptions) {
   /** 復元・プリセット操作の前に旧入力を無効化する。世代は保存ファイルへ含めない。 */
   function invalidateColorInputs(): void { appearanceEpoch++; colorInteractionId = undefined; colorOnly = false; lastColorState = null }
 
+  /** 切替・復元・終了前に旧Worker入力とファイル読込を無効化する。世代は永続化しない。 */
+  function invalidateOutlineInputs(): void { outlineEpoch++; outlineFileAbort?.abort(); colorOnly = false }
+
   /** 1色だけを変更し、本文設定・ルール・プリセットの参照と計算結果を保つ。 */
   function updateColor(command: Extract<SettingsCommand, { type: 'appearance' }>): void {
     const action = command.action
@@ -159,6 +169,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
   /** Store書き込み失敗時に設定を戻し、既存の通知文言を維持する。 */
   function applySettingsRollback(snapshot: SettingsValues): void {
     invalidateColorInputs()
+    invalidateOutlineInputs()
     appearance.value = cloneAppearance(snapshot.appearance)
     colorInteractionId = undefined
     options.onAppearanceChanged?.(appearance.value.colors)
@@ -254,6 +265,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
   /** Undoで直前状態を適用し、現在状態をRedo履歴へ移す。 */
   function undoSettingsChange(): void {
     invalidateColorInputs()
+    invalidateOutlineInputs()
     const previous = settingsHistory.undo(cloneCurrentSettings())
     if (!previous) return
     updateCurrentSettings(previous.editor, previous.toolbar, false, false, previous.barSizes, previous.statusBar, previous.appearance, undefined, previous.outline)
@@ -263,6 +275,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
   /** Redoで取り消した状態を適用し、現在状態をUndo履歴へ移す。 */
   function redoSettingsChange(): void {
     invalidateColorInputs()
+    invalidateOutlineInputs()
     const next = settingsHistory.redo(cloneCurrentSettings())
     if (!next) return
     updateCurrentSettings(next.editor, next.toolbar, false, false, next.barSizes, next.statusBar, next.appearance, undefined, next.outline)
@@ -271,6 +284,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
 
   /** 設定ウィンドウが閉じても確定済み設定を維持し、進行中の保存を続ける。 */
   function handleSettingsWindowDestroyed(): void {
+    invalidateOutlineInputs()
     colorInteractionId = undefined
     endSettingsHistorySession()
   }
@@ -281,7 +295,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
     try {
       if (command.type === 'ready') {
         colorOnly = false
-        if (!settingsHistory.active) { invalidateColorInputs(); beginSettingsHistorySession() }
+        if (!settingsHistory.active) { invalidateColorInputs(); invalidateOutlineInputs(); beginSettingsHistorySession() }
         await publishSettingsState()
       } else if (command.type === 'navigate') {
         settingsPage.value = command.page
@@ -292,11 +306,23 @@ export function useSettingsController(options: SettingsControllerOptions) {
         redoSettingsChange()
       } else if (command.type === 'change') {
         if (command.resetAppearance) invalidateColorInputs()
-        if (command.outline && normalizeOutline(command.outline).rules.length !== command.outline.rules.length) throw new Error('見出しルールを保存できません。入力を見直してください。')
+        const nextOutline = command.resetOutline
+          ? { ...createDefaultOutline(), presets: cloneOutline(outline.value).presets }
+          : command.outline ? { ...cloneOutline(outline.value), rules: parseOutlineRules(command.outline.rules) } : outline.value
+        if (command.resetOutline) invalidateOutlineInputs()
         const nextAppearance = command.resetAppearance
           ? { ...createDefaultAppearance(), presets: cloneAppearance(appearance.value).presets }
           : appearance.value
-        updateCurrentSettings(command.editor, command.toolbar, command.flush ?? false, true, command.barSizes, command.statusBar, nextAppearance, undefined, command.outline ? normalizeOutline(command.outline) : outline.value)
+        updateCurrentSettings(command.editor, command.toolbar, command.flush ?? false, true, command.barSizes, command.statusBar, nextAppearance, undefined, nextOutline)
+      } else if (command.type === 'outline') {
+        if (!Number.isSafeInteger(command.epoch) || command.epoch !== outlineEpoch) { await settingsWindowBridge.publishState(); return }
+        const next = applyOutlineAction(outline.value, command.action)
+        if (command.action.type === 'switch') invalidateOutlineInputs()
+        updateCurrentSettings(undefined, undefined, command.action.type !== 'rules', true, undefined, undefined, appearance.value, undefined, next)
+        // 同じ内容への切替でも、子窓の未完成入力は新しい世代で破棄する。
+        if (command.action.type === 'switch') await settingsWindowBridge.publishState()
+      } else if (command.type === 'outline-file') {
+        await handleOutlineFile(command)
       } else if (command.type === 'appearance') {
         if (command.action.type === 'color') updateColor(command)
         else {
@@ -309,6 +335,35 @@ export function useSettingsController(options: SettingsControllerOptions) {
       }
     } catch (error) {
       if (!disposed) await settingsWindowBridge?.publishError(String(error))
+    }
+  }
+
+  /** 読込中の多重操作を防ぎ、Undo・終了後の読込結果を設定へ追加しない。 */
+  async function handleOutlineFile(command: Extract<SettingsCommand, { type: 'outline-file' }>): Promise<void> {
+    if (outlineFileBusy) return
+    outlineFileBusy = true
+    const controller = new AbortController()
+    outlineFileAbort = controller
+    const epoch = outlineEpoch
+    colorOnly = false
+    await publishSettingsState()
+    try {
+      if (command.operation === 'import') {
+        const preset = await readOutlinePreset(controller.signal)
+        if (disposed || controller.signal.aborted || epoch !== outlineEpoch || !preset) return
+        const next = applyOutlineAction(outline.value, { type: 'import', preset })
+        updateCurrentSettings(undefined, undefined, true, true, undefined, undefined, appearance.value, undefined, next)
+      } else {
+        const preset = command.presetId ? findOutlinePreset(outline.value, command.presetId) : undefined
+        if (!preset) throw new Error('エクスポートする保存済みプリセットを選んでください。')
+        await writeOutlinePreset({ ...preset, rules: preset.rules.map(rule => ({ ...rule })) })
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) throw error
+    } finally {
+      outlineFileBusy = false
+      if (outlineFileAbort === controller) outlineFileAbort = null
+      if (!disposed) { colorOnly = false; await publishSettingsState() }
     }
   }
 
@@ -397,6 +452,7 @@ export function useSettingsController(options: SettingsControllerOptions) {
   async function dispose(): Promise<void> {
     if (disposed) return
     disposed = true
+    invalidateOutlineInputs()
     endSettingsHistorySession()
     settingsPersistence.dispose()
     await settingsWindowBridge?.dispose()

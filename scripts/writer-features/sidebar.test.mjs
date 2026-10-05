@@ -29,7 +29,7 @@ test('作者の行頭・行末・番号・正規表現を優先順で判定し�
   assert.ok(outline.outlineRuleError({ ...base, level: 7 }))
   const cloned = outline.cloneOutline(prefs); cloned.rules[0].level = 1
   assert.equal(prefs.rules[0].level, 4)
-  assert.deepEqual(outline.normalizeOutline({ rules: [] }), { rules: [] })
+  assert.deepEqual(outline.normalizeOutline({ rules: [] }), { rules: [], basePresetId: null, presets: [] })
 })
 
 test('旧ツリー設定を移行し、サイドバーの保存はツリー分離と独自ルールを保持する', async () => {
@@ -163,7 +163,7 @@ async function settle() { for (let i = 0; i < 25; i++) await nextTick() }
 
 /** 実際の設定ページの処理を実行し、WorkerとSFCのマクロだけを置き換える。 */
 function rulePageHarness(t) {
-  const vue = require('vue'), props = vue.reactive({ preferences: outline.createDefaultOutline() }), emitted = [], cleanup = []
+  const vue = require('vue'), props = vue.reactive({ preferences: outline.createDefaultOutline(), epoch: 0, fileBusy: false }), emitted = [], cleanup = []
   let fail = false
   const source = readFileSync(resolve(projectRoot, 'src/OutlineSettingsPage.vue'), 'utf8').match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
   const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText
@@ -171,12 +171,17 @@ function rulePageHarness(t) {
   const page = scope.run(() => new Function('require', 'exports', 'defineProps', 'defineEmits', `${compiled}; return { draft, example, change, addRule, previewError }`)(specifier => {
     if (specifier === 'vue') return { ...vue, onBeforeUnmount: callback => cleanup.push(callback) }
     if (specifier === './outline') return outline
-    if (specifier === './sidebarWorker') return { runSidebarAnalysis: async request => {
+    if (specifier === './outlinePresets') return loadSourceModule('src/outlinePresets.ts')
+    if (specifier === './useOutlineRuleDraft') return loadSourceModule('src/useOutlineRuleDraft.ts', { './sidebarWorker': { runSidebarAnalysis: async request => {
       if (fail) throw new Error('解析に時間がかかりすぎています。')
       return outline.extractOutline(request.text, request.preferences)
-    } }
+    } } })
     throw new Error(specifier)
-  }, {}, () => props, () => (_event, preferences) => { emitted.push(preferences); props.preferences = preferences }))
+  }, {}, () => props, () => (event, command) => {
+    if (event === 'command' && command.type === 'outline' && command.action.type === 'rules') {
+      emitted.push({ rules: command.action.rules }); props.preferences = { ...props.preferences, rules: command.action.rules }
+    }
+  }))
   t.after(() => { cleanup.forEach(callback => callback()); scope.stop() })
   return { page, props, emitted, fail: () => { fail = true } }
 }

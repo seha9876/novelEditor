@@ -1,7 +1,7 @@
 /** 解析1回のWorkerとタイムアウトを管理し、中止後の応答を適用しない。 */
-import type { OutlinePreferences } from './outline'
+import type { OutlineRuleSet } from './outline'
 import type { SearchConditions } from './searchSession'
-export type AnalysisRequest = { kind: 'outline'; text: string; preferences: OutlinePreferences }
+export type AnalysisRequest = { kind: 'outline'; text: string; preferences: OutlineRuleSet }
   | { kind: 'search'; text: string; conditions: SearchConditions; limit: number; scope: { from: number; to: number } | null }
 
 /** 大きな本文や危険な正規表現でUIを固めず、明示的な失敗として返す。 */

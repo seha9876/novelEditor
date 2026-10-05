@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { runSidebarAnalysis } from './sidebarWorker'
-import { cloneOutline, type OutlineHeading, type OutlinePreferences } from './outline'
+import { cloneOutlineRules, outlineRulesSignature, type OutlineHeading, type OutlineRuleSet } from './outline'
 import type { DocumentEditorHandle } from './useDocumentSession'
-const props = defineProps<{ active: boolean; editor: DocumentEditorHandle | null; revision: number; head: number; documentKey: string | null; preferences: OutlinePreferences; disabled: boolean }>()
+const props = defineProps<{ active: boolean; editor: DocumentEditorHandle | null; revision: number; head: number; documentKey: string | null; preferences: OutlineRuleSet; disabled: boolean }>()
 const emit = defineEmits<{ settings: [] }>()
 const headings = ref<OutlineHeading[]>([]), collapsed = ref<string[]>([]), error = ref(''), pending = ref(false), stale = ref(true), focused = ref(0)
 const list = ref<HTMLElement | null>(null)
@@ -38,7 +38,7 @@ async function analyze(): Promise<void> {
   if (!snapshot) return
   const own = generation, controller = new AbortController(); abort = controller; pending.value = true; error.value = ''
   try {
-    const parsed = await runSidebarAnalysis<OutlineHeading[]>({ kind: 'outline', text: snapshot.text, preferences: cloneOutline(props.preferences) }, controller.signal)
+    const parsed = await runSidebarAnalysis<OutlineHeading[]>({ kind: 'outline', text: snapshot.text, preferences: { rules: cloneOutlineRules(props.preferences) } }, controller.signal)
     if (own !== generation || snapshot.revision !== props.editor?.getDocumentSnapshot().revision) return
     headings.value = parsed; parsedRevision = snapshot.revision; stale.value = false
     if (!visible.value.some(item => item.index === focused.value)) focused.value = visible.value[0]?.index ?? 0
@@ -73,7 +73,8 @@ async function onKey(event: KeyboardEvent, index: number): Promise<void> {
 }
 /** 空の階層レベルを挿入せず、表示上の親の深さだけ字下げする。 */
 function depth(index: number): number { let value = 0, parent = headings.value[index]?.parent ?? null; while (parent !== null) { value++; parent = headings.value[parent]!.parent } return value }
-watch([() => props.revision, () => props.active, () => props.preferences], schedule, { deep: true, immediate: true })
+// プリセット名や一覧の変更では、同じ本文・ルールを再解析しない。
+watch([() => props.revision, () => props.active, () => outlineRulesSignature(props.preferences)], schedule, { immediate: true })
 watch(() => props.documentKey, () => { headings.value = []; collapsed.value = []; focused.value = 0 })
 onBeforeUnmount(cancel)
 </script>

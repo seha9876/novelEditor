@@ -3,7 +3,6 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { getCurrentWindow, type CloseRequestedEvent } from '@tauri-apps/api/window'
 import OutlineSettingsPage from './OutlineSettingsPage.vue'
-import { createDefaultOutline } from './outline'
 import ToolbarSettingsPage from './ToolbarSettingsPage.vue'
 import WrappingSettingsPage from './WrappingSettingsPage.vue'
 import TypographySettingsPage from './TypographySettingsPage.vue'
@@ -74,6 +73,7 @@ const statusBarDragResetRevision = ref(0)
 const toolbarResetDialog = ref(false)
 const statusBarResetDialog = ref(false)
 const allResetDialog = ref(false)
+const outlineDialogOpen = ref(false)
 const resetDialogOpen = computed(() => toolbarResetDialog.value || statusBarResetDialog.value || allResetDialog.value)
 const errorSnackbarOpen = computed({
   get: () => errorMessage.value.length > 0,
@@ -268,7 +268,7 @@ function confirmAllDefaults(): void {
     barSizes,
     flush: true,
     resetAppearance: true,
-    outline: createDefaultOutline(),
+    resetOutline: true,
   })
 }
 
@@ -284,7 +284,7 @@ function isTextEditingTarget(target: EventTarget | null): boolean {
 function onKeydown(event: KeyboardEvent): void {
   if (activeView.value === 'application.storage') return
   if (!event.ctrlKey || event.altKey || event.isComposing || isTextEditingTarget(event.target)) return
-  if (resetDialogOpen.value) return
+  if (resetDialogOpen.value || outlineDialogOpen.value) return
 
   const key = event.key.toLowerCase()
   const isUndo = key === 'z' && !event.shiftKey
@@ -326,7 +326,7 @@ onBeforeUnmount(() => {
                 <VBtn
                   icon="mdi-undo"
                   variant="text"
-                  :disabled="!snapshot?.history.canUndo || activeView === 'application.storage' || resetDialogOpen"
+                  :disabled="!snapshot?.history.canUndo || activeView === 'application.storage' || resetDialogOpen || outlineDialogOpen"
                   aria-label="元に戻す"
                   aria-keyshortcuts="Control+Z"
                   @click="sendCommand({ type: 'undo' })"
@@ -340,7 +340,7 @@ onBeforeUnmount(() => {
                 <VBtn
                   icon="mdi-redo"
                   variant="text"
-                  :disabled="!snapshot?.history.canRedo || activeView === 'application.storage' || resetDialogOpen"
+                  :disabled="!snapshot?.history.canRedo || activeView === 'application.storage' || resetDialogOpen || outlineDialogOpen"
                   aria-label="やり直す"
                   aria-keyshortcuts="Control+Y Control+Shift+Z"
                   @click="sendCommand({ type: 'redo' })"
@@ -421,10 +421,10 @@ onBeforeUnmount(() => {
             @update-editor="changeEditor" @number-input="onTypographyInput" @number-value="onTypographyValue" @number-commit="commitTypographyInput" @number-interaction="onTypographyInteraction"
             @restore-field="restoreField" @toggle-section="toggleSection"
           />
-          <OutlineSettingsPage v-else-if="page.id === 'editor.outline'" :preferences="snapshot.outline" @change="sendCommand({ type: 'change', outline: $event })" />
+          <OutlineSettingsPage v-else-if="page.id === 'editor.outline'" :preferences="snapshot.outline" :epoch="snapshot.outlineEpoch" :file-busy="snapshot.outlineFileBusy" @command="sendCommand" @dialog-open="outlineDialogOpen = $event" />
           <AppearanceSettingsPage
             v-else-if="page.id === 'appearance.colors'"
-            :appearance="snapshot.appearance" :epoch="snapshot.appearanceEpoch" :file-busy="snapshot.appearanceFileBusy" :suspended="resetDialogOpen || closing" :target-reset-key="activeView"
+            :appearance="snapshot.appearance" :epoch="snapshot.appearanceEpoch" :file-busy="snapshot.appearanceFileBusy" :suspended="resetDialogOpen || outlineDialogOpen || closing" :target-reset-key="activeView"
             :heading-level="activeView === 'all' ? 4 : 2" :sections="page.sections" :expanded-section-ids="openedSectionIds"
             @command="sendCommand" @flush-colors="flushColors" @toggle-section="toggleSection"
           />

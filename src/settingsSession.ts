@@ -1,4 +1,5 @@
-import type { OutlinePreferences } from './outline'
+import type { OutlinePreferences, OutlineRuleSet } from './outline'
+import type { OutlineAction } from './outlinePresets'
 import type { EditorSettings } from './editorSettings'
 import type { AppearanceAction, AppearancePreferences, Palette } from './appearance'
 import type { InterfaceBarSizes, StatusBarItemId, StatusBarPreferences, ToolbarItem, ToolbarPreferences } from './appPreferenceSchema'
@@ -9,6 +10,8 @@ export type SettingsSnapshot = {
   appearance: AppearancePreferences
   appearanceFileBusy: boolean
   outline: OutlinePreferences
+  outlineEpoch: number
+  outlineFileBusy: boolean
   editor: EditorSettings
   toolbar: ToolbarPreferences
   statusBar: StatusBarPreferences
@@ -33,6 +36,8 @@ export type SettingsColorState = {
 
 /** 設定ウィンドウからメイン画面へ送る履歴操作、ページ移動、型付き部分更新。 */
 export type SettingsCommand =
+  | { type: 'outline'; action: Exclude<OutlineAction, { type: 'import' }>; epoch: number }
+  | { type: 'outline-file'; operation: 'import' | 'export'; presetId?: string }
   | { type: 'appearance'; action: AppearanceAction; colorInput?: { epoch: number; sequence: number } }
   | { type: 'input-barrier'; requestId: string }
   | { type: 'inputs-flushed'; requestId: string; error?: string }
@@ -43,7 +48,8 @@ export type SettingsCommand =
   | { type: 'redo' }
   | {
       type: 'change'
-      outline?: OutlinePreferences
+      outline?: OutlineRuleSet
+      resetOutline?: boolean
       editor?: Partial<EditorSettings>
       toolbar?: Partial<ToolbarPreferences> & { items?: ToolbarItem[] }
       statusBar?: Partial<StatusBarPreferences> & { items?: StatusBarItemId[] }

@@ -1,6 +1,27 @@
 /** 長文の行移動と、本文・編集履歴の保全を検証する。 */
 import { assert, loadSourceModule, projectRoot, readFileSync, require, resolve, test, ts } from './test-support.mjs'
 
+test('編集位置は主カーソルの書記素列で往復し、短縮・空本文・不正値を安全に補正する', () => {
+  const { EditorState, EditorSelection } = require('@codemirror/state')
+  const { getEditorPosition, resolveEditorPosition } = loadSourceModule('src/editorNavigation.ts')
+  const text = '序章\r\nか\u3099👨‍👩‍👧‍👦\t本文\r\n'
+  const state = EditorState.create({ doc: text, extensions: [EditorState.allowMultipleSelections.of(true)] })
+  const line = state.doc.line(2)
+  const head = line.from + 'か\u3099👨‍👩‍👧‍👦\t'.length
+  const selected = state.update({ selection: EditorSelection.create([EditorSelection.cursor(0), EditorSelection.range(line.from, head)], 1) }).state
+  assert.deepEqual(getEditorPosition(selected), { line: 2, column: 4 })
+  assert.equal(resolveEditorPosition(state.doc, getEditorPosition(selected)), head)
+  assert.equal(resolveEditorPosition(state.doc, { line: 2, column: 2 }), line.from + 2)
+  assert.equal(resolveEditorPosition(state.doc, { line: 2, column: 999 }), line.to)
+  assert.equal(resolveEditorPosition(state.doc, { line: 999, column: 999 }), state.doc.length)
+  assert.equal(resolveEditorPosition(EditorState.create({ doc: '' }).doc, { line: 10, column: 10 }), 0)
+  for (const position of [undefined, null, { line: 0, column: 1 }, { line: 1, column: -1 }, { line: 1.5, column: 1 }, { line: 1, column: NaN }, { line: Infinity, column: 1 }]) {
+    assert.equal(resolveEditorPosition(state.doc, position), 0)
+  }
+  const insideGrapheme = state.update({ selection: { anchor: line.from + 1 } }).state
+  assert.equal(resolveEditorPosition(state.doc, getEditorPosition(insideGrapheme)), line.from)
+})
+
 test('行番号は論理行の範囲内の整数だけを受け付ける', () => {
   const { parseLineNumber } = loadSourceModule('src/editorNavigation.ts')
   for (const [input, expected] of [['1', 1], [' 12 ', 12], ['003', 3], ['20', 20]]) {

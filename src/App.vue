@@ -443,7 +443,7 @@ async function handleCloseRequested(): Promise<void> {
     if (!(await confirmDocumentTransition())) return
     await settingsController.flush()
     await flushProjectTreePreferences()
-    flushDocumentSession()
+    await flushDocumentSession()
     try {
       await clearRecoverySnapshot()
     } catch (error) {

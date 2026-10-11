@@ -116,6 +116,14 @@ pub(crate) fn is_empty_database_file(database_path: &Path) -> Result<bool, Strin
 /// ツリー・履歴・Git管理の形式を読み取り専用で検査し、旧DBの追加テーブル欠損は許容する。
 fn validate_project_tree_schema(connection: &Connection) -> Result<(), String> {
     if connection
+        .table_exists(None, "recent_file_positions")
+        .map_err(|error| database_error("編集位置テーブルを確認できません", error))?
+    {
+        connection
+            .prepare("SELECT recent_file_id, line, column FROM recent_file_positions LIMIT 0")
+            .map_err(|error| database_error("編集位置テーブルの形式が不正です", error))?;
+    }
+    if connection
         .table_exists(None, "git_workspaces")
         .map_err(|e| e.to_string())?
     {
@@ -175,6 +183,21 @@ fn validate_project_tree_schema(connection: &Connection) -> Result<(), String> {
 
 /// 外部編集などで生じた参照切れや循環を、DB を修復・変更せずに拒否する。
 fn validate_project_tree_data(connection: &Connection) -> Result<(), String> {
+    if connection
+        .table_exists(None, "recent_file_positions")
+        .map_err(|error| database_error("編集位置テーブルを確認できません", error))?
+    {
+        let invalid: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM recent_file_positions p
+             LEFT JOIN recent_files f ON f.id = p.recent_file_id
+             WHERE f.id IS NULL OR typeof(p.line) != 'integer' OR typeof(p.column) != 'integer'
+             OR p.line NOT BETWEEN 1 AND 9007199254740991 OR p.column NOT BETWEEN 1 AND 9007199254740991)",
+            [], |row| row.get(0),
+        ).map_err(|error| database_error("編集位置の整合性を確認できません", error))?;
+        if invalid {
+            return Err("編集位置に不正な値または参照先のない履歴があります".into());
+        }
+    }
     let foreign_key_violation = connection
         .prepare("PRAGMA foreign_key_check")
         .and_then(|mut statement| statement.exists([]))
@@ -219,7 +242,7 @@ fn validate_project_tree_data(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// 起動時に既存DBを検証し、旧DBには履歴・Git管理テーブルを追加する。DB自体は新規作成しない。
+/// 起動時に既存DBを検証し、旧DBには履歴・編集位置・Git管理テーブルを追加する。DB自体は新規作成しない。
 pub(super) fn initialize_database(database_path: PathBuf) -> Result<Connection, String> {
     let connection = Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(|error| format!("プロジェクトツリー DB を開けません: {error}"))?;
@@ -275,6 +298,11 @@ pub(super) fn create_schema(connection: &Connection) -> rusqlite::Result<()> {
                path TEXT NOT NULL,
                path_key TEXT NOT NULL UNIQUE,
                last_used INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS recent_file_positions (
+               recent_file_id INTEGER PRIMARY KEY REFERENCES recent_files(id) ON DELETE CASCADE,
+               line INTEGER NOT NULL CHECK (typeof(line) = 'integer' AND line BETWEEN 1 AND 9007199254740991),
+               column INTEGER NOT NULL CHECK (typeof(column) = 'integer' AND column BETWEEN 1 AND 9007199254740991)
              );",
     )
 }
@@ -324,12 +352,62 @@ mod tests {
         (directory.join("project-tree.sqlite3"), directory)
     }
 
+    /// 位置テーブルがない旧DBの履歴を保ち、追加後の位置は移行検証でも保護する。
+    #[test]
+    fn upgrades_legacy_positions_and_validates_saved_positions() {
+        let (database_path, directory) = temporary_database_path();
+        super::prepare_new_database_file(&database_path).unwrap();
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute("DROP TABLE recent_file_positions", [])
+            .unwrap();
+        connection.execute("INSERT INTO recent_files(id, path, path_key, last_used) VALUES (7, 'C:/原稿.txt', 'c:/原稿.txt', 42)", []).unwrap();
+        drop(connection);
+        super::validate_database_file(&database_path).unwrap();
+        let connection = super::initialize_database(database_path.clone()).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT last_used FROM recent_files WHERE id = 7",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            42
+        );
+        connection
+            .execute("INSERT INTO recent_file_positions VALUES (7, 20, 8)", [])
+            .unwrap();
+        super::validate_database_file(&database_path).unwrap();
+        assert!(!super::is_empty_database_file(&database_path).unwrap());
+        connection
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON; UPDATE recent_file_positions SET line = 0;",
+            )
+            .unwrap();
+        assert!(super::validate_database_file(&database_path).is_err());
+        connection
+            .execute("UPDATE recent_file_positions SET line = 20", [])
+            .unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF; UPDATE recent_file_positions SET recent_file_id = 99;",
+            )
+            .unwrap();
+        assert!(super::validate_database_file(&database_path).is_err());
+        drop(connection);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     /// 旧DBには空の履歴を追加し、履歴だけがある移行先を空DBと判定しない。
     #[test]
     fn upgrades_legacy_history_and_counts_history_in_empty_check() {
         let (database_path, directory) = temporary_database_path();
         super::prepare_new_database_file(&database_path).unwrap();
         let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute("DROP TABLE recent_file_positions", [])
+            .unwrap();
         connection.execute("DROP TABLE recent_files", []).unwrap();
         drop(connection);
         assert!(super::is_empty_database_file(&database_path).unwrap());

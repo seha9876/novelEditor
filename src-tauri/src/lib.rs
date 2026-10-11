@@ -55,6 +55,7 @@ pub fn run() {
             project_tree::project_file_authorize,
             project_tree::recent_files::recent_files_list,
             project_tree::recent_files::recent_file_record,
+            project_tree::recent_files::recent_file_position_update,
             project_tree::recent_files::recent_files_remove,
             project_tree::recent_files::recent_files_clear,
             project_tree::recent_files::recent_file_authorize,

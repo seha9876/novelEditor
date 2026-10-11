@@ -1,16 +1,22 @@
 /** ファイル履歴の型と、メイン窓から利用するTauri APIをまとめる。 */
 import { invoke } from '@tauri-apps/api/core'
+import type { EditorPosition } from './editorNavigation'
 
-export type RecentFile = { id: number; path: string }
+export type RecentFile = { id: number; path: string; position?: EditorPosition | null }
 
 /** 保存済みの最新20件を新しい順で取得する。 */
 export function listRecentFiles(): Promise<RecentFile[]> {
   return invoke('recent_files_list')
 }
 
-/** 読込・保存に成功したファイルを記録する。許可範囲の検証はRust側で行う。 */
-export function recordRecentFile(path: string): Promise<void> {
+/** 読込・保存に成功したファイルを記録し、同じ履歴IDと前回の位置を返す。 */
+export function recordRecentFile(path: string): Promise<RecentFile> {
   return invoke('recent_file_record', { path })
+}
+
+/** 履歴順を変えずに位置だけを更新する。削除済みの履歴は再作成しない。 */
+export function updateRecentFilePosition(id: number, position: EditorPosition): Promise<void> {
+  return invoke('recent_file_position_update', { id, position })
 }
 
 /** 履歴項目だけを削除し、実ファイルは残す。 */

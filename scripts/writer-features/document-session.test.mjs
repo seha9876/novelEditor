@@ -69,6 +69,7 @@ function createDocumentHarness(overrides = {}) {
   let session
   const editor = ref({
     getText: () => text,
+    getPosition: () => ({ line: 1, column: 1 }),
     setDocument: (next) => {
       text = next.replace(/\r\n|\r/g, '\n')
       session.onChange(text)
@@ -87,6 +88,197 @@ function createDocumentHarness(overrides = {}) {
   })
   return { session, editor: editor.value, recoveryWrites, fileWrites, errors, treeResults, invocations, diskFiles, mainCloseInProgress, confirmations }
 }
+
+/** 位置の永続化だけをメモリDBに置き換え、文書セッションとCodeMirrorの位置計算を接続する。 */
+function createPositionHarness(overrides = {}, entries = new Map()) {
+  const { EditorState, EditorSelection } = require('@codemirror/state')
+  const { getEditorPosition, resolveEditorPosition } = loadSourceModule('src/editorNavigation.ts')
+  const positionWrites = [], initialPositions = []
+  const h = createDocumentHarness({
+    open: async () => 'C:/原稿.txt',
+    ...overrides,
+    onFileAccessed: async path => {
+      await overrides.onFileAccessed?.(path)
+      if (!entries.has(path)) entries.set(path, { id: Math.max(0, ...[...entries.values()].map(entry => entry.id)) + 1, path, position: null })
+      return globalThis.structuredClone(entries.get(path))
+    },
+    invoke: async (command, args) => {
+      if (command !== 'recent_file_position_update') return overrides.invoke?.(command, args)
+      positionWrites.push(globalThis.structuredClone(args))
+      await overrides.updatePosition?.(args)
+      const entry = [...entries.values()].find(item => item.id === args.id)
+      if (entry) entry.position = globalThis.structuredClone(args.position)
+    },
+  })
+  let state = EditorState.create()
+  const setDocument = h.editor.setDocument
+  h.editor.setDocument = (text, position) => {
+    initialPositions.push(position)
+    state = EditorState.create({ doc: text })
+    state = state.update({ selection: EditorSelection.cursor(resolveEditorPosition(state.doc, position)) }).state
+    setDocument(text)
+  }
+  h.editor.getPosition = () => getEditorPosition(state)
+  return {
+    ...h, entries, positionWrites, initialPositions,
+    move: (line, column) => { state = state.update({ selection: EditorSelection.cursor(resolveEditorPosition(state.doc, { line, column })) }).state },
+  }
+}
+
+for (const route of ['open', 'recent', 'tree', 'quick']) {
+  test(`${route}から開くと前回位置を復元し、切替元の未保存本文を破棄しても位置を記録する`, async () => {
+    const entries = new Map([['D:/別.txt', { id: 10, path: 'D:/別.txt', position: { line: 2, column: 3 } }]])
+    let target = 'C:/原稿.txt'
+    const h = createPositionHarness({
+      open: async () => target,
+      readFile: async () => new TextEncoder().encode('一行\r\n二行の本文\r\n末尾'),
+      invoke: async command => command === 'project_tree_snapshot'
+        ? { nodes: [{ id: 1, projectId: 2, kind: 'file', path: target }] } : target,
+    }, entries)
+    try {
+      await h.session.initializeRecovery()
+      await h.session.openDocument()
+      h.editor.setDocument('改稿\n保存していない本文\n終わり')
+      h.move(2, 4)
+      target = 'D:/別.txt'
+      if (route === 'open') await h.session.openDocument()
+      else if (route === 'recent') await h.session.openRecentDocument(entries.get(target))
+      else await h.session.openProjectTreeFile({ requestId: route, nodeId: 1, projectId: 2, ...(route === 'quick' ? { expectedPath: target } : {}) })
+      assert.deepEqual(h.editor.getPosition(), { line: 2, column: 3 })
+      assert.deepEqual(entries.get('C:/原稿.txt').position, { line: 2, column: 4 })
+      assert.equal(h.session.dirty.value, false)
+      assert.equal(h.fileWrites.length, 0)
+    } finally { h.session.dispose() }
+  })
+}
+
+test('通常保存・別名保存・新規作成・終了で位置を記録し、次のセッションでも復元する', async () => {
+  const h = createPositionHarness({ readFile: async () => new TextEncoder().encode('序章\n本文です\n終わり') })
+  try {
+    await h.session.initializeRecovery()
+    await h.session.openDocument()
+    h.move(2, 3)
+    await h.session.saveDocument()
+    assert.deepEqual(h.entries.get('C:/原稿.txt').position, { line: 2, column: 3 })
+    h.move(3, 2)
+    await h.session.saveDocumentAs()
+    assert.deepEqual(h.entries.get('C:/原稿.txt').position, { line: 3, column: 2 })
+    assert.deepEqual(h.entries.get('保存.txt').position, { line: 3, column: 2 })
+    h.move(2, 2)
+    await h.session.newDocument()
+    assert.deepEqual(h.entries.get('保存.txt').position, { line: 2, column: 2 })
+    const count = h.positionWrites.length
+    await h.session.flush()
+    assert.equal(h.positionWrites.length, count, '無題には位置を書かない')
+    await h.session.openDocument()
+    assert.deepEqual(h.editor.getPosition(), { line: 3, column: 2 })
+    h.move(2, 4)
+    await createCloseHarness(h).close()
+    assert.deepEqual(h.entries.get('C:/原稿.txt').position, { line: 2, column: 4 })
+  } finally { h.session.dispose() }
+  const restarted = createPositionHarness({ readFile: async () => new TextEncoder().encode('序章\n本文です\n終わり') }, h.entries)
+  try {
+    await restarted.session.initializeRecovery()
+    assert.equal(restarted.editor.getText(), '', '起動時には自動読込しない')
+    await restarted.session.openDocument()
+    assert.deepEqual(restarted.editor.getPosition(), { line: 2, column: 4 })
+  } finally { restarted.session.dispose() }
+})
+
+test('外部再読込は現在位置を短い本文へ補正し、保存された古い位置に戻さない', async () => {
+  const h = createPositionHarness()
+  try {
+    await h.session.initializeRecovery()
+    await h.session.openDocument()
+    h.editor.setDocument('一\n二\n長い行です')
+    h.move(3, 5)
+    h.diskFiles.set('C:/原稿.txt', new TextEncoder().encode('短い\n行'))
+    await h.session.reviewExternalFile()
+    await h.session.reloadExternalFile()
+    assert.deepEqual(h.editor.getPosition(), { line: 2, column: 2 })
+    assert.deepEqual(h.entries.get('C:/原稿.txt').position, { line: 2, column: 2 })
+    assert.equal(h.session.dirty.value, false)
+  } finally { h.session.dispose() }
+})
+
+test('検索要求は記憶位置を適用せず、成功後の検索一致への移動を優先する', async () => {
+  const text = '一行\n検索の本文\n末尾'
+  const entries = new Map([['C:/原稿.txt', { id: 1, path: 'C:/原稿.txt', position: { line: 3, column: 2 } }]])
+  const h = createPositionHarness({ readFile: async () => new TextEncoder().encode(text),
+    invoke: async command => command === 'project_tree_snapshot'
+      ? { nodes: [{ id: 1, projectId: 2, kind: 'file', path: 'C:/原稿.txt' }] } : 'C:/原稿.txt',
+  }, entries)
+  try {
+    await h.session.initializeRecovery()
+    const fingerprint = await loadSourceModule('src/sidebarAnalysis.ts').fingerprintBytes(new TextEncoder().encode(text))
+    await h.session.openProjectTreeFile({ requestId: 'search', nodeId: 1, projectId: 2, searchFingerprint: fingerprint })
+    assert.equal(h.treeResults[0].outcome, 'opened')
+    assert.equal(h.initialPositions[0], undefined)
+  } finally { h.session.dispose() }
+})
+
+test('取消・読込失敗では位置と本文を保持し、履歴削除後の終了で履歴を再作成しない', async () => {
+  let failed = false
+  const h = createPositionHarness({ message: async () => 'キャンセル', readFile: async () => {
+    if (failed) throw new Error('読込失敗')
+    return new TextEncoder().encode('一\n二行の本文')
+  } })
+  try {
+    await h.session.initializeRecovery()
+    await h.session.openDocument()
+    h.editor.setDocument('未保存\n本文です')
+    h.move(2, 3)
+    await h.session.newDocument()
+    failed = true
+    await h.session.openDocument()
+    assert.deepEqual(h.editor.getPosition(), { line: 2, column: 3 })
+    assert.equal(h.editor.getText(), '未保存\n本文です')
+    assert.equal(h.positionWrites.length, 0)
+    h.entries.clear()
+    await h.session.flush()
+    assert.equal(h.entries.size, 0)
+  } finally { h.session.dispose() }
+})
+
+test('終了は位置の書込完了を待ち、位置保存だけの失敗でも原稿保存と終了を続行する', async () => {
+  const gate = deferred(), started = deferred()
+  let wait = false
+  const h = createPositionHarness({ updatePosition: async () => {
+    if (wait) { started.release(); await gate.promise }
+    throw new Error('位置DB失敗')
+  } })
+  try {
+    await h.session.initializeRecovery()
+    await h.session.openDocument()
+    await h.session.saveDocument()
+    assert.equal(h.fileWrites.length, 1)
+    assert.equal(h.session.dirty.value, false)
+    const closing = createCloseHarness(h)
+    wait = true
+    const operation = closing.close()
+    await started.promise
+    assert.ok(!closing.calls.includes('destroy'))
+    gate.release()
+    await operation
+    assert.ok(closing.calls.includes('destroy'))
+    assert.ok(h.errors.every(error => error.includes('編集位置を保存できません')))
+  } finally { gate.release(); h.session.dispose() }
+})
+
+test('履歴取得中に破棄されたセッションへ本文と編集位置の遅着結果を適用しない', async () => {
+  const gate = deferred(), started = deferred()
+  const h = createPositionHarness({ onFileAccessed: async () => { started.release(); await gate.promise } })
+  await h.session.initializeRecovery()
+  h.editor.setDocument('保持する本文')
+  h.move(1, 3)
+  const opening = h.session.openDocument()
+  await started.promise
+  h.session.dispose()
+  gate.release()
+  await opening
+  assert.equal(h.editor.getText(), '保持する本文')
+  assert.deepEqual(h.editor.getPosition(), { line: 1, column: 3 })
+})
 
 /** 開いた原稿のディスク内容だけを後から変更できる、外部更新用セッションを用意する。 */
 async function createExternalHarness(overrides = {}) {

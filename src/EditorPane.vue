@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // CodeMirror の生成・破棄、本文編集、別ウィンドウからの検索操作を担当する。
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Compartment, EditorState } from '@codemirror/state'
+import { Compartment, EditorState, Text } from '@codemirror/state'
 import { EditorView, keymap, lineNumbers } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { editorFontCss, type EditorSettings } from './editorSettings'
@@ -11,7 +11,7 @@ import { getSearchQuery } from '@codemirror/search'
 import { createSearchExtensions, getEditorSearchScope, getEditorSearchStatus, runEditorSearchAction, updateEditorSearch, updateEditorSearchScope } from './searchPanel'
 import { createSearchConditions, createSearchScopeStatus, type SearchAction, type SearchConditions, type SearchStatus, type SearchScopeAction, type SearchScopeStatus } from './searchSession'
 import GoToLineDialog from './GoToLineDialog.vue'
-import { goToEditorLine } from './editorNavigation'
+import { getEditorPosition, goToEditorLine, resolveEditorPosition, type EditorPosition } from './editorNavigation'
 import { createWhitespaceExtensions } from './editorWhitespace'
 import { getEditorSearchRange } from './searchPanel'
 import type { DocumentSnapshot, DocumentNavigation } from './sidebarModel'
@@ -66,9 +66,11 @@ const editorTheme = EditorView.theme({
 })
 
 /** 本文をLFの内部表現へ揃え、検索と履歴も含めて独立した編集状態を作る。 */
-function createState(text: string): EditorState {
+function createState(text: string, position?: EditorPosition | null): EditorState {
+  const doc = Text.of(text.split(/\r\n?|\n/))
   return EditorState.create({
-    doc: text,
+    doc,
+    selection: EditorSelection.cursor(resolveEditorPosition(doc, position)),
     extensions: [
       // 改行形式の指定を省くと混在改行もLFに揃う。元の形式への書き戻しはtextFileが担当する。
       readOnlySetting.of(EditorState.readOnly.of(props.readOnly)),
@@ -145,13 +147,21 @@ function getText(): string {
   return view?.state.doc.toString() ?? ''
 }
 
-/** 本文を切り替え、変更を親へ通知する。元の改行形式は親が保存用に保持する。 */
-function setDocument(text: string): void {
+/** 主カーソルの論理位置を取得する。本文の未生成時は先頭を返す。 */
+function getPosition(): EditorPosition {
+  return view ? getEditorPosition(view.state) : { line: 1, column: 1 }
+}
+
+/** 本文と初期位置を切り替える。位置は初期状態へ組み込み、Undoの対象にしない。 */
+function setDocument(text: string, position?: EditorPosition | null): void {
   documentRevision += 1
   lineNavigationOpen.value = false
   // 文書の切り替え時に状態ごと作り直し、前の文書の Undo 履歴を持ち越さない。
-  view?.setState(createState(text))
-  if (view) updateEditorSearch(view, searchConditions, searchActive)
+  view?.setState(createState(text, position))
+  if (view) {
+    updateEditorSearch(view, searchConditions, searchActive)
+    view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head, { y: 'center' }) })
+  }
   reportChange(true)
   reportSearchStatus()
   emit('searchScope', getSearchScope())
@@ -236,7 +246,7 @@ function reportSearchStatus(): void {
 }
 
 // 親は本文を複製保持せず、保存時に公開したメソッドから CodeMirror の現在値を読む。
-defineExpose({ getText, setDocument, focus, setSearch, runSearch, getSearchScope, setSearchScope, openLineNavigation, getDocumentSnapshot, revealRange, setSidebarMatches })
+defineExpose({ getText, getPosition, setDocument, focus, setSearch, runSearch, getSearchScope, setSearchScope, openLineNavigation, getDocumentSnapshot, revealRange, setSidebarMatches })
 
 // Vue の要素確定後に CodeMirror を配置し、初期文字数を親へ通知する。
 onMounted(() => {

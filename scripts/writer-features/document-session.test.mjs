@@ -1143,6 +1143,44 @@ for (const failure of ['save-cancel', 'write-error', 'changed', 'missing', 'insp
   }
 }
 
+test('本文の履歴操作は保存基準の未保存判定に追従し、通常保存で履歴を失わない', async () => {
+  const { EditorState, Transaction } = require('@codemirror/state')
+  const { history } = require('@codemirror/commands')
+  const { runEditorHistoryAction, getEditorHistoryState } = loadSourceModule('src/editorHistory.ts')
+  const h = createDocumentHarness()
+  const view = {
+    state: EditorState.create({ extensions: [history()] }), composing: false, focus() {},
+    dispatch(transaction) {
+      view.state = transaction instanceof Transaction ? transaction.state : view.state.update(transaction).state
+      h.session.onChange(view.state.doc.toString())
+    },
+  }
+  h.editor.getText = () => view.state.doc.toString()
+  h.editor.setDocument = text => {
+    view.state = EditorState.create({ doc: text, extensions: [history()] })
+    h.session.onChange(text)
+  }
+  try {
+    await h.session.initializeRecovery()
+    await h.session.openDocument()
+    const original = view.state.doc.toString()
+    view.dispatch({ changes: { from: 0, insert: '追記' } })
+    assert.equal(h.session.dirty.value, true)
+    runEditorHistoryAction(view, 'undo')
+    assert.equal(h.session.dirty.value, false)
+    runEditorHistoryAction(view, 'redo')
+    assert.equal(h.session.dirty.value, true)
+    await h.session.saveDocument()
+    assert.equal(h.session.dirty.value, false)
+    assert.equal(getEditorHistoryState(view.state).canUndo, true)
+    runEditorHistoryAction(view, 'undo')
+    assert.equal(view.state.doc.toString(), original)
+    assert.equal(h.session.dirty.value, true)
+    runEditorHistoryAction(view, 'redo')
+    assert.equal(h.session.dirty.value, false)
+  } finally { h.session.dispose() }
+})
+
 for (const response of ['Cancel', 'キャンセル', '予期しない応答']) {
   test(`確認結果「${response}」は本文・選択・Undo履歴を変えない`, async () => {
     const { EditorState, EditorSelection } = require('@codemirror/state')

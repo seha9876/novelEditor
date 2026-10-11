@@ -122,6 +122,13 @@ defineExpose({ closeMenus })
         <VBtn v-bind="editMenuProps" class="menu-heading" size="small" variant="text">編集</VBtn>
       </template>
       <VList density="compact" min-width="220" role="menu" aria-label="編集">
+        <VListItem role="menuitem" :disabled="isCommandDisabled('edit.undo')" title="元に戻す" @click="runMenuCommand('edit.undo')">
+          <template #append><span class="menu-shortcut">{{ getCommandShortcut('edit.undo') }}</span></template>
+        </VListItem>
+        <VListItem role="menuitem" :disabled="isCommandDisabled('edit.redo')" title="やり直す" @click="runMenuCommand('edit.redo')">
+          <template #append><span class="menu-shortcut">{{ getCommandShortcut('edit.redo') }}</span></template>
+        </VListItem>
+        <VDivider class="my-1" />
         <VListItem role="menuitem" :disabled="isCommandDisabled('edit.find')" title="検索" @click="runMenuCommand('edit.find')">
           <template #append><span class="menu-shortcut">{{ getCommandShortcut('edit.find') }}</span></template>
         </VListItem>

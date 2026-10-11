@@ -37,6 +37,7 @@ import { createAppearanceHost } from './appearanceChannel'
 import { createAppearanceTargetHost } from './appearanceTargetChannel'
 import { createAppearanceTargetOverlay } from './appearanceTargetOverlay'
 import { applyAppearance } from './appearancePresentation'
+import type { EditorHistoryState } from './editorHistory'
 
 const props = defineProps<{
   initialPreferences: ApplicationPreferencesV1
@@ -46,6 +47,7 @@ const props = defineProps<{
 }>()
 
 const editor = ref<(DocumentEditorHandle & { openLineNavigation: () => void }) | null>(null)
+const editorHistoryState = ref<EditorHistoryState>({ canUndo: false, canRedo: false })
 const persistenceNotice = ref('')
 const persistenceNoticeOpen = ref(false)
 const mainCloseInProgress = ref(false)
@@ -323,6 +325,8 @@ const commandActions: Record<CommandId, () => Promise<void>> = {
   'document.quickOpen': async () => { quickOpen.open() },
   'document.save': saveDocument,
   'document.saveAs': saveDocumentAs,
+  'edit.undo': async () => { editor.value?.runHistory('undo') },
+  'edit.redo': async () => { editor.value?.runHistory('redo') },
   'edit.find': () => openSearchWindow('search'),
   'edit.replace': () => openSearchWindow('replace'),
   'edit.goToLine': async () => { editor.value?.openLineNavigation() },
@@ -367,6 +371,8 @@ function isCommandDisabled(commandId: CommandId): boolean {
   if (commandId === 'view.focusMode.toggle' || commandId.startsWith('view.sidebar.')) return projectTreeResizing.value
   if (commandId === 'document.quickOpen') return quickOpenDisabled.value
   if (quickOpen.isOpen.value && (commandId.startsWith('document.') || commandId.startsWith('edit.'))) return true
+  if (commandId === 'edit.undo') return editorInteractionLocked.value || !editor.value || !editorHistoryState.value.canUndo
+  if (commandId === 'edit.redo') return editorInteractionLocked.value || !editor.value || !editorHistoryState.value.canRedo
   if (commandId.startsWith('edit.')) return documentLocked.value
   if (commandId.startsWith('toolbar.typography.')) return busy.value || documentLocked.value
   return busy.value && commandId.startsWith('document.')
@@ -467,9 +473,10 @@ async function handleCloseRequested(): Promise<void> {
   }
 }
 
-/** 修飾キーを含む共通ショートカットを処理する。 */
+/** 共通ショートカットを処理する。Undo/Redoは入力先自身へ委ね、検索欄などの履歴を奪わない。 */
 function onKeydown(event: KeyboardEvent): void {
   const command = findShortcutCommand(event)
+  if (command?.id === 'edit.undo' || command?.id === 'edit.redo') return
   if (command) {
     event.preventDefault()
     executeCommand(command.id)
@@ -672,7 +679,7 @@ onBeforeUnmount(() => {
           <span>{{ documentSession.externalState.value === 'changed' ? '外部で変更されました。現在の本文は保持しています。' : documentSession.externalState.value === 'missing' ? 'ファイルが見つかりません。現在の本文は保持しています。' : 'ファイルの状態を確認できません。' }}</span>
           <VBtn size="small" variant="text" :disabled="busy || mainCloseInProgress" @click="documentSession.reviewExternalFile">確認する</VBtn>
         </div>
-        <EditorPane ref="editor" :settings="editorSettings" :read-only="editorInteractionLocked" @change="onChange" @document-state="onDocumentState" @statistics="statistics = $event" @search-status="onSearchStatus" @search-navigate="onSearchNavigate" @search-scope="onSearchScope" />
+        <EditorPane ref="editor" :settings="editorSettings" :read-only="editorInteractionLocked" @change="onChange" @document-state="onDocumentState" @statistics="statistics = $event" @search-status="onSearchStatus" @search-navigate="onSearchNavigate" @search-scope="onSearchScope" @history-state="editorHistoryState = $event" />
       </div>
     </VMain>
     <ExternalFileDialog

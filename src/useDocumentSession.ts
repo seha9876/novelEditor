@@ -9,6 +9,7 @@ import { authorizeProjectFile, loadProjectTreeSnapshot } from './projectTreeClie
 import { useDocumentRecovery } from './useDocumentRecovery'
 import { authorizeRecentFile, sameRecentFilePath, updateRecentFilePosition, type RecentFile } from './recentFiles'
 import type { EditorPosition } from './editorNavigation'
+import type { EditorHistoryAction } from './editorHistory'
 import { classifyExternalFile, inspectTextFile, type DiskObservation, type DiskState, type FileConflict, type ExternalFileState } from './externalFile'
 import {
   chooseSavePath,
@@ -23,6 +24,8 @@ import type { ProjectTreeOpenRequest, ProjectTreeOpenResult } from './projectTre
 import type { SearchAction, SearchConditions, SearchScopeAction, SearchScopeStatus } from './searchSession'
 
 export type DocumentEditorHandle = {
+  /** 本文の履歴操作を実行する。ロック中やIME変換中は変更しない。 */
+  runHistory: (action: EditorHistoryAction) => boolean
   /** CodeMirror が保持する現在の本文を返す。 */
   getText: () => string
   /** 主カーソルの論理行と書記素列を返す。 */

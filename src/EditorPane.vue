@@ -17,6 +17,7 @@ import { getEditorSearchRange } from './searchPanel'
 import type { DocumentSnapshot, DocumentNavigation } from './sidebarModel'
 import { sidebarMatches, sidebarSearchHighlights } from './sidebarSearchHighlights'
 import { EditorSelection } from '@codemirror/state'
+import { getEditorHistoryState, runEditorHistoryAction, type EditorHistoryAction, type EditorHistoryState } from './editorHistory'
 
 const props = defineProps<{ settings: EditorSettings; readOnly: boolean }>()
 const emit = defineEmits<{
@@ -26,6 +27,7 @@ const emit = defineEmits<{
   searchNavigate: [action: SearchAction]
   searchScope: [scope: SearchScopeStatus]
   documentState: [revision: number, head: number]
+  historyState: [state: EditorHistoryState]
 }>()
 
 const host = ref<HTMLElement | null>(null)
@@ -89,6 +91,7 @@ function createState(text: string, position?: EditorPosition | null): EditorStat
         if (update.docChanged || !getSearchQuery(update.startState).eq(getSearchQuery(update.state))) reportSearchStatus()
         if (update.docChanged || update.selectionSet) emit('searchScope', getSearchScope())
         if (update.docChanged || update.selectionSet) emit('documentState', documentRevision, update.state.selection.main.head)
+        if (update.transactions.length) reportHistoryState()
       }),
       editorTheme,
     ],
@@ -121,6 +124,20 @@ watch(() => props.readOnly, (value) => {
   view?.dispatch({ effects: readOnlySetting.reconfigure(EditorState.readOnly.of(value)) })
   emit('searchScope', getSearchScope())
 }, { flush: 'sync' })
+
+watch(lineNavigationOpen, reportHistoryState, { flush: 'sync' })
+
+/** 初期表示・編集・文書切替・ロック変更に合わせて履歴操作の可否だけを共有する。 */
+function reportHistoryState(): void {
+  emit('historyState', view && !props.readOnly && !lineNavigationOpen.value
+    ? getEditorHistoryState(view.state) : { canUndo: false, canRedo: false })
+}
+
+/** メニューとツールバーから本文の履歴を操作する。表示後に変わったロック状態も確認する。 */
+function runHistory(action: EditorHistoryAction): boolean {
+  if (!view || props.readOnly || lineNavigationOpen.value) return false
+  return runEditorHistoryAction(view, action)
+}
 
 /** 本文だけを親の未保存判定へ通知し、文字数は独立した非同期処理へ予約する。 */
 function reportChange(resetStatistics = false): void {
@@ -163,6 +180,7 @@ function setDocument(text: string, position?: EditorPosition | null): void {
     view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head, { y: 'center' }) })
   }
   reportChange(true)
+  reportHistoryState()
   reportSearchStatus()
   emit('searchScope', getSearchScope())
   emit('documentState', documentRevision, view?.state.selection.main.head ?? 0)
@@ -246,7 +264,7 @@ function reportSearchStatus(): void {
 }
 
 // 親は本文を複製保持せず、保存時に公開したメソッドから CodeMirror の現在値を読む。
-defineExpose({ getText, getPosition, setDocument, focus, setSearch, runSearch, getSearchScope, setSearchScope, openLineNavigation, getDocumentSnapshot, revealRange, setSidebarMatches })
+defineExpose({ getText, getPosition, setDocument, focus, setSearch, runSearch, getSearchScope, setSearchScope, openLineNavigation, getDocumentSnapshot, revealRange, setSidebarMatches, runHistory })
 
 // Vue の要素確定後に CodeMirror を配置し、初期文字数を親へ通知する。
 onMounted(() => {
@@ -262,6 +280,7 @@ onMounted(() => {
     emit('statistics', { ...createEmptyStatistics(), pending: false, error: '文字数の集計を開始できませんでした。' })
   }
   reportChange()
+  reportHistoryState()
 })
 
 // Vue の破棄時に CodeMirror のイベントや DOM 参照を解放する。

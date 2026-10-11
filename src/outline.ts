@@ -10,6 +10,26 @@ export type OutlinePreferences = OutlineRuleSet & { basePresetId: string | null;
 export const STANDARD_OUTLINE_PRESET_ID = 'builtin-standard'
 export const outlineExample = '第一章 再会\n本文です。\n第一節 翌朝'
 export type OutlineHeading = { from: number; line: number; text: string; level: number; parent: number | null; ruleId: string }
+/** 一致した見出しと、階層を示すために残す親見出しを元配列の位置で区別する。 */
+export type OutlineFilterResult = { active: boolean; matched: Set<number>; included: Set<number> }
+
+/** 抽出済み見出しだけを部分一致で絞る。全半角・英字の大小は比較時だけ揃え、本文や折りたたみ状態は変更しない。 */
+export function filterOutlineHeadings(headings: readonly OutlineHeading[], query: string): OutlineFilterResult {
+  const search = query.trim().normalize('NFKC').toLowerCase()
+  const result: OutlineFilterResult = { active: !!search, matched: new Set(), included: new Set() }
+  if (!search) return result
+  headings.forEach((heading, index) => {
+    if (!heading.text.normalize('NFKC').toLowerCase().includes(search)) return
+    result.matched.add(index)
+    let current: number | null = index
+    while (current !== null && !result.included.has(current)) {
+      result.included.add(current)
+      current = headings[current]!.parent
+    }
+  })
+  return result
+}
+
 const numbers = '[0-9０-９〇零一二三四五六七八九十百千万億兆壱弐参拾]+'
 const title = '(?:[\\s\u3000]+.+|[：:].+)?$'
 const standardPatterns: Record<string, string> = {

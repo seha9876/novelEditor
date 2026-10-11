@@ -26,3 +26,13 @@ export function countColumn(line: string, offset: number): number {
   }
   return column
 }
+
+/** 1始まりの書記素列をUTF-16位置へ戻し、短くなった行では行末へ補正する。 */
+export function offsetAtColumn(line: string, column: number): number {
+  let current = 1
+  for (const { index } of segmenter.segment(line)) {
+    if (current >= column) return index
+    current += 1
+  }
+  return line.length
+}

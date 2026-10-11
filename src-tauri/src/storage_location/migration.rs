@@ -316,7 +316,7 @@ mod tests {
             .unwrap();
     }
 
-    /// 原稿本文を含まない履歴テーブルも、IDと並び順を保って保存先へ移す。
+    /// 原稿本文を含まない履歴テーブルも、ID・並び順・編集位置を保って保存先へ移す。
     #[test]
     fn migrates_recent_files_with_stable_ids_and_order() {
         let directory = TestDirectory::new();
@@ -325,6 +325,9 @@ mod tests {
         crate::project_tree::prepare_new_database_file(&source.join(PROJECT_TREE_FILE)).unwrap();
         let connection = Connection::open(source.join(PROJECT_TREE_FILE)).unwrap();
         connection.execute_batch("INSERT INTO recent_files(id, path, path_key, last_used) VALUES (9, 'C:/原稿.txt', 'c:/原稿.txt', 2), (12, 'D:/原稿.txt', 'd:/原稿.txt', 1);").unwrap();
+        connection
+            .execute("INSERT INTO recent_file_positions VALUES (9, 120, 8)", [])
+            .unwrap();
         drop(connection);
         migrate_data_files(&source, &target).unwrap();
         assert!(sqlite_contents_match(
@@ -345,6 +348,16 @@ mod tests {
                 )
                 .unwrap(),
             9
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT line, column FROM recent_file_positions WHERE recent_file_id = 9",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                )
+                .unwrap(),
+            (120, 8)
         );
     }
 

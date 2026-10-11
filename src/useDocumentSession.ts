@@ -7,7 +7,8 @@ import { createEmptyStatistics } from './statisticsCalculation'
 import type { EditorStatistics } from './statisticsCalculation'
 import { authorizeProjectFile, loadProjectTreeSnapshot } from './projectTreeClient'
 import { useDocumentRecovery } from './useDocumentRecovery'
-import { authorizeRecentFile, sameRecentFilePath, type RecentFile } from './recentFiles'
+import { authorizeRecentFile, sameRecentFilePath, updateRecentFilePosition, type RecentFile } from './recentFiles'
+import type { EditorPosition } from './editorNavigation'
 import { classifyExternalFile, inspectTextFile, type DiskObservation, type DiskState, type FileConflict, type ExternalFileState } from './externalFile'
 import {
   chooseSavePath,
@@ -24,14 +25,16 @@ import type { SearchAction, SearchConditions, SearchScopeAction, SearchScopeStat
 export type DocumentEditorHandle = {
   /** CodeMirror が保持する現在の本文を返す。 */
   getText: () => string
+  /** 主カーソルの論理行と書記素列を返す。 */
+  getPosition: () => EditorPosition
   /** 解析時点の本文・選択・限定範囲を世代と一緒に返す。 */
   getDocumentSnapshot: () => DocumentSnapshot
   /** 世代の一致した範囲だけへ移動し、本文やUndo履歴を保持する。 */
   revealRange: (target: DocumentNavigation) => boolean
   /** Workerで確認済みの一致位置を強調する。本文は変更しない。 */
   setSidebarMatches: (revision: number, ranges: { from: number; to: number }[]) => void
-  /** 本文を切り替え、編集履歴を初期化する。 */
-  setDocument: (text: string) => void
+  /** 本文と初期位置を切り替え、編集履歴を初期化する。 */
+  setDocument: (text: string, position?: EditorPosition | null) => void
   /** 本文領域へ入力フォーカスを移す。 */
   focus: () => void
   /** 検索条件とハイライトの有効状態を本文へ反映する。 */
@@ -53,8 +56,8 @@ export type DocumentSessionOptions = {
   showPersistenceNotice: (text: string) => void
   showError: (action: string, error: unknown) => Promise<void>
   reportProjectTreeOpenResult: (result: ProjectTreeOpenResult, sourceWindowId?: string) => void
-  /** 原稿の読込・保存成功を通知する。失敗は本文操作と切り離して知らせる。 */
-  onFileAccessed?: (path: string) => Promise<void>
+  /** 読込・保存成功を記録し、同じ履歴IDと前回の位置を返す。失敗は本文操作と切り離す。 */
+  onFileAccessed?: (path: string) => Promise<RecentFile>
   /** Git履歴などのモーダル中は分離ツリーからの文書切替も止める。 */
   fileNavigationBlocked?: Readonly<Ref<boolean>>
 }
@@ -76,6 +79,7 @@ export function useDocumentSession(options: DocumentSessionOptions) {
   const displayName = computed(() => path.value ? fileName(path.value) : restoredUnsaved.value ? suggestedFileName.value : '無題')
 
   let disposed = false
+  let recentFileId: number | null = null
   const externalState = ref<ExternalFileState>('unchanged')
   const externalError = ref('')
   const externalDialog = shallowRef<FileConflict | null>(null)
@@ -146,15 +150,19 @@ export function useDocumentSession(options: DocumentSessionOptions) {
       if (!(await confirmDiscard()) || disposed) return
       const file = await loadTextFile(target)
       if (disposed) return
+      const position = options.editor.value?.getPosition()
       recovery.flush()
       currentFile.value = file
       documentFormat.value = { lineEnding: file.lineEnding, hasBom: file.hasBom }
       restoredUnsaved.value = false
-      options.editor.value?.setDocument(file.text)
+      options.editor.value?.setDocument(file.text, position)
       file.editorText = options.editor.value?.getText() ?? file.text
       savedText.value = file.editorText
       dirty.value = false
-      await recordFileAccess(target)
+      const recent = await recordFileAccess(target)
+      if (disposed) return
+      recentFileId = recent?.id ?? null
+      await persistEditorPosition()
       if (disposed) return
       await recovery.syncSnapshot()
     } catch (error) {
@@ -171,12 +179,26 @@ export function useDocumentSession(options: DocumentSessionOptions) {
   }
 
   /** 履歴だけの保存失敗を通知し、成功した文書の読込・保存を失敗扱いにしない。 */
-  async function recordFileAccess(filePath: string): Promise<void> {
-    if (disposed) return
+  async function recordFileAccess(filePath: string): Promise<RecentFile | null> {
+    if (disposed) return null
     try {
-      await options.onFileAccessed?.(filePath)
+      const recent = await options.onFileAccessed?.(filePath)
+      return disposed ? null : recent ?? null
     } catch (error) {
       if (!disposed) options.showPersistenceNotice(`ファイル履歴を保存できません。${String(error)}`)
+      return null
+    }
+  }
+
+  /** 現在の履歴IDと位置をawait前に固定する。失敗しても文書操作を中止しない。 */
+  async function persistEditorPosition(): Promise<void> {
+    if (disposed || recentFileId === null || !options.editor.value) return
+    const id = recentFileId
+    const position = options.editor.value.getPosition()
+    try {
+      await updateRecentFilePosition(id, position)
+    } catch (error) {
+      if (!disposed) options.showPersistenceNotice(`編集位置を保存できません。${String(error)}`)
     }
   }
 
@@ -253,7 +275,10 @@ export function useDocumentSession(options: DocumentSessionOptions) {
     documentLocked.value = true
     try {
       if (!(await confirmDocumentTransition()) || disposed) return
+      await persistEditorPosition()
+      if (disposed) return
       recovery.flush()
+      recentFileId = null
       path.value = null
       documentOrigin.value = null
       currentFile.value = null
@@ -298,7 +323,10 @@ export function useDocumentSession(options: DocumentSessionOptions) {
     documentLocked.value = true
     try {
       if (recentPath && path.value && sameRecentFilePath(path.value, recentPath)) {
-        await recordFileAccess(path.value)
+        const recent = await recordFileAccess(path.value)
+        if (disposed) return false
+        recentFileId = recent?.id ?? null
+        await persistEditorPosition()
         if (disposed) return false
         options.editor.value?.focus()
         return true
@@ -313,20 +341,23 @@ export function useDocumentSession(options: DocumentSessionOptions) {
         file = await loadTextFile(selected)
         if (disposed) return false
       }
+      await persistEditorPosition()
+      if (disposed) return false
+      const recent = await recordFileAccess(file.path)
+      if (disposed) return false
       recovery.flush()
+      recentFileId = recent?.id ?? null
       documentOrigin.value = null
       currentFile.value = file
       path.value = file.path
       documentFormat.value = { lineEnding: file.lineEnding, hasBom: file.hasBom }
       suggestedFileName.value = fileName(file.path)
       restoredUnsaved.value = false
-      options.editor.value?.setDocument(file.text)
+      options.editor.value?.setDocument(file.text, recent?.position)
       // CodeMirror は改行を内部表現へ揃えるため、未保存判定の基準も読み込み後の本文に合わせる。
       file.editorText = options.editor.value?.getText() ?? file.text
       savedText.value = file.editorText
       dirty.value = false
-      await recordFileAccess(file.path)
-      if (disposed) return false
       await recovery.syncSnapshot()
       if (disposed) return false
       options.editor.value?.focus()
@@ -395,19 +426,23 @@ export function useDocumentSession(options: DocumentSessionOptions) {
         }
         file = latest
       }
+      await persistEditorPosition()
+      if (disposed) return
+      const recent = await recordFileAccess(file.path)
+      if (disposed) return
       recovery.flush()
+      recentFileId = recent?.id ?? null
       currentFile.value = file
       path.value = file.path
       documentOrigin.value = { nodeId: request.nodeId, projectId: request.projectId }
       documentFormat.value = { lineEnding: file.lineEnding, hasBom: file.hasBom }
       suggestedFileName.value = fileName(file.path)
       restoredUnsaved.value = false
-      options.editor.value?.setDocument(file.text)
+      // 検索結果は呼出側が一致位置へ移動するため、記憶位置のスクロールを挟まない。
+      options.editor.value?.setDocument(file.text, request.searchFingerprint ? undefined : recent?.position)
       file.editorText = options.editor.value?.getText() ?? file.text
       savedText.value = file.editorText
       dirty.value = false
-      await recordFileAccess(file.path)
-      if (disposed) return
       await recovery.syncSnapshot()
       if (disposed) return
       options.editor.value?.focus()
@@ -487,6 +522,11 @@ export function useDocumentSession(options: DocumentSessionOptions) {
       const result = await saveTextFile(target, text, lineEnding, hasBom, expected, currentFile.value ?? undefined)
       if (disposed) return 'cancelled'
       if (result.kind === 'conflict') { showFileConflict(target, result.disk); return 'conflict' }
+      // 別名保存では元履歴の位置を残してから、新しい保存先へ履歴IDを切り替える。
+      if (previousPath && !sameRecentFilePath(previousPath, target)) {
+        await persistEditorPosition()
+        if (disposed) return 'cancelled'
+      }
       path.value = target
       if (!previousPath || !sameRecentFilePath(previousPath, target)) documentOrigin.value = null
       currentFile.value = result.file
@@ -496,7 +536,10 @@ export function useDocumentSession(options: DocumentSessionOptions) {
       savedText.value = text
       // 書き込み中にも編集できるので、保存開始時の本文と現在の本文を改めて比較する。
       dirty.value = (options.editor.value?.getText() ?? '') !== text
-      await recordFileAccess(target)
+      const recent = await recordFileAccess(target)
+      if (disposed) return 'cancelled'
+      recentFileId = recent?.id ?? null
+      await persistEditorPosition()
       if (disposed) return 'cancelled'
       await recovery.syncSnapshot()
       return disposed ? 'cancelled' : 'saved'
@@ -507,9 +550,10 @@ export function useDocumentSession(options: DocumentSessionOptions) {
     }
   }
 
-  /** 終了前に遅延中の復元保存だけを取り消し、呼び出し元の削除処理へ順序を渡す。 */
-  function flush(): void {
+  /** 終了前に復元タイマーを止め、現在の編集位置の書込完了を待つ。 */
+  async function flush(): Promise<void> {
     recovery.flush()
+    await persistEditorPosition()
   }
 
   /** 保存済み復元候補を明示的に削除する。終了処理では自動保存より後に呼び出す。 */

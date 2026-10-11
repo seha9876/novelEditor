@@ -2,7 +2,7 @@
 import { computed, ref, shallowRef, watch, type Ref } from 'vue'
 import { fingerprintBytes } from './sidebarAnalysis'
 import type { DocumentSnapshot, DocumentNavigation } from './sidebarModel'
-import { ask } from '@tauri-apps/plugin-dialog'
+import { ask, message } from '@tauri-apps/plugin-dialog'
 import { createEmptyStatistics } from './statisticsCalculation'
 import type { EditorStatistics } from './statisticsCalculation'
 import { authorizeProjectFile, loadProjectTreeSnapshot } from './projectTreeClient'
@@ -45,6 +45,7 @@ export type DocumentEditorHandle = {
 }
 
 type DocumentOrigin = { nodeId: number; projectId: number }
+type SaveOutcome = 'saved' | 'cancelled' | 'conflict' | 'failed'
 
 export type DocumentSessionOptions = {
   editor: Ref<DocumentEditorHandle | null>
@@ -212,7 +213,7 @@ export function useDocumentSession(options: DocumentSessionOptions) {
     return recovery.initialize()
   }
 
-  /** 未保存の変更を破棄してよいか確認し、続行できる場合に true を返す。確認ダイアログを開く。 */
+  /** 外部の本文を再読込する前に、現在の未保存変更を破棄してよいか確認する。 */
   async function confirmDiscard(): Promise<boolean> {
     if (!dirty.value) return true
     const confirmed = await ask('未保存の変更があります。破棄して続けますか？', {
@@ -222,14 +223,36 @@ export function useDocumentSession(options: DocumentSessionOptions) {
     return disposed ? false : confirmed
   }
 
-  /** 必要なら破棄を確認して新規文書へ切り替え、保存先と編集履歴を初期化する。 */
+  /**
+   * 切替・終了前に未保存本文の扱いを確認する。呼出側が本文と操作をロックしたまま使用する。
+   * 保存本体だけを呼び、外側のロックを解除しない。競合時は要求を保留せず中止する。
+   */
+  async function confirmDocumentTransition(): Promise<boolean> {
+    if (disposed || !documentLocked.value || (!busy.value && !options.mainCloseInProgress.value)) return false
+    if (!dirty.value) return true
+    const saveLabel = '保存して続ける'
+    const discardLabel = '保存せず続ける'
+    const choice = await message(`「${displayName.value}」に未保存の変更があります。\n保存してから続けますか？`, {
+      title: '未保存の原稿',
+      kind: 'warning',
+      buttons: { yes: saveLabel, no: discardLabel, cancel: 'キャンセル' },
+    })
+    if (disposed) return false
+    if (choice === discardLabel || choice === 'No') return true
+    // 閉じる・Esc・未知の応答は取消とし、明示的な保存選択だけ実行する。
+    if (choice !== saveLabel && choice !== 'Yes') return false
+    const outcome = await saveDocumentContents(false)
+    return !disposed && outcome === 'saved' && !dirty.value
+  }
+
+  /** 未保存本文の保存・破棄を確認して新規文書へ切り替え、保存先と編集履歴を初期化する。 */
   async function newDocument(): Promise<void> {
     if (disposed || busy.value || externalDialog.value || options.mainCloseInProgress.value) return
     busy.value = true
     externalRevision += 1
     documentLocked.value = true
     try {
-      if (!(await confirmDiscard()) || disposed) return
+      if (!(await confirmDocumentTransition()) || disposed) return
       recovery.flush()
       path.value = null
       documentOrigin.value = null
@@ -282,8 +305,14 @@ export function useDocumentSession(options: DocumentSessionOptions) {
       }
       const selected = await resolvePath()
       if (disposed || !selected) return false
-      const file = await loadTextFile(selected)
-      if (disposed || !(await confirmDiscard()) || disposed) return false
+      let file = await loadTextFile(selected)
+      const previousSaveRevision = saveRevision.value
+      if (disposed || !(await confirmDocumentTransition()) || disposed) return false
+      // 保存先が切替先と同じ場合も、確認前に取得した古い本文へ戻さない。
+      if (saveRevision.value !== previousSaveRevision) {
+        file = await loadTextFile(selected)
+        if (disposed) return false
+      }
       recovery.flush()
       documentOrigin.value = null
       currentFile.value = file
@@ -346,21 +375,24 @@ export function useDocumentSession(options: DocumentSessionOptions) {
       }
       let file = await loadTextFile(authorizedPath)
       if (request.searchFingerprint && await fingerprintBytes(file.originalBytes) !== request.searchFingerprint) throw new Error('検索後に原稿が変更されています。もう一度検索してください。')
-      if (disposed || !(await confirmDiscard()) || disposed) {
+      const previousSaveRevision = saveRevision.value
+      if (disposed || !(await confirmDocumentTransition()) || disposed) {
         if (disposed) return
         options.reportProjectTreeOpenResult({ requestId: request.requestId, nodeId: request.nodeId, outcome: 'cancelled' }, sourceWindowId)
         return
       }
-      // 未保存確認中の変更も照合し、許可先の再指定や外部更新後の古い位置へ移動しない。
-      if (request.searchFingerprint) {
+      // 保存した場合も再取得し、許可先の再指定や外部更新後の古い本文・位置へ移動しない。
+      if (request.searchFingerprint || saveRevision.value !== previousSaveRevision) {
         const latestPath = await authorizeProjectFile(request.nodeId)
         if (disposed) return
         if (!sameRecentFilePath(latestPath, authorizedPath)) throw new Error('登録先が変更されました。もう一度検索してください。')
         const latest = await loadTextFile(latestPath)
         if (disposed) return
-        const latestFingerprint = await fingerprintBytes(latest.originalBytes)
-        if (disposed) return
-        if (latestFingerprint !== request.searchFingerprint) throw new Error('確認中に原稿が変更されました。もう一度検索してください。')
+        if (request.searchFingerprint) {
+          const latestFingerprint = await fingerprintBytes(latest.originalBytes)
+          if (disposed) return
+          if (latestFingerprint !== request.searchFingerprint) throw new Error('確認中に原稿が変更されました。もう一度検索してください。')
+        }
         file = latest
       }
       recovery.flush()
@@ -407,41 +439,54 @@ export function useDocumentSession(options: DocumentSessionOptions) {
     await saveCurrentDocument(true)
   }
 
-  /** 内容照合を伴う保存を行い、競合・取消では保存基準を保つ。確認中・保存中の追加編集も保護する。 */
+  /** 通常保存の排他制御を担う。本文はロックせず、書込中の追加入力を許可する。 */
   async function saveCurrentDocument(saveAs: boolean, approvedConflict?: FileConflict): Promise<void> {
     if (disposed || busy.value || options.mainCloseInProgress.value) return
     busy.value = true
+    try {
+      await saveDocumentContents(saveAs, approvedConflict)
+    } finally {
+      if (!disposed) busy.value = false
+    }
+  }
+
+  /**
+   * 内容照合と保存基準の更新を行い、結果を返す。排他制御と本文ロックは呼出側が所有する。
+   * 競合・取消・失敗では切替を許可せず、書込中の追加入力も未保存として保護する。
+   */
+  async function saveDocumentContents(saveAs: boolean, approvedConflict?: FileConflict): Promise<SaveOutcome> {
+    if (disposed) return 'cancelled'
     externalRevision += 1
     try {
       const target = approvedConflict?.path ?? (!saveAs && path.value ? path.value : await chooseSavePath(path.value ?? suggestedFileName.value))
-      if (disposed || !target) return
+      if (disposed || !target) return 'cancelled'
       const previousPath = path.value
       let expected: DiskState
       if (approvedConflict) {
-        if (approvedConflict.disk.kind === 'error') return
+        if (approvedConflict.disk.kind === 'error') return 'failed'
         const confirmed = await ask(approvedConflict.disk.kind === 'missing'
           ? `同じ場所に現在の本文を保存し直しますか？\n${target}`
           : `外部で変更された内容は失われます。現在の本文で上書きしますか？\n${target}`, {
           title: '外部更新の確認', kind: 'warning', okLabel: approvedConflict.disk.kind === 'missing' ? '再作成' : '上書き', cancelLabel: 'キャンセル',
         })
-        if (disposed || !confirmed) return
+        if (disposed || !confirmed) return 'cancelled'
         expected = approvedConflict.disk
       } else {
         const disk = await inspectTextFile(target)
-        if (disposed) return
-        if (disk.kind === 'error') { showFileConflict(target, disk); return }
+        if (disposed) return 'cancelled'
+        if (disk.kind === 'error') { showFileConflict(target, disk); return 'failed' }
         if (currentFile.value && previousPath && sameRecentFilePath(target, previousPath)
           && classifyExternalFile(disk, currentFile.value.originalBytes) !== 'unchanged') {
           showFileConflict(target, disk)
-          return
+          return 'conflict'
         }
         expected = disk
       }
       const text = options.editor.value?.getText() ?? ''
       const { lineEnding, hasBom } = documentFormat.value
       const result = await saveTextFile(target, text, lineEnding, hasBom, expected, currentFile.value ?? undefined)
-      if (disposed) return
-      if (result.kind === 'conflict') { showFileConflict(target, result.disk); return }
+      if (disposed) return 'cancelled'
+      if (result.kind === 'conflict') { showFileConflict(target, result.disk); return 'conflict' }
       path.value = target
       if (!previousPath || !sameRecentFilePath(previousPath, target)) documentOrigin.value = null
       currentFile.value = result.file
@@ -452,14 +497,13 @@ export function useDocumentSession(options: DocumentSessionOptions) {
       // 書き込み中にも編集できるので、保存開始時の本文と現在の本文を改めて比較する。
       dirty.value = (options.editor.value?.getText() ?? '') !== text
       await recordFileAccess(target)
-      if (disposed) return
+      if (disposed) return 'cancelled'
       await recovery.syncSnapshot()
-      if (disposed) return
+      return disposed ? 'cancelled' : 'saved'
     } catch (error) {
-      if (disposed) return
+      if (disposed) return 'cancelled'
       await options.showError('保存', error)
-    } finally {
-      if (!disposed) busy.value = false
+      return 'failed'
     }
   }
 
@@ -505,7 +549,7 @@ export function useDocumentSession(options: DocumentSessionOptions) {
     displayName,
     onChange,
     initializeRecovery,
-    confirmDiscard,
+    confirmDocumentTransition,
     newDocument,
     openDocument,
     openRecentDocument,

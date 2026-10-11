@@ -3,10 +3,14 @@ import {
   assert,
   deferred,
   loadSourceModule,
+  projectRoot,
+  readFileSync,
   require,
+  resolve,
   test,
   TextDecoder,
   TextEncoder,
+  ts,
 } from './test-support.mjs'
 
 /** 実際の本文変更通知を再現し、ダイアログと保存境界だけをテスト内で制御する。 */
@@ -18,6 +22,8 @@ function createDocumentHarness(overrides = {}) {
   const treeResults = []
   const invocations = []
   const diskFiles = new Map()
+  const mainCloseInProgress = ref(false)
+  const confirmations = []
   const documentApi = loadSourceModule('src/useDocumentSession.ts', {
     './recoveryStore': {
       loadRecoverySnapshot: async () => overrides.snapshot ?? null,
@@ -25,12 +31,16 @@ function createDocumentHarness(overrides = {}) {
     },
     '@tauri-apps/plugin-dialog': {
       ask: overrides.ask ?? (async () => true),
+      message: async (text, options) => {
+        confirmations.push({ text, options })
+        return overrides.message ? overrides.message(text, options) : '保存せず続ける'
+      },
       open: overrides.open ?? (async () => '原稿.txt'),
       save: overrides.save ?? (async () => '保存.txt'),
     },
     '@tauri-apps/plugin-fs': {
       readFile: async (path) => {
-        const bytes = overrides.readFile ? await overrides.readFile(path) : diskFiles.get(path) ?? new TextEncoder().encode('保存済み本文')
+        const bytes = overrides.readFile ? await overrides.readFile(path, diskFiles) : diskFiles.get(path) ?? new TextEncoder().encode('保存済み本文')
         diskFiles.set(path, bytes)
         return bytes
       },
@@ -69,13 +79,13 @@ function createDocumentHarness(overrides = {}) {
   })
   session = documentApi.useDocumentSession({
     editor,
-    mainCloseInProgress: ref(false),
+    mainCloseInProgress,
     showPersistenceNotice: (notice) => errors.push(notice),
     showError: async (action, error) => { errors.push({ action, error }) },
     reportProjectTreeOpenResult: (result, sourceWindowId) => treeResults.push({ ...result, sourceWindowId }),
     onFileAccessed: overrides.onFileAccessed,
   })
-  return { session, editor: editor.value, recoveryWrites, fileWrites, errors, treeResults, invocations, diskFiles }
+  return { session, editor: editor.value, recoveryWrites, fileWrites, errors, treeResults, invocations, diskFiles, mainCloseInProgress, confirmations }
 }
 
 /** 開いた原稿のディスク内容だけを後から変更できる、外部更新用セッションを用意する。 */
@@ -335,7 +345,7 @@ test('履歴の同一ファイルは未保存確認・再読込・本文再生�
   const { session, editor, invocations } = createDocumentHarness({
     open: async () => 'C:/原稿.txt',
     readFile: async () => { reads += 1; return new TextEncoder().encode('元の本文') },
-    ask: async () => { asks += 1; return false },
+    message: async () => { asks += 1; return 'キャンセル' },
     onFileAccessed: async (path) => { recorded.push(path) },
   })
   try {
@@ -358,7 +368,7 @@ test('履歴読込の取消・欠落・不正UTF-8・許可失敗では本文と
   for (const failure of ['cancel', 'missing', 'utf8', 'scope']) {
     const recorded = []
     const { session, editor } = createDocumentHarness({
-      ask: async () => false,
+      message: async () => 'キャンセル',
       onFileAccessed: async (path) => { recorded.push(path) },
       invoke: async () => { if (failure === 'scope') throw new Error('許可されていません'); return 'C:/履歴.txt' },
       readFile: async () => {
@@ -570,8 +580,8 @@ test('保存中の追加入力は未保存として残り、復元候補には�
   }
 })
 
-test('文書の破棄確認を取り消すと本文・保存先・未保存状態と復元候補を維持する', async () => {
-  const { session, editor, recoveryWrites } = createDocumentHarness({ ask: async () => false })
+test('文書切替の確認を取り消すと本文・保存先・未保存状態と復元候補を維持する', async () => {
+  const { session, editor, recoveryWrites } = createDocumentHarness({ message: async () => 'キャンセル' })
   try {
     await session.initializeRecovery()
     await session.openDocument()
@@ -649,7 +659,7 @@ function createQuickOpenHarness(overrides = {}) {
     ...overrides,
     invoke: overrides.invoke ?? (async (command) => {
       if (command === 'project_tree_snapshot') return snapshot
-      if (command === 'project_file_authorize') return expectedPath
+      if (command === 'project_file_authorize' || command === 'recent_file_authorize') return expectedPath
       throw new Error(`予期しない変更要求: ${command}`)
     }),
   })
@@ -704,7 +714,7 @@ for (const scenario of [
         ? { projects: [], activeProjectId: 1, nodes: scenario.nodes }
         : 'C:\\変更.txt',
       readFile: async () => { readCount += 1; return new TextEncoder().encode('別文書') },
-      ask: async () => { askCount += 1; return true },
+      message: async () => { askCount += 1; return '保存せず続ける' },
     })
     try {
       await session.initializeRecovery()
@@ -729,8 +739,8 @@ for (const scenario of [
   })
 }
 
-test('検索候補の破棄確認取消では本文・保存先・出自・復元候補を保つ', async () => {
-  const { session, editor, request, treeResults, recoveryWrites } = createQuickOpenHarness({ ask: async () => false })
+test('検索候補の切替確認取消では本文・保存先・出自・復元候補を保つ', async () => {
+  const { session, editor, request, treeResults, recoveryWrites } = createQuickOpenHarness({ message: async () => 'キャンセル' })
   try {
     await session.initializeRecovery()
     await session.openDocument()
@@ -752,7 +762,7 @@ test('検索候補の読込失敗はダイアログ向けに報告し、未保�
   let askCount = 0
   const { session, editor, request, treeResults, recoveryWrites, errors } = createQuickOpenHarness({
     readFile: async () => { throw new Error('ファイル読込失敗') },
-    ask: async () => { askCount += 1; return true },
+    message: async () => { askCount += 1; return '保存せず続ける' },
   })
   try {
     await session.initializeRecovery()
@@ -797,4 +807,321 @@ test('検索候補の遅延読込中は重複要求を拒否し、破棄後の�
     gate.release()
     session.dispose()
   }
+})
+
+/** Appの実際の終了関数へ文書セッションを接続し、窓の破棄だけをメモリ上で記録する。 */
+function createCloseHarness(harness) {
+  const script = readFileSync(resolve(projectRoot, 'src/App.vue'), 'utf8').match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
+  const parsed = ts.createSourceFile('App.ts', script, ts.ScriptTarget.Latest, true)
+  const handler = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'handleCloseRequested')
+  const compiled = ts.transpileModule(handler.getText(parsed), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText
+  const { ref } = require('vue')
+  const calls = []
+  const { session, mainCloseInProgress } = harness
+  const context = {
+    gitHistory: { pending: ref(false) }, sidebarHistory: { pending: ref(false), exporting: ref(false) },
+    busy: session.busy, mainCloseInProgress, documentLocked: session.documentLocked,
+    confirmDocumentTransition: session.confirmDocumentTransition,
+    showPersistenceNotice: text => calls.push(text), showError: async (action) => calls.push(action),
+    publishProjectTreeWindowState: async () => calls.push('publish'),
+    settingsController: { flush: async () => calls.push('settings') },
+    flushProjectTreePreferences: async () => calls.push('preferences'),
+    flushDocumentSession: session.flush,
+    clearRecoverySnapshot: async () => { calls.push('clear'); await session.clearRecoverySnapshot() },
+    closeSearchWindow: async () => calls.push('search-close'),
+    closeProjectTreeWindowForExit: async () => calls.push('tree-close'),
+    appWindow: { destroy: async () => calls.push('destroy') },
+    restoreAfterCloseFailure: () => calls.push('restore'),
+    resumeRecoverySave: () => { calls.push('resume'); session.resumeRecoverySave() },
+    projectTreeDetached: ref(true), hasProjectTreeWindow: () => true,
+    openProjectTreeWindow: async () => calls.push('tree-open'),
+  }
+  const close = new Function(...Object.keys(context), `${compiled}\nreturn handleCloseRequested`)(...Object.values(context))
+  return { close, calls }
+}
+
+/** 切替要求の入口を変え、通常読込・履歴・各ツリー要求が共通確認へ到達するか検証する。 */
+async function runTransition(h, route) {
+  if (route === 'new') return h.session.newDocument()
+  if (route === 'open') return h.session.openDocument()
+  if (route === 'recent') return h.session.openRecentDocument({ id: 1, path: h.request.expectedPath })
+  if (route === 'close') return h.closing.close()
+  const request = { ...h.request }
+  if (route === 'tree') delete request.expectedPath
+  if (route === 'search') request.searchFingerprint = await loadSourceModule('src/sidebarAnalysis.ts').fingerprintBytes(new TextEncoder().encode('保存済み本文'))
+  return h.session.openProjectTreeFile(request, route === 'tree' ? 'detached-tree' : route)
+}
+
+for (const route of ['new', 'open', 'recent', 'tree', 'quick', 'search', 'close']) {
+  for (const choice of ['保存して続ける', '保存せず続ける', 'キャンセル']) {
+    test(`${route}の未保存確認で「${choice}」を選ぶと、保存・切替・終了を正しい順序で行う`, async () => {
+      const h = createQuickOpenHarness({ message: async () => choice })
+      h.closing = createCloseHarness(h)
+      try {
+        await h.session.initializeRecovery()
+        h.editor.setDocument('守る本文')
+        const writesBefore = h.recoveryWrites.length
+        await runTransition(h, route)
+        assert.equal(h.confirmations.length, 1)
+        assert.match(h.confirmations[0].text, /無題/)
+        assert.deepEqual(h.confirmations[0].options.buttons, { yes: '保存して続ける', no: '保存せず続ける', cancel: 'キャンセル' })
+        assert.equal(h.fileWrites.length, choice === '保存して続ける' ? 1 : 0)
+        if (h.fileWrites.length) assert.equal(new TextDecoder().decode(h.fileWrites[0].bytes), '守る本文')
+        if (choice === 'キャンセル') {
+          assert.equal(h.editor.getText(), '守る本文')
+          assert.equal(h.session.path.value, null)
+          assert.equal(h.session.dirty.value, true)
+          assert.equal(h.recoveryWrites.length, writesBefore)
+          assert.ok(!h.closing.calls.includes('destroy'))
+        } else if (route === 'close') {
+          assert.deepEqual(h.closing.calls, ['publish', 'settings', 'preferences', 'clear', 'search-close', 'tree-close', 'destroy'])
+        } else {
+          assert.equal(h.editor.getText(), route === 'new' ? '' : '保存済み本文')
+          assert.equal(h.session.dirty.value, false)
+        }
+        if (route !== 'close' || choice === 'キャンセル') assert.equal(h.session.documentLocked.value, false)
+        assert.equal(h.session.busy.value, false)
+        assert.equal(h.mainCloseInProgress.value, false)
+        assert.deepEqual(h.errors, [])
+      } finally { h.session.dispose() }
+    })
+  }
+}
+
+test('未編集の切替では確認せず、復元した空本文は名前・BOM・改行形式を保って保存する', async () => {
+  const clean = createDocumentHarness()
+  try {
+    await clean.session.initializeRecovery()
+    await clean.session.openDocument()
+    await clean.session.newDocument()
+    await createCloseHarness(clean).close()
+    assert.equal(clean.confirmations.length, 0)
+  } finally { clean.session.dispose() }
+  const saveOptions = []
+  const h = createDocumentHarness({
+    snapshot: { schemaVersion: 1, text: '', fileName: '復元原稿.txt', lineEnding: '\r\n', hasBom: true, updatedAt: '2026-10-11T00:00:00Z' },
+    message: async () => '保存して続ける',
+    save: async options => { saveOptions.push(options); return '復元原稿.txt' },
+  })
+  try {
+    await h.session.initializeRecovery()
+    await h.session.newDocument()
+    assert.match(h.confirmations[0].text, /復元原稿.txt/)
+    assert.equal(saveOptions[0].defaultPath, '復元原稿.txt')
+    assert.deepEqual([...h.fileWrites[0].bytes], [0xef, 0xbb, 0xbf])
+    assert.equal(h.session.dirty.value, false)
+  } finally { h.session.dispose() }
+})
+
+for (const failure of ['save-cancel', 'write-error', 'changed', 'missing', 'inspect-error', 'write-conflict', 'dialog-error']) {
+  for (const route of ['new', 'close']) {
+    test(`${route}の保存続行が${failure}なら、本文を残して処理を中止する`, async () => {
+      const h = await createExternalHarness({
+        message: async () => { if (failure === 'dialog-error') throw new Error('確認失敗'); return '保存して続ける' },
+        save: async () => null,
+        ...(failure === 'write-error' ? { writeFile: async () => { throw new Error('書込失敗') } } : {}),
+        ...(failure === 'inspect-error' ? { inspect: async () => { throw new Error('確認不可') } } : {}),
+        ...(failure === 'write-conflict' ? { conditionalSave: async () => ({ kind: 'conflict', disk: { kind: 'missing' } }) } : {}),
+      })
+      h.closing = createCloseHarness(h)
+      try {
+        if (failure === 'save-cancel') await h.session.newDocument()
+        h.editor.setDocument('保持する本文')
+        if (failure === 'changed') h.diskFiles.set('C:/原稿.txt', new TextEncoder().encode('外部変更'))
+        if (failure === 'missing') h.diskFiles.delete('C:/原稿.txt')
+        const beforePath = h.session.path.value
+        const beforeRecovery = h.recoveryWrites.length
+        await runTransition(h, route)
+        assert.equal(h.editor.getText(), '保持する本文')
+        assert.equal(h.session.path.value, beforePath)
+        assert.equal(h.session.dirty.value, true)
+        assert.equal(h.recoveryWrites.length, beforeRecovery)
+        assert.equal(h.session.documentLocked.value, false)
+        assert.equal(h.session.busy.value, false)
+        assert.ok(!h.closing.calls.includes('clear'))
+        assert.ok(!h.closing.calls.includes('search-close'))
+        assert.ok(!h.closing.calls.includes('tree-close'))
+        assert.ok(!h.closing.calls.includes('destroy'))
+        if (route === 'close') assert.deepEqual(h.closing.calls.slice(-3), ['restore', 'publish', 'resume'])
+        if (['changed', 'missing', 'inspect-error', 'write-conflict'].includes(failure)) assert.ok(h.session.externalDialog.value)
+      } finally { h.session.dispose() }
+    })
+  }
+}
+
+for (const response of ['Cancel', 'キャンセル', '予期しない応答']) {
+  test(`確認結果「${response}」は本文・選択・Undo履歴を変えない`, async () => {
+    const { EditorState, EditorSelection } = require('@codemirror/state')
+    const { history, undo, redo } = require('@codemirror/commands')
+    const h = createDocumentHarness({ message: async () => response })
+    try {
+      await h.session.initializeRecovery()
+      let state = EditorState.create({ doc: '原稿', extensions: [history()] })
+      h.editor.getText = () => state.doc.toString()
+      h.editor.setDocument = () => assert.fail('取消時に本文を再生成しない')
+      const dispatch = transaction => { state = transaction.state; h.session.onChange(state.doc.toString()) }
+      dispatch(state.update({ changes: { from: 2, insert: 'の続き' }, selection: EditorSelection.range(1, 4) }))
+      const previous = state
+      await h.session.newDocument()
+      assert.equal(state, previous)
+      assert.ok(undo({ state, dispatch }))
+      assert.equal(state.doc.toString(), '原稿')
+      assert.ok(redo({ state, dispatch }))
+      assert.equal(state.doc.toString(), '原稿の続き')
+      assert.equal(h.fileWrites.length, 0)
+    } finally { h.session.dispose() }
+  })
+}
+
+for (const route of ['open', 'recent', 'tree', 'quick']) {
+  test(`${route}の切替先へ保存した場合、確認前の古い本文を開かない`, async () => {
+    const target = route === 'open' ? '原稿.txt' : 'C:\\原稿\\候補.txt'
+    const h = createQuickOpenHarness({ message: async () => '保存して続ける', save: async () => target })
+    try {
+      await h.session.initializeRecovery()
+      h.editor.setDocument('保存した最新本文')
+      await runTransition(h, route)
+      assert.equal(h.editor.getText(), '保存した最新本文')
+      assert.equal(h.session.path.value, target)
+      assert.equal(h.session.dirty.value, false)
+      assert.equal(h.fileWrites.length, 1)
+      assert.deepEqual(h.errors, [])
+    } finally { h.session.dispose() }
+  })
+}
+
+test('保存後の再読込失敗と検索結果の陳腐化では、保存済みの現在原稿を維持する', async () => {
+  for (const failure of ['reread', 'fingerprint', 'path']) {
+    let reads = 0
+    let authorized = 0
+    const target = 'C:\\原稿\\候補.txt'
+    const h = createQuickOpenHarness({
+      message: async () => '保存して続ける', save: async () => target,
+      ...(failure === 'reread' ? { readFile: async () => { if (++reads > 1) throw new Error('再読込失敗'); return new TextEncoder().encode('保存済み本文') } } : {}),
+      ...(failure === 'path' ? { invoke: async command => command === 'project_tree_snapshot'
+        ? { nodes: [{ id: 20, projectId: 2, kind: 'file', path: target }] }
+        : ++authorized === 1 ? target : '別原稿.txt' } : {}),
+    })
+    try {
+      await h.session.initializeRecovery()
+      h.editor.setDocument('保存した最新本文')
+      await runTransition(h, failure === 'fingerprint' ? 'search' : 'quick')
+      assert.equal(h.editor.getText(), '保存した最新本文')
+      assert.equal(h.session.path.value, target)
+      assert.equal(h.session.dirty.value, false)
+      assert.equal(h.treeResults.at(-1).outcome, 'failed')
+      assert.match(h.treeResults.at(-1).error, failure === 'reread' ? /再読込失敗/ : /もう一度検索/)
+      assert.equal(h.recoveryWrites.at(-1), null)
+    } finally { h.session.dispose() }
+  }
+})
+
+test('確認・保存中は二重の切替と終了を防ぎ、保存完了までロックを維持する', async () => {
+  const confirmation = deferred()
+  const started = deferred()
+  const writing = deferred()
+  const h = createQuickOpenHarness({ message: () => confirmation.promise, writeFile: async () => { started.release(); await writing.promise } })
+  h.closing = createCloseHarness(h)
+  try {
+    await h.session.initializeRecovery()
+    h.editor.setDocument('未保存本文')
+    const operation = h.session.newDocument()
+    await h.session.newDocument()
+    await h.session.saveDocument()
+    await h.closing.close()
+    assert.equal(h.confirmations.length, 1)
+    assert.equal(h.fileWrites.length, 0)
+    confirmation.release('保存して続ける')
+    await started.promise
+    assert.equal(h.session.busy.value, true)
+    assert.equal(h.session.documentLocked.value, true)
+    await h.session.openProjectTreeFile(h.request)
+    await h.closing.close()
+    assert.match(h.treeResults.at(-1).error, /別の操作中/)
+    assert.equal(h.closing.calls.length, 0)
+    writing.release()
+    await operation
+    assert.equal(h.editor.getText(), '')
+    assert.equal(h.fileWrites.length, 1)
+    assert.equal(h.session.documentLocked.value, false)
+  } finally { confirmation.release('キャンセル'); writing.release(); h.session.dispose() }
+})
+
+test('終了確認中も保存でき、重複終了を抑止し、保存中の追加変更があれば終了を中止する', async () => {
+  const started = deferred()
+  const writing = deferred()
+  const h = createDocumentHarness({ message: async () => '保存して続ける', writeFile: async () => { started.release(); await writing.promise } })
+  const closing = createCloseHarness(h)
+  try {
+    await h.session.initializeRecovery()
+    h.editor.setDocument('保存開始時')
+    const operation = closing.close()
+    await started.promise
+    assert.equal(h.mainCloseInProgress.value, true)
+    assert.equal(h.session.documentLocked.value, true)
+    await closing.close()
+    await h.session.newDocument()
+    assert.equal(h.confirmations.length, 1)
+    // UIはロック済みだが、遅着変更を受けても未保存本文を失わないことを検証する。
+    h.editor.setDocument('遅着した追記')
+    writing.release()
+    await operation
+    assert.equal(h.editor.getText(), '遅着した追記')
+    assert.equal(h.session.dirty.value, true)
+    assert.equal(h.recoveryWrites.at(-1).text, '遅着した追記')
+    assert.ok(!closing.calls.includes('destroy'))
+    assert.equal(h.session.documentLocked.value, false)
+  } finally { writing.release(); h.session.dispose() }
+})
+
+test('確認・保存の遅着応答は破棄済みセッションへ本文や終了結果を適用しない', async () => {
+  for (const stage of ['confirmation', 'saving']) {
+    const started = deferred()
+    const gate = deferred()
+    const h = createDocumentHarness({
+      message: async () => { if (stage === 'confirmation') { started.release(); return gate.promise }; return '保存して続ける' },
+      writeFile: async () => { if (stage === 'saving') { started.release(); await gate.promise } },
+    })
+    try {
+      await h.session.initializeRecovery()
+      h.editor.setDocument('保護する本文')
+      const operation = h.session.newDocument()
+      await started.promise
+      h.session.dispose()
+      gate.release('保存して続ける')
+      await operation
+      assert.equal(h.editor.getText(), '保護する本文')
+      assert.equal(h.session.path.value, null)
+      assert.equal(h.session.dirty.value, true)
+      assert.equal(h.fileWrites.length, stage === 'confirmation' ? 0 : 1)
+      assert.equal(h.recoveryWrites.length, 0)
+    } finally { gate.release('キャンセル'); h.session.dispose() }
+  }
+})
+
+test('競合解決後は切替・終了を再開せず、履歴だけの保存失敗なら原稿保存を成功として扱う', async () => {
+  const h = await createExternalHarness({ message: async () => '保存して続ける' })
+  const closing = createCloseHarness(h)
+  try {
+    h.editor.setDocument('現在の原稿')
+    h.diskFiles.set('C:/原稿.txt', new TextEncoder().encode('外部の原稿'))
+    await closing.close()
+    await h.session.overwriteExternalFile()
+    assert.equal(h.session.dirty.value, false)
+    assert.equal(h.editor.getText(), '現在の原稿')
+    assert.ok(!closing.calls.includes('destroy'))
+    await closing.close()
+    assert.ok(closing.calls.includes('destroy'))
+  } finally { h.session.dispose() }
+  const historyFailure = createDocumentHarness({ message: async () => '保存して続ける', onFileAccessed: async () => { throw new Error('履歴DB失敗') } })
+  try {
+    await historyFailure.session.initializeRecovery()
+    historyFailure.editor.setDocument('保存する本文')
+    await historyFailure.session.newDocument()
+    assert.equal(historyFailure.editor.getText(), '')
+    assert.equal(historyFailure.fileWrites.length, 1)
+    assert.match(historyFailure.errors[0], /履歴DB失敗/)
+  } finally { historyFailure.session.dispose() }
 })

@@ -184,7 +184,7 @@ const {
   documentLocked,
   displayName,
   initializeRecovery,
-  confirmDiscard,
+  confirmDocumentTransition,
   newDocument,
   openDocument,
   openProjectTreeFile,
@@ -440,7 +440,7 @@ async function handleCloseRequested(): Promise<void> {
   documentLocked.value = true
   let destroyed = false
   try {
-    if (dirty.value && !(await confirmDiscard())) return
+    if (!(await confirmDocumentTransition())) return
     await settingsController.flush()
     await flushProjectTreePreferences()
     flushDocumentSession()

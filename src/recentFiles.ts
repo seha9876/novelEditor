@@ -2,11 +2,16 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { EditorPosition } from './editorNavigation'
 
-export type RecentFile = { id: number; path: string; position?: EditorPosition | null }
+export type RecentFile = { id: number; path: string; position?: EditorPosition | null; pinned: boolean }
 
-/** 保存済みの最新20件を新しい順で取得する。 */
+/** ピン留めを先頭にまとめ、通常履歴の最新20件とともに利用順で取得する。 */
 export function listRecentFiles(): Promise<RecentFile[]> {
   return invoke('recent_files_list')
+}
+
+/** 指定履歴のピン留めを変更し、DBで確定した並び順の一覧を取得する。 */
+export function setRecentFilePinned(id: number, pinned: boolean): Promise<RecentFile[]> {
+  return invoke('recent_file_set_pinned', { id, pinned })
 }
 
 /** 読込・保存に成功したファイルを記録し、同じ履歴IDと前回の位置を返す。 */
@@ -24,7 +29,7 @@ export function removeRecentFile(id: number): Promise<void> {
   return invoke('recent_files_remove', { id })
 }
 
-/** 確認済みの全履歴消去をメイン側から要求する。 */
+/** 確認済みの通常履歴の消去を要求する。ピン留めは保持する。 */
 export function clearRecentFiles(): Promise<void> {
   return invoke('recent_files_clear')
 }

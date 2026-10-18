@@ -7,6 +7,8 @@ export type CommandId =
   | 'document.gitHistory'
   | 'document.save'
   | 'document.saveAs'
+  | 'edit.undo'
+  | 'edit.redo'
   | 'edit.find'
   | 'edit.replace'
   | 'edit.goToLine'
@@ -58,6 +60,8 @@ export const appCommandDefinitions: readonly AppCommandDefinition[] = [
   { id: 'document.recentFiles', label: '最近開いたファイル', icon: 'mdi-history', toolbarEligible: true },
   { id: 'document.save', label: '保存', icon: 'mdi-content-save-outline', shortcut: 'Ctrl+S', toolbarEligible: true },
   { id: 'document.saveAs', label: '名前を付けて保存', icon: 'mdi-content-save-edit-outline', shortcut: 'Ctrl+Shift+S', toolbarEligible: true },
+  { id: 'edit.undo', label: '元に戻す', icon: 'mdi-undo', shortcut: 'Ctrl+Z', toolbarEligible: true },
+  { id: 'edit.redo', label: 'やり直す', icon: 'mdi-redo', shortcut: 'Ctrl+Y', toolbarEligible: true },
   { id: 'edit.find', label: '検索', icon: 'mdi-magnify', shortcut: 'Ctrl+F', toolbarEligible: true },
   { id: 'edit.replace', label: '置換', icon: 'mdi-find-replace', shortcut: 'Ctrl+H', toolbarEligible: true },
   { id: 'edit.goToLine', label: '行へ移動', icon: 'mdi-format-list-numbered', shortcut: 'Ctrl+G', toolbarEligible: true },

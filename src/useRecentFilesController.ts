@@ -1,7 +1,7 @@
 /** 最近開いたファイルの一覧・操作・遅着結果の破棄を管理する。 */
 import { ref, type Ref } from 'vue'
 import { ask } from '@tauri-apps/plugin-dialog'
-import { clearRecentFiles, listRecentFiles, removeRecentFile, type RecentFile } from './recentFiles'
+import { clearRecentFiles, listRecentFiles, removeRecentFile, setRecentFilePinned, type RecentFile } from './recentFiles'
 
 type RecentFilesOptions = {
   disabled: Readonly<Ref<boolean>>
@@ -67,25 +67,44 @@ export function useRecentFilesController(options: RecentFilesOptions) {
     }
   }
 
-  /** 履歴だけを削除し、全消去の場合は先に確認する。失敗時は画面の一覧を変更しない。 */
+  /** 本文を開かずにピン留めを保存し、並び順が変わっても操作した行の選択を維持する。 */
+  async function togglePinned(id: number): Promise<void> {
+    if (disposed || !isOpen.value || pending.value || options.disabled.value) return
+    const entry = entries.value.find(item => item.id === id)
+    if (!entry) return
+    selectedId.value = id
+    pending.value = true
+    error.value = ''
+    try {
+      const updated = await setRecentFilePinned(id, !entry.pinned)
+      if (!disposed) entries.value = updated
+    } catch (failure) {
+      if (!disposed) error.value = String(failure)
+    } finally {
+      if (!disposed) pending.value = false
+    }
+  }
+
+  /** 個別削除はピン留めも消し、一括消去は確認後に通常履歴だけを消す。失敗時は一覧を保つ。 */
   async function remove(id: number | null): Promise<void> {
     if (disposed || !isOpen.value || pending.value || options.disabled.value) return
     if (id !== null && !entries.value.some((entry) => entry.id === id)) return
+    if (id === null && !entries.value.some(entry => !entry.pinned)) return
     pending.value = true
     error.value = ''
     try {
       if (id === null) {
-        const confirmed = await ask('ファイル履歴をすべて消去しますか？ 実ファイルは削除されません。', {
+        const confirmed = await ask('ピン留め以外の履歴を消去しますか？ ピン留めした履歴と実ファイルは残ります。', {
           title: '最近開いたファイル', kind: 'warning', okLabel: '履歴を消去', cancelLabel: 'キャンセル',
         })
-        if (disposed || !confirmed) return
+        if (disposed || options.disabled.value || !confirmed) return
         await clearRecentFiles()
       } else {
         await removeRecentFile(id)
       }
       if (disposed) return
       const index = entries.value.findIndex((entry) => entry.id === id)
-      entries.value = id === null ? [] : entries.value.filter((entry) => entry.id !== id)
+      entries.value = entries.value.filter((entry) => id === null ? entry.pinned : entry.id !== id)
       if (!entries.value.some((entry) => entry.id === selectedId.value)) {
         selectedId.value = entries.value[Math.min(Math.max(0, index), entries.value.length - 1)]?.id ?? null
       }
@@ -103,5 +122,5 @@ export function useRecentFilesController(options: RecentFilesOptions) {
     pending.value = false
   }
 
-  return { isOpen, entries, selectedId, pending, error, open, close, moveSelection, openSelected, remove, dispose }
+  return { isOpen, entries, selectedId, pending, error, open, close, moveSelection, openSelected, togglePinned, remove, dispose }
 }

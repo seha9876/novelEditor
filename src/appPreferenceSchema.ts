@@ -72,6 +72,9 @@ export type InterfaceBarSizes = {
 const defaultInterfaceBarSizes: InterfaceBarSizes = { menu: 'medium', toolbar: 'medium', status: 'medium' }
 const defaultProjectTreeWidth = 280
 const defaultToolbarItems: ToolbarItem[] = [
+  { type: 'command', commandId: 'edit.undo' },
+  { type: 'command', commandId: 'edit.redo' },
+  { type: 'separator', id: 'separator-history' },
   { type: 'command', commandId: 'wrap.window' },
   { type: 'command', commandId: 'wrap.columns' },
   { type: 'command', commandId: 'wrap.none' },

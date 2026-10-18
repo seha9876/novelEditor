@@ -177,6 +177,7 @@ test('本文書式コントロールをツールバーへ一度ずつ登録で�
   ]
   const defaults = preferences.createDefaultToolbarItems()
   assert.deepEqual(defaults.map((item) => item.commandId ?? item.id), [
+    'edit.undo', 'edit.redo', 'separator-history',
     'wrap.window', 'wrap.columns', 'wrap.none', 'separator-1', 'settings.open',
   ])
   assert.deepEqual(

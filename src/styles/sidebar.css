@@ -24,6 +24,7 @@
 .sidebar-result mark { background: var(--app-matchBackground); color: var(--app-matchText); }
 .sidebar-preview pre { max-height: 280px; overflow: auto; padding: 8px; white-space: pre-wrap; font: inherit; background: var(--app-editorBackground); color: var(--app-editorText); }
 .outline-row { display: flex; align-items: flex-start; }
+.outline-matched-title { font-weight: 600; }
 .outline-expander { flex: 0 0 20px; width: 20px; height: 36px; background: transparent; color: inherit; border: 0; cursor: pointer; }
 .sidebar-panel-content .git-feedback { font-size: .8125rem; }
 .project-navigation.is-collapsed .project-tree-resize-handle { width: 4px; right: -4px; }

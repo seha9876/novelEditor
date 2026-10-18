@@ -13,13 +13,14 @@ function createWindowHarness(emitTo) {
   const { ref, computed, nextTick } = require('vue')
   const { createSearchConditions, createSearchScopeStatus } = loadSourceModule('src/searchSession.ts')
   const harness = new Function('ref', 'computed', 'nextTick', 'emitTo', 'window', 'createSearchConditions', 'SEARCH_COMMAND_EVENT', `${compiled}
-    return { canRun, pending, scopeDisabled, errorMessage, sendScope, sendChange, receiveSnapshot, wait: () => sendQueue }`)(
+    return { canRun, pending, scopeDisabled, errorMessage, sendScope, sendChange, receiveSnapshot, selectHistory, mutateHistory, conditions, composing, searchField, wait: () => sendQueue }`)(
     ref, computed, nextTick, emitTo, { location: { search: '?session=test' } }, createSearchConditions, 'search-command',
   )
   const initial = {
     sessionId: 'test', conditions: { ...createSearchConditions(), search: '星', replace: '月' },
     scope: { ...createSearchScopeStatus(), canCapture: true }, status: 'found', locked: false,
     documentRevision: 1, acknowledgedSequence: 0, revision: 1, focus: { field: 'search', revision: 0 }, error: '',
+    history: { entries: [], busy: false, error: '' },
   }
   harness.receiveSnapshot(initial)
   return { ...harness, initial }
@@ -68,4 +69,24 @@ test('範囲指定の送信失敗後は新しい連番で再試行でき、古�
   harness.sendChange('replaceAll')
   await harness.wait()
   assert.equal(commands.length, 2)
+})
+
+test('履歴選択は条件変更だけを送り、フォーカスを戻し、遅い通知で条件を巻き戻さない', async () => {
+  const commands = [], focus = []
+  const h = createWindowHarness(async (_label, _event, command) => commands.push(command))
+  await require('vue').nextTick()
+  h.searchField.value = { querySelector: () => ({ focus: () => focus.push(true), select() {} }) }
+  const selected = { search: '(星)\n月', replace: '$1', regexp: true, caseSensitive: true }
+  h.selectHistory(selected); await h.wait()
+  assert.deepEqual(commands.map(c => c.type), ['change'])
+  assert.deepEqual(commands[0].conditions, selected)
+  assert.equal(commands[0].action, undefined)
+  assert.equal(focus.length, 1)
+  h.receiveSnapshot({ ...h.initial, revision: 2, acknowledgedSequence: 0 })
+  assert.deepEqual(h.conditions.value, selected)
+  h.mutateHistory({ type: 'clear' }); await h.wait()
+  assert.equal(commands[1].sequence, 2)
+  assert.deepEqual(commands[1].conditions, selected)
+  h.composing.value = true; h.sendChange('replaceAll'); h.selectHistory(h.initial.conditions); h.mutateHistory({ type: 'clear' })
+  await h.wait(); assert.equal(commands.length, 2)
 })

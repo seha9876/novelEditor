@@ -80,7 +80,7 @@ function searchHarness(t, extra = {}) {
     '@tauri-apps/plugin-fs': { stat: async () => ({ size: extra.size ?? 10 }) },
     './textFile': { loadTextFile: extra.load ?? (async () => ({ text: '保存した再会\r\n', originalBytes: new TextEncoder().encode('保存した再会\r\n') })) },
   })
-  c = module.useSidebarSearch({ active, revision, path, conditions, snapshot, disabled: ref(false), editor: ref({ getDocumentSnapshot: () => document, revealRange: target => { navigated.push(target); return target.revision === document.revision }, setSidebarMatches: (rev, ranges) => highlighted.push([rev, ranges]) }), openFile: async request => {
+  c = module.useSidebarSearch({ active, revision, path, conditions, snapshot, disabled: ref(false), prepareHistoryRecord: extra.prepareHistoryRecord, editor: ref({ getDocumentSnapshot: () => document, revealRange: target => { navigated.push(target); return target.revision === document.revision }, setSidebarMatches: (rev, ranges) => highlighted.push([rev, ranges]) }), openFile: async request => {
     opened.push(request); c.receiveOpenResult({ requestId: request.requestId, nodeId: request.nodeId, outcome: extra.outcome ?? 'cancelled' })
   } })
   t.after(c.dispose)
@@ -97,6 +97,35 @@ test('プロジェクト検索は複数登録をまとめ、現在原稿は未�
   assert.equal(h.navigated.length, 1, '未保存確認の取消では移動しない')
   h.document.revision++; h.revision.value++; await nextTick()
   assert.equal(h.c.stale.value, true); await h.c.openMatch(0); assert.equal(h.navigated.length, 1)
+})
+
+test('自動検索では履歴を増やさず、明示検索と結果への移動で元の条件を記録する', async t => {
+  const recorded = []
+  const h = searchHarness(t, { prepareHistoryRecord: conditions => { const captured = { ...conditions }; return () => recorded.push(captured) } })
+  await h.c.search(false)
+  assert.equal(recorded.length, 0)
+  await h.c.openMatch(0)
+  assert.deepEqual(recorded, [{ search: '再会', replace: '', caseSensitive: false, regexp: false }])
+  await h.c.search()
+  assert.equal(recorded.length, 2)
+  h.conditions.value = { ...h.conditions.value, search: '該当なし' }; await nextTick()
+  await h.c.search()
+  assert.equal(recorded.at(-1).search, '該当なし')
+  h.conditions.value = { ...h.conditions.value, search: '[', regexp: true }; await nextTick()
+  await h.c.search()
+  assert.equal(recorded.length, 3, '不正な正規表現は記録しない')
+  h.conditions.value.search = ''; await nextTick(); await h.c.search()
+  assert.equal(recorded.length, 3)
+})
+
+test('文書切替取消や古い結果の選択では履歴を追加しない', async t => {
+  const recorded = []
+  const h = searchHarness(t, { prepareHistoryRecord: conditions => () => recorded.push({ ...conditions }) })
+  h.c.scope.value = 'project'; await nextTick(); await h.c.search(false)
+  await h.c.openMatch(1)
+  assert.equal(recorded.length, 0)
+  h.document.revision++; h.revision.value++; await nextTick(); await h.c.openMatch(0)
+  assert.equal(recorded.length, 0)
 })
 
 test('読込失敗・サイズ上限は部分失敗として表示し、検索不可と該当なしを混同しない', async t => {

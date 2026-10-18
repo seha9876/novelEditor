@@ -91,11 +91,13 @@ export function updateEditorSearch(view: EditorView, conditions: SearchCondition
   if (!query.eq(getSearchQuery(view.state))) view.dispatch({ effects: setSearchQuery.of(query) })
 }
 
-/** 有効な条件だけで標準コマンドを実行する。ロック時は検索による選択移動も抑制する。 */
-export function runEditorSearchAction(view: EditorView, action: SearchAction): void {
-  if (view.state.readOnly || !getSearchQuery(view.state).valid) return
+/** 有効な操作を受理したか返す。ロック・IME・空の範囲では選択移動も記録も抑制する。 */
+export function runEditorSearchAction(view: EditorView, action: SearchAction): boolean {
+  const query = getSearchQuery(view.state)
+  if (view.composing || view.state.readOnly || !query.search || !query.valid || getEditorSearchScope(view).empty) return false
   const commands = { next: findNext, previous: findPrevious, replace: replaceNext, replaceAll }
   commands[action](view)
+  return true
 }
 
 /** 最初の一致だけを調べ、長文での不要な全件走査を避けて結果を返す。 */

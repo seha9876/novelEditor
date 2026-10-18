@@ -4,7 +4,7 @@ import { assert, deferred, loadSourceModule, require, test } from './test-suppor
 /** 実際のVue状態を使い、永続化と文書読込の境界だけを制御する。 */
 function createHarness(overrides = {}) {
   const calls = []
-  const entries = [{ id: 1, path: 'C:/作品一/原稿.txt' }, { id: 2, path: 'D:/作品二/原稿.txt' }]
+  const entries = [{ id: 1, path: 'C:/作品一/原稿.txt', pinned: false }, { id: 2, path: 'D:/作品二/原稿.txt', pinned: false }]
   const { ref } = require('vue')
   const disabled = ref(false)
   const { useRecentFilesController } = loadSourceModule('src/useRecentFilesController.ts', {
@@ -169,6 +169,100 @@ test('通常・拡張・UNCパスを同一視し、異なる保存場所を区�
   assert.ok(sameRecentFilePath('C:/原稿/ABC.txt', String.raw`\\?\C:\原稿\abc.txt`))
   assert.ok(sameRecentFilePath(String.raw`\\server\share\原稿.txt`, String.raw`\\?\UNC\SERVER\share\原稿.txt`))
   assert.equal(sameRecentFilePath('C:/原稿.txt', 'D:/原稿.txt'), false)
+})
+
+test('ピン留めは本文を開かず、確定した並び順と対象行の選択を反映する', async () => {
+  let opened = false
+  const updated = [{ id: 2, path: 'D:/作品二/原稿.txt', pinned: true, position: { line: 8, column: 2 } },
+    { id: 1, path: 'C:/作品一/原稿.txt', pinned: false }]
+  const { controller: c, calls } = createHarness({
+    openFile: async () => { opened = true; return true },
+    invoke: async command => command === 'recent_file_set_pinned' ? updated : [...updated].reverse().map(e => ({ ...e, pinned: false })),
+  })
+  await c.open()
+  await c.togglePinned(999)
+  await c.togglePinned(2)
+  assert.equal(opened, false)
+  assert.equal(c.isOpen.value, true)
+  assert.equal(c.selectedId.value, 2)
+  assert.deepEqual(c.entries.value, updated)
+  assert.deepEqual(calls[1], { command: 'recent_file_set_pinned', args: { id: 2, pinned: true } })
+  await c.togglePinned(2)
+  assert.deepEqual(calls[2].args, { id: 2, pinned: false })
+  c.dispose()
+})
+
+test('ピン留めの保存失敗・ロック・処理中の連打・破棄後の遅着を安全に扱う', async () => {
+  const gate = deferred()
+  const { controller: c, calls, entries, disabled } = createHarness({ invoke: async command => {
+    if (command === 'recent_files_list') return entries
+    return gate.promise
+  } })
+  await c.open()
+  disabled.value = true
+  await c.togglePinned(1)
+  assert.equal(calls.length, 1)
+  disabled.value = false
+  const changing = c.togglePinned(2)
+  await c.togglePinned(1)
+  await c.remove(2)
+  await c.openSelected(1)
+  c.close()
+  assert.equal(calls.length, 2)
+  assert.equal(c.isOpen.value, true)
+  c.dispose()
+  gate.release([{ ...entries[1], pinned: true }, entries[0]])
+  await changing
+  assert.deepEqual(c.entries.value, entries)
+  const { controller: failing, entries: original } = createHarness({ invoke: async command => {
+    if (command === 'recent_files_list') return original
+    throw new Error('ピン留め保存失敗')
+  } })
+  await failing.open()
+  await failing.togglePinned(2)
+  assert.deepEqual(failing.entries.value, original)
+  assert.equal(failing.selectedId.value, 2)
+  assert.match(failing.error.value, /ピン留め保存失敗/)
+  assert.equal(failing.pending.value, false)
+  failing.dispose()
+})
+
+test('一括消去はピン留めと選択を残し、通常履歴がなければ確認も要求しない', async () => {
+  let confirmed = false
+  const confirmations = []
+  const pinned = { id: 1, path: 'C:/固定.txt', pinned: true }
+  const normal = { id: 2, path: 'C:/通常.txt', pinned: false }
+  const { controller: c, calls } = createHarness({
+    invoke: async command => command === 'recent_files_list' ? [pinned, normal] : undefined,
+    ask: async text => { confirmations.push(text); return confirmed },
+  })
+  await c.open()
+  await c.remove(null)
+  assert.deepEqual(c.entries.value, [pinned, normal])
+  assert.match(confirmations[0], /ピン留めした履歴と実ファイルは残ります/)
+  confirmed = true
+  await c.remove(null)
+  assert.deepEqual(c.entries.value, [pinned])
+  assert.equal(c.selectedId.value, 1)
+  await c.remove(null)
+  assert.equal(confirmations.length, 2)
+  assert.deepEqual(calls.map(call => call.command), ['recent_files_list', 'recent_files_clear'])
+  await c.remove(1)
+  assert.deepEqual(c.entries.value, [])
+  c.dispose()
+})
+
+test('一括消去の確認中にロックされた場合は削除を送らない', async () => {
+  const gate = deferred()
+  const { controller: c, calls, disabled } = createHarness({ ask: () => gate.promise })
+  await c.open()
+  const clearing = c.remove(null)
+  disabled.value = true
+  gate.release(true)
+  await clearing
+  assert.equal(calls.length, 1)
+  assert.equal(c.entries.value.length, 2)
+  c.dispose()
 })
 
 test('履歴コマンドはツールバーに追加でき、既定のショートカットを持たない', () => {

@@ -4,9 +4,11 @@ import { useChildAppearance } from './useChildAppearance'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { emitTo, listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import SearchHistoryMenu from './SearchHistoryMenu.vue'
+import type { SearchHistoryAction } from './searchHistory'
 import {
   createSearchConditions, SEARCH_COMMAND_EVENT, SEARCH_STATE_EVENT,
-  type SearchAction, type SearchCommand, type SearchField, type SearchSnapshot, type SearchScopeAction,
+  type SearchAction, type SearchCommand, type SearchField, type SearchSnapshot, type SearchScopeAction, type SearchConditions,
 } from './searchSession'
 
 useChildAppearance()
@@ -17,6 +19,7 @@ const searchField = ref<HTMLElement | null>(null)
 const replaceField = ref<HTMLElement | null>(null)
 const errorMessage = ref('')
 const closing = ref(false)
+const composing = ref(false)
 const sequence = ref(0)
 const scopePendingSequence = ref<number | null>(null)
 const failedSequence = ref<number | null>(null)
@@ -29,7 +32,7 @@ let unlistenClose: (() => void) | undefined
 const pending = computed(() => !snapshot.value ||
   snapshot.value.acknowledgedSequence < sequence.value && failedSequence.value !== sequence.value)
 const scopePending = computed(() => scopePendingSequence.value !== null)
-const canRun = computed(() => !!snapshot.value && !snapshot.value.locked && !closing.value &&
+const canRun = computed(() => !!snapshot.value && !snapshot.value.locked && !closing.value && !composing.value &&
   !scopePending.value &&
   !(snapshot.value.scope.enabled && snapshot.value.scope.empty) &&
   !!conditions.value.search && (pending.value || snapshot.value.status === 'found'))
@@ -74,6 +77,21 @@ function sendChange(action?: SearchAction): void {
     conditions: { ...conditions.value },
     action,
   })
+}
+
+/** 履歴から条件だけを復元し、置換や位置移動を実行せず検索欄へ戻す。 */
+function selectHistory(selected: SearchConditions): void {
+  if (!snapshot.value || snapshot.value.locked || closing.value || composing.value) return
+  conditions.value = { ...selected }
+  sendChange()
+  void focusField('search')
+}
+
+/** 履歴の削除も通常入力と同じ順序でメインへ送り、古い窓からの要求を区別する。 */
+function mutateHistory(historyAction: SearchHistoryAction): void {
+  if (!snapshot.value || snapshot.value.locked || closing.value || composing.value) return
+  void enqueueCommand({ type: 'history', historyAction, sessionId, sequence: ++sequence.value,
+    documentRevision: snapshot.value.documentRevision, conditions: { ...conditions.value } })
 }
 
 /** 本文側で現在の選択を取り込み、古い文書に対する範囲変更は世代検証で拒否する。 */
@@ -165,8 +183,9 @@ onBeforeUnmount(() => {
 <template>
   <VApp class="search-shell">
     <VMain>
-      <div class="search-content" role="search" aria-label="本文の検索と置換">
+      <div class="search-content" role="search" aria-label="本文の検索と置換" @compositionstart="composing = true" @compositionend="composing = false">
         <template v-if="snapshot">
+          <SearchHistoryMenu :state="snapshot.history" :disabled="snapshot.locked || closing || composing" @select="selectHistory" @mutate="mutateHistory" />
           <div ref="searchField">
             <VTextarea v-model="conditions.search" label="検索" aria-label="検索" rows="2" density="compact" variant="outlined" hide-details :spellcheck="false" :disabled="closing" :error="!pending && snapshot.status === 'invalid'" @update:model-value="sendChange()" />
           </div>

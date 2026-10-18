@@ -265,6 +265,20 @@ test('終了は位置の書込完了を待ち、位置保存だけの失敗で�
   } finally { gate.release(); h.session.dispose() }
 })
 
+test('アプリ終了は検索履歴の保存が完了するまで窓を破棄しない', async () => {
+  const gate = deferred(), started = deferred()
+  const h = createPositionHarness()
+  h.searchHistoryFlush = async () => { started.release(); await gate.promise }
+  try {
+    await h.session.initializeRecovery()
+    const closing = createCloseHarness(h), operation = closing.close()
+    await started.promise
+    assert.ok(!closing.calls.includes('destroy'))
+    gate.release(); await operation
+    assert.ok(closing.calls.includes('destroy'))
+  } finally { gate.release(); h.session.dispose() }
+})
+
 test('履歴取得中に破棄されたセッションへ本文と編集位置の遅着結果を適用しない', async () => {
   const gate = deferred(), started = deferred()
   const h = createPositionHarness({ onFileAccessed: async () => { started.release(); await gate.promise } })
@@ -1023,6 +1037,7 @@ function createCloseHarness(harness) {
     flushDocumentSession: session.flush,
     clearRecoverySnapshot: async () => { calls.push('clear'); await session.clearRecoverySnapshot() },
     closeSearchWindow: async () => calls.push('search-close'),
+    searchController: { flushHistory: async () => { calls.push('search-history'); await harness.searchHistoryFlush?.() } },
     closeProjectTreeWindowForExit: async () => calls.push('tree-close'),
     appWindow: { destroy: async () => calls.push('destroy') },
     restoreAfterCloseFailure: () => calls.push('restore'),
@@ -1068,7 +1083,7 @@ for (const route of ['new', 'open', 'recent', 'tree', 'quick', 'search', 'close'
           assert.equal(h.recoveryWrites.length, writesBefore)
           assert.ok(!h.closing.calls.includes('destroy'))
         } else if (route === 'close') {
-          assert.deepEqual(h.closing.calls, ['publish', 'settings', 'preferences', 'clear', 'search-close', 'tree-close', 'destroy'])
+          assert.deepEqual(h.closing.calls, ['publish', 'settings', 'preferences', 'clear', 'search-close', 'search-history', 'tree-close', 'destroy'])
         } else {
           assert.equal(h.editor.getText(), route === 'new' ? '' : '保存済み本文')
           assert.equal(h.session.dirty.value, false)
@@ -1142,6 +1157,44 @@ for (const failure of ['save-cancel', 'write-error', 'changed', 'missing', 'insp
     })
   }
 }
+
+test('本文の履歴操作は保存基準の未保存判定に追従し、通常保存で履歴を失わない', async () => {
+  const { EditorState, Transaction } = require('@codemirror/state')
+  const { history } = require('@codemirror/commands')
+  const { runEditorHistoryAction, getEditorHistoryState } = loadSourceModule('src/editorHistory.ts')
+  const h = createDocumentHarness()
+  const view = {
+    state: EditorState.create({ extensions: [history()] }), composing: false, focus() {},
+    dispatch(transaction) {
+      view.state = transaction instanceof Transaction ? transaction.state : view.state.update(transaction).state
+      h.session.onChange(view.state.doc.toString())
+    },
+  }
+  h.editor.getText = () => view.state.doc.toString()
+  h.editor.setDocument = text => {
+    view.state = EditorState.create({ doc: text, extensions: [history()] })
+    h.session.onChange(text)
+  }
+  try {
+    await h.session.initializeRecovery()
+    await h.session.openDocument()
+    const original = view.state.doc.toString()
+    view.dispatch({ changes: { from: 0, insert: '追記' } })
+    assert.equal(h.session.dirty.value, true)
+    runEditorHistoryAction(view, 'undo')
+    assert.equal(h.session.dirty.value, false)
+    runEditorHistoryAction(view, 'redo')
+    assert.equal(h.session.dirty.value, true)
+    await h.session.saveDocument()
+    assert.equal(h.session.dirty.value, false)
+    assert.equal(getEditorHistoryState(view.state).canUndo, true)
+    runEditorHistoryAction(view, 'undo')
+    assert.equal(view.state.doc.toString(), original)
+    assert.equal(h.session.dirty.value, true)
+    runEditorHistoryAction(view, 'redo')
+    assert.equal(h.session.dirty.value, false)
+  } finally { h.session.dispose() }
+})
 
 for (const response of ['Cancel', 'キャンセル', '予期しない応答']) {
   test(`確認結果「${response}」は本文・選択・Undo履歴を変えない`, async () => {

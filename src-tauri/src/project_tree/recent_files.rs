@@ -16,6 +16,7 @@ pub struct RecentFile {
     id: i64,
     path: String,
     position: Option<EditorPosition>,
+    pinned: bool,
 }
 
 /// 折り返しに依存しない、1始まりの論理行と書記素列。
@@ -38,6 +39,7 @@ fn read_recent_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecentFile> {
             }),
             None => None,
         },
+        pinned: row.get(4)?,
     })
 }
 
@@ -94,13 +96,14 @@ fn path_key(path: &str) -> String {
     }
 }
 
-/// 保存された順序で最新20件を返す。表示のために参照先ファイルへはアクセスしない。
+/// ピン留めを先頭にまとめ、各グループを利用順で返す。参照先ファイルへはアクセスしない。
 fn list(connection: &Connection) -> Result<Vec<RecentFile>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT f.id, f.path, p.line, p.column FROM recent_files f
+            "SELECT f.id, f.path, p.line, p.column,
+                  EXISTS(SELECT 1 FROM recent_file_pins WHERE recent_file_id = f.id) AS pinned FROM recent_files f
                   LEFT JOIN recent_file_positions p ON p.recent_file_id = f.id
-                  ORDER BY f.last_used DESC, f.id DESC LIMIT 20",
+                  ORDER BY pinned DESC, f.last_used DESC, f.id DESC",
         )
         .map_err(|error| database_error("ファイル履歴を取得できません", error))?;
     let rows = statement
@@ -110,7 +113,22 @@ fn list(connection: &Connection) -> Result<Vec<RecentFile>, String> {
         .map_err(|error| database_error("ファイル履歴を読み取れません", error))
 }
 
-/// 記録と件数制限を一つのトランザクションにし、同じファイルのIDを保って先頭へ移す。
+/// 通常履歴だけを最新20件に制限し、ピン留めと対応する編集位置を保持する。
+fn prune_unpinned(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute(
+            "DELETE FROM recent_files WHERE id IN (
+           SELECT f.id FROM recent_files f
+           WHERE NOT EXISTS(SELECT 1 FROM recent_file_pins WHERE recent_file_id = f.id)
+           ORDER BY f.last_used DESC, f.id DESC LIMIT -1 OFFSET 20
+         )",
+            [],
+        )
+        .map_err(|error| database_error("古い履歴を整理できません", error))?;
+    Ok(())
+}
+
+/// 記録と通常履歴の件数制限を一括で行い、同じファイルのID・位置・ピン留めを保つ。
 fn record(connection: &mut Connection, path: &str) -> Result<RecentFile, String> {
     let transaction = connection
         .transaction()
@@ -123,11 +141,11 @@ fn record(connection: &mut Connection, path: &str) -> Result<RecentFile, String>
             params![path, path_key(path)],
         )
         .map_err(|error| database_error("ファイル履歴を記録できません", error))?;
-    transaction.execute("DELETE FROM recent_files WHERE id NOT IN (SELECT id FROM recent_files ORDER BY last_used DESC, id DESC LIMIT 20)", [])
-        .map_err(|error| database_error("古い履歴を整理できません", error))?;
+    prune_unpinned(&transaction)?;
     let entry = transaction
         .query_row(
-            "SELECT f.id, f.path, p.line, p.column FROM recent_files f
+            "SELECT f.id, f.path, p.line, p.column,
+         EXISTS(SELECT 1 FROM recent_file_pins WHERE recent_file_id = f.id) FROM recent_files f
          LEFT JOIN recent_file_positions p ON p.recent_file_id = f.id WHERE f.path_key = ?1",
             [path_key(path)],
             read_recent_file,
@@ -137,6 +155,53 @@ fn record(connection: &mut Connection, path: &str) -> Result<RecentFile, String>
         .commit()
         .map_err(|error| database_error("ファイル履歴を保存できません", error))?;
     Ok(entry)
+}
+
+/// ピン留めを保存する。解除は通常履歴の先頭へ戻し、一覧の取得まで同じトランザクションで行う。
+fn set_pinned(
+    connection: &mut Connection,
+    id: i64,
+    pinned: bool,
+) -> Result<Vec<RecentFile>, String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| database_error("ピン留めの更新を開始できません", error))?;
+    let current: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM recent_file_pins WHERE recent_file_id = f.id)
+         FROM recent_files f WHERE f.id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| database_error("ファイル履歴を確認できません", error))?
+        .ok_or("この履歴は既に削除されています")?;
+    if current != pinned {
+        if pinned {
+            transaction
+                .execute(
+                    "INSERT INTO recent_file_pins(recent_file_id) VALUES (?1)",
+                    [id],
+                )
+                .map_err(|error| database_error("ピン留めできません", error))?;
+        } else {
+            transaction
+                .execute(
+                    "DELETE FROM recent_file_pins WHERE recent_file_id = ?1",
+                    [id],
+                )
+                .map_err(|error| database_error("ピン留めを解除できません", error))?;
+            transaction.execute(
+                "UPDATE recent_files SET last_used = (SELECT COALESCE(MAX(last_used), 0) + 1 FROM recent_files) WHERE id = ?1", [id],
+            ).map_err(|error| database_error("履歴の順序を更新できません", error))?;
+            prune_unpinned(&transaction)?;
+        }
+    }
+    let entries = list(&transaction)?;
+    transaction
+        .commit()
+        .map_err(|error| database_error("ピン留めを保存できません", error))?;
+    Ok(entries)
 }
 
 /// 既存履歴だけの位置を更新する。削除済みIDは無視し、履歴順や実ファイルは変更しない。
@@ -163,12 +228,12 @@ fn update_position(
     Ok(())
 }
 
-/// 指定された履歴だけを削除する。Noneは全消去で、実ファイルは操作しない。
+/// 指定履歴を削除する。Noneはピン留め以外の消去で、実ファイルは操作しない。
 fn remove(connection: &Connection, id: Option<i64>) -> Result<(), String> {
     if let Some(id) = id {
         connection.execute("DELETE FROM recent_files WHERE id = ?1", [id])
     } else {
-        connection.execute("DELETE FROM recent_files", [])
+        connection.execute("DELETE FROM recent_files WHERE id NOT IN (SELECT recent_file_id FROM recent_file_pins)", [])
     }
     .map_err(|error| database_error("ファイル履歴を削除できません", error))?;
     Ok(())
@@ -194,6 +259,19 @@ pub fn recent_files_list(
     require_main(window.label())?;
     let guard = lock_connection(&state)?;
     list(guard.as_ref().expect("checked connection"))
+}
+
+/// メイン窓の一覧にある履歴IDのピン留めを変更し、確定済みの一覧を返す。
+#[tauri::command]
+pub fn recent_file_set_pinned(
+    window: Window,
+    state: State<'_, ProjectTreeState>,
+    id: i64,
+    pinned: bool,
+) -> Result<Vec<RecentFile>, String> {
+    require_main(window.label())?;
+    let mut guard = lock_connection(&state)?;
+    set_pinned(guard.as_mut().expect("checked connection"), id, pinned)
 }
 
 /// 読込・保存に成功した許可済みTXTを履歴へ記録する。
@@ -240,7 +318,7 @@ pub fn recent_files_remove(
     remove(guard.as_ref().expect("checked connection"), Some(id))
 }
 
-/// 利用者が確認した履歴の全消去を行う。
+/// 利用者が確認した通常履歴の消去を行い、ピン留めは保持する。
 #[tauri::command]
 pub fn recent_files_clear(
     window: Window,
@@ -392,6 +470,116 @@ mod tests {
         assert_eq!(stored_path(&connection, oldest.id).unwrap(), oldest.path);
     }
 
+    /// ピン留めを通常20件とは別枠で保持し、再記録・解除でもIDと編集位置を保つ。
+    #[test]
+    fn pins_survive_pruning_and_unpinning_promotes_history() {
+        let mut connection = database();
+        let first = record(&mut connection, "C:/固定一.txt").unwrap();
+        let second = record(&mut connection, "C:/固定二.txt").unwrap();
+        update_position(
+            &connection,
+            first.id,
+            EditorPosition {
+                line: 12,
+                column: 3,
+            },
+        )
+        .unwrap();
+        set_pinned(&mut connection, first.id, true).unwrap();
+        set_pinned(&mut connection, second.id, true).unwrap();
+        for index in 0..25 {
+            record(&mut connection, &format!("C:/通常{index}.txt")).unwrap();
+        }
+        let entries = list(&connection).unwrap();
+        assert_eq!(entries.len(), 22);
+        assert_eq!(entries[0].id, second.id);
+        assert_eq!(entries[1].id, first.id);
+        assert!(entries[..2].iter().all(|entry| entry.pinned));
+        assert_eq!(entries[2].path, "C:/通常24.txt");
+        let recorded = record(&mut connection, &first.path).unwrap();
+        assert_eq!(recorded.id, first.id);
+        assert!(recorded.pinned);
+        assert_eq!(
+            recorded.position,
+            Some(EditorPosition {
+                line: 12,
+                column: 3
+            })
+        );
+        assert_eq!(list(&connection).unwrap()[0].id, first.id);
+        let unpinned = set_pinned(&mut connection, first.id, false).unwrap();
+        assert_eq!(unpinned.len(), 21);
+        assert_eq!(unpinned[0].id, second.id);
+        assert_eq!(unpinned[1].id, first.id);
+        assert!(!unpinned[1].pinned);
+        assert_eq!(unpinned[1].position, recorded.position);
+        assert_eq!(
+            set_pinned(&mut connection, first.id, false).unwrap(),
+            unpinned
+        );
+        assert!(set_pinned(&mut connection, 9999, true).is_err());
+        assert_eq!(list(&connection).unwrap(), unpinned);
+    }
+
+    /// ピン留めに件数上限を設けず、一括消去では保持し、個別削除では位置も連動削除する。
+    #[test]
+    fn clearing_preserves_pins_and_individual_removal_cascades() {
+        let mut connection = database();
+        for index in 0..25 {
+            let entry = record(&mut connection, &format!("C:/固定{index}.txt")).unwrap();
+            set_pinned(&mut connection, entry.id, true).unwrap();
+        }
+        let pinned = list(&connection).unwrap();
+        assert_eq!(pinned.len(), 25);
+        record(&mut connection, "C:/通常.txt").unwrap();
+        remove(&connection, None).unwrap();
+        assert_eq!(list(&connection).unwrap(), pinned);
+        update_position(
+            &connection,
+            pinned[0].id,
+            EditorPosition { line: 4, column: 2 },
+        )
+        .unwrap();
+        remove(&connection, Some(pinned[0].id)).unwrap();
+        assert!(set_pinned(&mut connection, pinned[0].id, true).is_err());
+        assert_eq!(list(&connection).unwrap().len(), 24);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM recent_file_pins", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            24
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM recent_file_positions", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            0
+        );
+    }
+
+    /// 解除後の整理が失敗しても、ピン留め・順序・位置を部分的に変更しない。
+    #[test]
+    fn failed_pin_updates_roll_back() {
+        let mut connection = database();
+        let entry = record(&mut connection, "C:/固定.txt").unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_pin BEFORE INSERT ON recent_file_pins BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
+        assert!(set_pinned(&mut connection, entry.id, true).is_err());
+        assert!(!list(&connection).unwrap()[0].pinned);
+        connection.execute_batch("DROP TRIGGER fail_pin;").unwrap();
+        set_pinned(&mut connection, entry.id, true).unwrap();
+        for index in 0..20 {
+            record(&mut connection, &format!("C:/{index}.txt")).unwrap();
+        }
+        let before = list(&connection).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_prune BEFORE DELETE ON recent_files BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
+        assert!(set_pinned(&mut connection, entry.id, false).is_err());
+        assert_eq!(list(&connection).unwrap(), before);
+    }
+
     /// プロジェクト削除は履歴に影響せず、履歴IDの個別削除と全消去が独立する。
     #[test]
     fn project_deletion_does_not_remove_history() {
@@ -412,6 +600,7 @@ mod tests {
                 id: entries[1].id,
                 path: entries[1].path.clone(),
                 position: None,
+                pinned: false,
             }]
         );
         remove(&connection, None).unwrap();
@@ -480,16 +669,17 @@ mod tests {
         )
         .unwrap();
         record(&mut connection, missing.to_str().unwrap()).unwrap();
+        set_pinned(&mut connection, manuscript_entry.id, true).unwrap();
         let before = list(&connection).unwrap();
         drop(connection);
         let connection = Connection::open(&database_path).unwrap();
         create_schema(&connection).unwrap();
         assert_eq!(list(&connection).unwrap(), before);
-        assert!(
-            resolve_text_path(Path::new(&stored_path(&connection, before[0].id).unwrap())).is_err()
-        );
+        assert!(resolve_text_path(&missing).is_err());
         assert_eq!(list(&connection).unwrap(), before);
         remove(&connection, None).unwrap();
+        assert_eq!(list(&connection).unwrap().len(), 1);
+        remove(&connection, Some(manuscript_entry.id)).unwrap();
         assert_eq!(std::fs::read(&manuscript).unwrap(), b"manuscript");
         drop(connection);
         std::fs::remove_dir_all(directory).unwrap();

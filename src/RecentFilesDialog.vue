@@ -17,6 +17,7 @@ const emit = defineEmits<{
   select: [id: number]
   move: [direction: -1 | 1]
   openFile: [id: number]
+  togglePinned: [id: number]
   remove: [id: number | null]
 }>()
 const content = ref<HTMLElement | null>(null)
@@ -54,7 +55,7 @@ function onKeydown(event: KeyboardEvent): void {
       <div ref="content" @keydown="onKeydown">
         <VCardTitle>最近開いたファイル</VCardTitle>
         <VCardText>
-          <p class="recent-files-help">最新20件を表示します。履歴を削除しても実ファイルは残ります。</p>
+          <p class="recent-files-help">ピン留めした原稿と、通常の履歴を最新20件表示します。履歴を削除しても実ファイルは残ります。</p>
           <VProgressLinear v-if="pending" indeterminate aria-label="履歴を処理中" />
           <VAlert v-if="error" type="error" variant="tonal" class="mb-3" role="alert">{{ error }}</VAlert>
           <p v-if="!pending && !entries.length" role="status">{{ error ? '履歴を表示できません。閉じてからもう一度開いてください。' : '最近開いたファイルはありません。' }}</p>
@@ -65,15 +66,16 @@ function onKeydown(event: KeyboardEvent): void {
                 :data-recent-id="entry.id" :title="entry.path" :disabled="pending || disabled"
                 @focus="emit('select', entry.id)" @click="emit('openFile', entry.id)"
               >
-                <span class="recent-file-name">{{ fileName(entry.path) }}</span>
+                <span class="recent-file-name">{{ fileName(entry.path) }}<span v-if="entry.pinned" class="recent-file-pinned">ピン留め</span></span>
                 <span class="recent-file-path">{{ entry.path }}</span>
               </button>
-              <VBtn icon="mdi-close" size="small" variant="text" :aria-label="`${fileName(entry.path)}を履歴から削除`" title="履歴から削除" :disabled="pending || disabled" @click="emit('remove', entry.id)" />
+              <VBtn :icon="entry.pinned ? 'mdi-pin' : 'mdi-pin-outline'" size="small" variant="text" :aria-pressed="entry.pinned" :aria-label="`${fileName(entry.path)}${entry.pinned ? 'のピン留めを解除' : 'をピン留め'}`" :title="entry.pinned ? 'ピン留めを解除' : 'ピン留め'" :disabled="pending || disabled" @click="emit('togglePinned', entry.id)" />
+              <VBtn icon="mdi-close" size="small" variant="text" :aria-label="`${fileName(entry.path)}${entry.pinned ? 'のピン留めと履歴を削除' : 'を履歴から削除'}`" :title="entry.pinned ? 'ピン留めと履歴を削除' : '履歴から削除'" :disabled="pending || disabled" @click="emit('remove', entry.id)" />
             </li>
           </ul>
         </VCardText>
         <VCardActions>
-          <VBtn :disabled="pending || disabled || !entries.length" @click="emit('remove', null)">履歴をすべて消去</VBtn>
+          <VBtn :disabled="pending || disabled || !entries.some(entry => !entry.pinned)" @click="emit('remove', null)">ピン留め以外の履歴を消去</VBtn>
           <VSpacer />
           <VBtn data-recent-close :disabled="pending" @click="emit('close')">閉じる</VBtn>
         </VCardActions>
@@ -92,5 +94,6 @@ function onKeydown(event: KeyboardEvent): void {
 .recent-file-open:disabled { opacity: 0.6; }
 .recent-file-name, .recent-file-path { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .recent-file-name { font-size: 0.875rem; }
+.recent-file-pinned { margin-left: 8px; font-size: 0.6875rem; color: var(--app-muted); }
 .recent-file-path { font-size: 0.75rem; margin-top: 3px; }
 </style>

@@ -622,6 +622,7 @@ onBeforeUnmount(() => {
       @select="recentFiles.selectedId.value = $event"
       @move="recentFiles.moveSelection"
       @open-file="recentFiles.openSelected"
+      @toggle-pinned="recentFiles.togglePinned"
       @remove="recentFiles.remove"
     />
     <VSnackbar v-model="persistenceNoticeOpen" timeout="9000" location="bottom">

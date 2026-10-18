@@ -127,6 +127,14 @@ pub(crate) fn is_empty_database_file(database_path: &Path) -> Result<bool, Strin
 /// ツリー・履歴・Git管理の形式を読み取り専用で検査し、旧DBの追加テーブル欠損は許容する。
 fn validate_project_tree_schema(connection: &Connection) -> Result<(), String> {
     if connection
+        .table_exists(None, "recent_file_pins")
+        .map_err(|e| e.to_string())?
+    {
+        connection
+            .prepare("SELECT recent_file_id FROM recent_file_pins LIMIT 0")
+            .map_err(|error| database_error("ピン留めテーブルの形式が不正です", error))?;
+    }
+    if connection
         .table_exists(None, "search_history")
         .map_err(|e| e.to_string())?
     {
@@ -202,6 +210,23 @@ fn validate_project_tree_schema(connection: &Connection) -> Result<(), String> {
 /// 外部編集などで生じた参照切れや循環を、DB を修復・変更せずに拒否する。
 fn validate_project_tree_data(connection: &Connection) -> Result<(), String> {
     if connection
+        .table_exists(None, "recent_file_pins")
+        .map_err(|e| e.to_string())?
+    {
+        let invalid: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM recent_file_pins p
+             LEFT JOIN recent_files f ON f.id = p.recent_file_id
+             WHERE f.id IS NULL OR typeof(p.recent_file_id) != 'integer')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| database_error("ピン留めの整合性を確認できません", error))?;
+        if invalid {
+            return Err("ピン留めに参照先のない履歴があります".into());
+        }
+    }
+    if connection
         .table_exists(None, "search_history")
         .map_err(|e| e.to_string())?
     {
@@ -274,7 +299,7 @@ fn validate_project_tree_data(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// 起動時に既存DBを検証し、旧DBにはファイル・検索履歴、編集位置、Git管理テーブルを追加する。
+/// 起動時に既存DBを検証し、旧DBには履歴・ピン留め・編集位置・Git管理テーブルを追加する。
 pub(super) fn initialize_database(database_path: PathBuf) -> Result<Connection, String> {
     let connection = Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(|error| format!("プロジェクトツリー DB を開けません: {error}"))?;
@@ -335,6 +360,9 @@ pub(super) fn create_schema(connection: &Connection) -> rusqlite::Result<()> {
                recent_file_id INTEGER PRIMARY KEY REFERENCES recent_files(id) ON DELETE CASCADE,
                line INTEGER NOT NULL CHECK (typeof(line) = 'integer' AND line BETWEEN 1 AND 9007199254740991),
                column INTEGER NOT NULL CHECK (typeof(column) = 'integer' AND column BETWEEN 1 AND 9007199254740991)
+             );
+             CREATE TABLE IF NOT EXISTS recent_file_pins (
+               recent_file_id INTEGER PRIMARY KEY REFERENCES recent_files(id) ON DELETE CASCADE
              );
              CREATE TABLE IF NOT EXISTS search_history (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -427,6 +455,41 @@ mod tests {
         (directory.join("project-tree.sqlite3"), directory)
     }
 
+    /// ピン留めのない旧DBを更新し、位置・順序を保って再起動と保存先検証へ引き継ぐ。
+    #[test]
+    fn upgrades_legacy_pins_and_validates_references() {
+        let (database_path, directory) = temporary_database_path();
+        super::prepare_new_database_file(&database_path).unwrap();
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute("DROP TABLE recent_file_pins", [])
+            .unwrap();
+        connection.execute("INSERT INTO recent_files(id, path, path_key, last_used) VALUES (7, 'C:/原稿.txt', 'c:/原稿.txt', 42)", []).unwrap();
+        connection
+            .execute("INSERT INTO recent_file_positions VALUES (7, 20, 8)", [])
+            .unwrap();
+        drop(connection);
+        super::validate_database_file(&database_path).unwrap();
+        let connection = super::initialize_database(database_path.clone()).unwrap();
+        connection
+            .execute("INSERT INTO recent_file_pins VALUES (7)", [])
+            .unwrap();
+        drop(connection);
+        let connection = super::initialize_database(database_path.clone()).unwrap();
+        assert_eq!(connection.query_row("SELECT f.last_used, p.line, p.column FROM recent_files f JOIN recent_file_positions p ON p.recent_file_id = f.id JOIN recent_file_pins pin ON pin.recent_file_id = f.id WHERE f.id = 7", [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))).unwrap(), (42, 20, 8));
+        super::validate_database_file(&database_path).unwrap();
+        assert!(!super::is_empty_database_file(&database_path).unwrap());
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF; UPDATE recent_file_pins SET recent_file_id = 99;",
+            )
+            .unwrap();
+        assert!(super::validate_database_file(&database_path).is_err());
+        assert!(!super::is_empty_database_file(&database_path).unwrap());
+        drop(connection);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     /// 位置テーブルがない旧DBの履歴を保ち、追加後の位置は移行検証でも保護する。
     #[test]
     fn upgrades_legacy_positions_and_validates_saved_positions() {
@@ -482,6 +545,9 @@ mod tests {
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute("DROP TABLE recent_file_positions", [])
+            .unwrap();
+        connection
+            .execute("DROP TABLE recent_file_pins", [])
             .unwrap();
         connection.execute("DROP TABLE recent_files", []).unwrap();
         drop(connection);

@@ -54,6 +54,7 @@ pub fn run() {
             project_tree::project_node_move,
             project_tree::project_file_authorize,
             project_tree::recent_files::recent_files_list,
+            project_tree::recent_files::recent_file_set_pinned,
             project_tree::search_history::search_history_list,
             project_tree::search_history::search_history_record,
             project_tree::search_history::search_history_remove,

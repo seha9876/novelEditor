@@ -265,6 +265,20 @@ test('終了は位置の書込完了を待ち、位置保存だけの失敗で�
   } finally { gate.release(); h.session.dispose() }
 })
 
+test('アプリ終了は検索履歴の保存が完了するまで窓を破棄しない', async () => {
+  const gate = deferred(), started = deferred()
+  const h = createPositionHarness()
+  h.searchHistoryFlush = async () => { started.release(); await gate.promise }
+  try {
+    await h.session.initializeRecovery()
+    const closing = createCloseHarness(h), operation = closing.close()
+    await started.promise
+    assert.ok(!closing.calls.includes('destroy'))
+    gate.release(); await operation
+    assert.ok(closing.calls.includes('destroy'))
+  } finally { gate.release(); h.session.dispose() }
+})
+
 test('履歴取得中に破棄されたセッションへ本文と編集位置の遅着結果を適用しない', async () => {
   const gate = deferred(), started = deferred()
   const h = createPositionHarness({ onFileAccessed: async () => { started.release(); await gate.promise } })
@@ -1023,6 +1037,7 @@ function createCloseHarness(harness) {
     flushDocumentSession: session.flush,
     clearRecoverySnapshot: async () => { calls.push('clear'); await session.clearRecoverySnapshot() },
     closeSearchWindow: async () => calls.push('search-close'),
+    searchController: { flushHistory: async () => { calls.push('search-history'); await harness.searchHistoryFlush?.() } },
     closeProjectTreeWindowForExit: async () => calls.push('tree-close'),
     appWindow: { destroy: async () => calls.push('destroy') },
     restoreAfterCloseFailure: () => calls.push('restore'),
@@ -1068,7 +1083,7 @@ for (const route of ['new', 'open', 'recent', 'tree', 'quick', 'search', 'close'
           assert.equal(h.recoveryWrites.length, writesBefore)
           assert.ok(!h.closing.calls.includes('destroy'))
         } else if (route === 'close') {
-          assert.deepEqual(h.closing.calls, ['publish', 'settings', 'preferences', 'clear', 'search-close', 'tree-close', 'destroy'])
+          assert.deepEqual(h.closing.calls, ['publish', 'settings', 'preferences', 'clear', 'search-close', 'search-history', 'tree-close', 'destroy'])
         } else {
           assert.equal(h.editor.getText(), route === 'new' ? '' : '保存済み本文')
           assert.equal(h.session.dirty.value, false)

@@ -292,6 +292,7 @@ const sidebarDisabled = computed(() => editorInteractionLocked.value || mainClos
 const sidebarSearch = useSidebarSearch({
   active: computed(() => visibleSidebarPanel.value === 'search'), editor, revision: documentRevision, path,
   conditions: searchController.conditions, snapshot: projectController.snapshot, disabled: sidebarDisabled, openFile: openProjectTreeFile,
+  prepareHistoryRecord: searchController.prepareHistoryRecord,
 })
 sidebarSearchController = sidebarSearch
 const sidebarHistory = useSidebarHistory({
@@ -456,6 +457,7 @@ async function handleCloseRequested(): Promise<void> {
       await showError('復元候補の削除', error)
     }
     await closeSearchWindow()
+    await searchController.flushHistory()
     await closeProjectTreeWindowForExit()
     await appWindow.destroy()
     destroyed = true
@@ -646,7 +648,7 @@ onBeforeUnmount(() => {
           <div v-else class="sidebar-inner"><p>プロジェクトは分離ウィンドウに表示しています。</p><VBtn variant="text" :disabled="projectTreeWindowDisabled" @click="openProjectTreeWindow">分離ウィンドウを表示</VBtn><VBtn variant="text" :disabled="projectTreeWindowDisabled" @click="dockProjectTreeWindow">メインへ戻す</VBtn></div>
         </div>
         <div v-if="visitedPanels.has('search')" v-show="activeSidebarPanel === 'search'" id="sidebar-search" :inert="activeSidebarPanel !== 'search'" class="sidebar-panel">
-          <SidebarSearchPanel :controller="sidebarSearch" :conditions="searchController.conditions.value" :scope-status="searchScope" :project-name="projectMenuProjects.find(project => project.id === projectMenuActiveProjectId)?.name || ''" :disabled="sidebarDisabled" @conditions="searchController.setSidebarConditions" @clear-scope="editor?.setSearchScope('clear')" />
+          <SidebarSearchPanel :controller="sidebarSearch" :conditions="searchController.conditions.value" :scope-status="searchScope" :project-name="projectMenuProjects.find(project => project.id === projectMenuActiveProjectId)?.name || ''" :disabled="sidebarDisabled" :history="searchController.history.value" @history="searchController.mutateHistory" @conditions="searchController.setSidebarConditions" @clear-scope="editor?.setSearchScope('clear')" />
         </div>
         <div v-if="visitedPanels.has('history')" v-show="activeSidebarPanel === 'history'" id="sidebar-history" :inert="activeSidebarPanel !== 'history'" class="sidebar-panel">
           <SidebarHistoryPanel :controller="sidebarHistory" :path="path" :disabled="sidebarDisabled" @manage="openHistoryManagement" />

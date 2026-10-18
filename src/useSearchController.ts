@@ -2,6 +2,7 @@
 import { ref, watch, type Ref } from 'vue'
 import { emitTo, listen } from '@tauri-apps/api/event'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { useSearchHistory, type SearchHistoryAction } from './searchHistory'
 import {
   SEARCH_COMMAND_EVENT,
   SEARCH_STATE_EVENT,
@@ -19,7 +20,7 @@ import {
 
 export type SearchEditorAdapter = {
   setSearch: (conditions: SearchConditions, active: boolean) => void
-  runSearch: (action: SearchAction) => void
+  runSearch: (action: SearchAction) => boolean
   getSearchScope: () => SearchScopeStatus
   setSearchScope: (action: SearchScopeAction) => boolean
   focus: () => void
@@ -55,6 +56,13 @@ export function useSearchController(options: SearchControllerOptions) {
   let unlistenSearchCommand: (() => void) | undefined
   let setupPromise: Promise<void> | null = null
   let disposed = false
+  const history = useSearchHistory(() => { void publishSearchState() })
+
+  /** メイン側のロックを再確認し、両画面からの履歴削除を同じキューへ送る。 */
+  function mutateHistory(action: SearchHistoryAction): void {
+    if (disposed || options.documentLocked.value || options.mainCloseInProgress.value) return
+    void history.mutate(action)
+  }
 
   /** 本文の検索結果と操作可否を配信する。revisionで古い配信の到着を区別する。 */
   async function publishSearchState(): Promise<void> {
@@ -70,6 +78,7 @@ export function useSearchController(options: SearchControllerOptions) {
       revision: ++searchStateRevision,
       focus: { ...searchFocus },
       error: searchWindowError,
+      history: { ...history.state.value, entries: history.state.value.entries.map(entry => ({ ...entry, conditions: { ...entry.conditions } })) },
     }
     try {
       await emitTo('search', SEARCH_STATE_EVENT, snapshot)
@@ -184,8 +193,11 @@ export function useSearchController(options: SearchControllerOptions) {
       void open('search')
       return
     }
-    if (changed) { appliedConditions = { ...searchSession.conditions }; options.editor.value?.setSearch(appliedConditions, searchWindowReady) }
-    options.editor.value?.runSearch(action)
+    if (changed || searchSession.conditions.replace !== appliedConditions.replace) {
+      appliedConditions = { ...searchSession.conditions }
+      options.editor.value?.setSearch(appliedConditions, searchWindowReady)
+    }
+    if (options.editor.value?.runSearch(action)) history.record(appliedConditions)
   }
 
   /** 入力と操作を同じ要求として処理し、操作時の条件を非同期の到着順へ依存させない。 */
@@ -200,6 +212,7 @@ export function useSearchController(options: SearchControllerOptions) {
       const result = searchSession.receive(command)
       if (!result.accepted) return
       conditions.value = { ...searchSession.conditions }
+      if (result.historyAction) mutateHistory(result.historyAction)
       if (result.scopeAction && options.editor.value) {
         if (!options.editor.value.setSearchScope(result.scopeAction)) {
           searchWindowError = options.editor.value.getSearchScope().reason
@@ -208,7 +221,7 @@ export function useSearchController(options: SearchControllerOptions) {
       }
       appliedConditions = { ...searchSession.conditions }
       options.editor.value?.setSearch(appliedConditions, true)
-      if (result.action) options.editor.value?.runSearch(result.action)
+      if (result.action && options.editor.value?.runSearch(result.action)) history.record(appliedConditions)
       if (command.type === 'close') {
         void close().catch((error: unknown) => options.showError('検索画面を閉じる操作', error))
         return
@@ -231,6 +244,7 @@ export function useSearchController(options: SearchControllerOptions) {
         return
       }
       unlistenSearchCommand = lateUnlisten
+      await history.load()
     })()
     setupPromise = setupRun
     try {
@@ -247,6 +261,7 @@ export function useSearchController(options: SearchControllerOptions) {
     unlistenSearchCommand = undefined
     stopDocumentLockWatch()
     searchWindowReady = false
+    await history.dispose()
     try {
       await close()
     } catch {
@@ -274,6 +289,10 @@ export function useSearchController(options: SearchControllerOptions) {
   }
 
   return {
+    history: history.state,
+    prepareHistoryRecord: history.prepareRecord,
+    mutateHistory,
+    flushHistory: history.flush,
     conditions,
     setSidebarConditions,
     setSidebarActive,

@@ -106,15 +106,33 @@ pub(crate) fn is_empty_database_file(database_path: &Path) -> Result<bool, Strin
     } else {
         0
     };
+    let search_count: i64 = if connection
+        .table_exists(None, "search_history")
+        .map_err(|e| e.to_string())?
+    {
+        connection
+            .query_row("SELECT COUNT(*) FROM search_history", [], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+    } else {
+        0
+    };
     Ok(project_count == 0
         && node_count == 0
         && state_count == 1
         && recent_count == 0
+        && search_count == 0
         && git_count == 0)
 }
 
 /// ツリー・履歴・Git管理の形式を読み取り専用で検査し、旧DBの追加テーブル欠損は許容する。
 fn validate_project_tree_schema(connection: &Connection) -> Result<(), String> {
+    if connection
+        .table_exists(None, "search_history")
+        .map_err(|e| e.to_string())?
+    {
+        connection.prepare("SELECT id, search, replacement, case_sensitive, regexp, last_used FROM search_history LIMIT 0")
+            .map_err(|error| database_error("検索履歴テーブルの形式が不正です", error))?;
+    }
     if connection
         .table_exists(None, "recent_file_positions")
         .map_err(|error| database_error("編集位置テーブルを確認できません", error))?
@@ -184,6 +202,20 @@ fn validate_project_tree_schema(connection: &Connection) -> Result<(), String> {
 /// 外部編集などで生じた参照切れや循環を、DB を修復・変更せずに拒否する。
 fn validate_project_tree_data(connection: &Connection) -> Result<(), String> {
     if connection
+        .table_exists(None, "search_history")
+        .map_err(|e| e.to_string())?
+    {
+        let invalid: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM search_history WHERE typeof(search) != 'text' OR search = ''
+             OR typeof(replacement) != 'text' OR typeof(case_sensitive) != 'integer' OR case_sensitive NOT IN (0, 1)
+             OR typeof(regexp) != 'integer' OR regexp NOT IN (0, 1) OR typeof(last_used) != 'integer' OR last_used < 1)",
+            [], |row| row.get(0),
+        ).map_err(|error| database_error("検索履歴の整合性を確認できません", error))?;
+        if invalid {
+            return Err("検索履歴に不正な値があります".into());
+        }
+    }
+    if connection
         .table_exists(None, "recent_file_positions")
         .map_err(|error| database_error("編集位置テーブルを確認できません", error))?
     {
@@ -242,7 +274,7 @@ fn validate_project_tree_data(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// 起動時に既存DBを検証し、旧DBには履歴・編集位置・Git管理テーブルを追加する。DB自体は新規作成しない。
+/// 起動時に既存DBを検証し、旧DBにはファイル・検索履歴、編集位置、Git管理テーブルを追加する。
 pub(super) fn initialize_database(database_path: PathBuf) -> Result<Connection, String> {
     let connection = Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(|error| format!("プロジェクトツリー DB を開けません: {error}"))?;
@@ -303,6 +335,15 @@ pub(super) fn create_schema(connection: &Connection) -> rusqlite::Result<()> {
                recent_file_id INTEGER PRIMARY KEY REFERENCES recent_files(id) ON DELETE CASCADE,
                line INTEGER NOT NULL CHECK (typeof(line) = 'integer' AND line BETWEEN 1 AND 9007199254740991),
                column INTEGER NOT NULL CHECK (typeof(column) = 'integer' AND column BETWEEN 1 AND 9007199254740991)
+             );
+             CREATE TABLE IF NOT EXISTS search_history (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               search TEXT NOT NULL CHECK (search != ''),
+               replacement TEXT NOT NULL,
+               case_sensitive INTEGER NOT NULL CHECK (case_sensitive IN (0, 1)),
+               regexp INTEGER NOT NULL CHECK (regexp IN (0, 1)),
+               last_used INTEGER NOT NULL CHECK (last_used > 0),
+               UNIQUE (search, replacement, case_sensitive, regexp)
              );",
     )
 }
@@ -340,6 +381,40 @@ mod tests {
     };
 
     static DATABASE_TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    /// 旧DBへの追加、再接続、移行先へのコピーでも条件を保ち、履歴だけのDBを空と判定しない。
+    #[test]
+    fn search_history_survives_upgrade_reopen_and_storage_copy() {
+        let (path, directory) = temporary_database_path();
+        super::prepare_new_database_file(&path).unwrap();
+        let db = Connection::open(&path).unwrap();
+        db.execute("DROP TABLE search_history", []).unwrap();
+        drop(db);
+        super::validate_database_file(&path).unwrap();
+        assert!(super::is_empty_database_file(&path).unwrap());
+        let db = super::initialize_database(path.clone()).unwrap();
+        db.execute("INSERT INTO search_history(search, replacement, case_sensitive, regexp, last_used) VALUES ('星', '', 0, 1, 1)", []).unwrap();
+        drop(db);
+        let destination = directory.join("moved.sqlite3");
+        fs::copy(&path, &destination).unwrap();
+        super::validate_database_file(&destination).unwrap();
+        assert!(!super::is_empty_database_file(&destination).unwrap());
+        let db = super::initialize_database(destination.clone()).unwrap();
+        assert_eq!(
+            db.query_row("SELECT search FROM search_history", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            "星"
+        );
+        db.execute_batch(
+            "PRAGMA ignore_check_constraints = ON; UPDATE search_history SET regexp = 2;",
+        )
+        .unwrap();
+        assert!(super::validate_database_file(&destination).is_err());
+        assert!(!super::is_empty_database_file(&destination).unwrap());
+        drop(db);
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     /// 一時的なテスト DB 保存先を用意する。
     fn temporary_database_path() -> (std::path::PathBuf, std::path::PathBuf) {

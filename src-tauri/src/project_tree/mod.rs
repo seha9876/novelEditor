@@ -13,6 +13,7 @@ mod ordering;
 mod projects;
 mod queries;
 pub(crate) mod recent_files;
+pub(crate) mod search_history;
 
 use database::initialize_database;
 

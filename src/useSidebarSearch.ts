@@ -12,10 +12,11 @@ import type { SearchConditions } from './searchSession'
 import type { DocumentEditorHandle } from './useDocumentSession'
 import type { ProjectTreeOpenRequest, ProjectTreeOpenResult } from './projectTreeWindow'
 
-export type SidebarMatch = TextMatch & { candidate: ProjectFileCandidate | null; path: string | null; revision: number; fingerprint: string; current: boolean }
+export type SidebarMatch = TextMatch & { candidate: ProjectFileCandidate | null; path: string | null; revision: number; fingerprint: string; current: boolean; conditions: SearchConditions }
 type Options = { active: Readonly<Ref<boolean>>; editor: Ref<DocumentEditorHandle | null>; revision: Ref<number>; path: Readonly<Ref<string | null>>
   conditions: Ref<SearchConditions>; snapshot: Readonly<Ref<ProjectTreeSnapshot>>; disabled: Readonly<Ref<boolean>>
-  openFile: (request: ProjectTreeOpenRequest) => Promise<void> }
+  openFile: (request: ProjectTreeOpenRequest) => Promise<void>
+  prepareHistoryRecord?: (conditions: SearchConditions) => () => void }
 
 /** 非表示・条件変更・本文変更を世代で無効化し、途中の結果を正常完了に見せない。 */
 export function useSidebarSearch(options: Options) {
@@ -32,7 +33,7 @@ export function useSidebarSearch(options: Options) {
   function invalidate(): void {
     cancel(); options.editor.value?.setSidebarMatches(options.revision.value, []); stale.value = !!results.value.length; errors.value = []
     if (!options.active.value) return
-    if (scope.value === 'document') { timer = setTimeout(() => { void search() }, 200) }
+    if (scope.value === 'document') { timer = setTimeout(() => { void search(false) }, 200) }
     else message.value = '条件・対象が変わりました。「検索」で読み直してください。'
   }
 
@@ -53,14 +54,15 @@ export function useSidebarSearch(options: Options) {
     return { text: file.text.replace(/\r\n|\r/g, '\n'), fingerprint: await fingerprintBytes(file.originalBytes) }
   }
 
-  /** 本文は入力追従、複数ファイルは明示操作で解析し、読込を同時2件に制限する。 */
-  async function search(): Promise<void> {
+  /** 自動検索は履歴へ記録せず、明示検索は条件検証後に記録する。読込は同時2件に制限する。 */
+  async function search(explicit = true): Promise<void> {
     if (disposed || !options.active.value || options.disabled.value || navigating.value) return
     cancel(); const own = generation, signal = new AbortController(); abort = signal
     const conditions = { ...options.conditions.value }, document = options.editor.value?.getDocumentSnapshot()
     results.value = []; errors.value = []; limited.value = false; stale.value = false; shown.value = 200; selected.value = 0
     if (!conditions.search) { message.value = '検索語を入力してください。'; return }
     if (!document) { message.value = '本文の準備ができていません。'; return }
+    const recordHistory = explicit ? options.prepareHistoryRecord?.(conditions) : undefined
     pending.value = true; message.value = '検索中です…'
     const matches: SidebarMatch[] = [], failures: string[] = []
     try {
@@ -68,6 +70,7 @@ export function useSidebarSearch(options: Options) {
       if (own !== generation || disposed) return
       const candidates: (ProjectFileCandidate | null)[] = scope.value === 'document' ? [null] : projectCandidates()
       if (!candidates.length) { message.value = 'このプロジェクトには検索するTXTが登録されていません。'; return }
+      if (scope.value !== 'document' || !document.scope || document.scope.from < document.scope.to) recordHistory?.()
       for (let index = 0; index < candidates.length; index += 2) {
         const batch = await Promise.allSettled(candidates.slice(index, index + 2).map(async candidate => {
           const current = !candidate || !!options.path.value && sameRecentFilePath(candidate.path, options.path.value)
@@ -84,7 +87,7 @@ export function useSidebarSearch(options: Options) {
               limit: 1000 - matches.length, scope: scope.value === 'document' ? document.scope : null }, signal.signal)
             if (own !== generation || disposed) return
             matches.push(...parsed.matches.map(match => ({ ...match, candidate: source.candidate, path: source.candidate?.path ?? options.path.value,
-              revision: source.current ? document.revision : -1, fingerprint: source.fingerprint, current: source.current })))
+              revision: source.current ? document.revision : -1, fingerprint: source.fingerprint, current: source.current, conditions })))
             if (parsed.limited || matches.length === 1000 && index + offset + 1 < candidates.length) { limited.value = true; break }
           } catch (error) { if (own !== generation) return; failures.push(`${candidate?.name || '現在の本文'}: ${String(error)}`) }
         }
@@ -110,6 +113,7 @@ export function useSidebarSearch(options: Options) {
     const match = results.value[index]
     if (!match || disposed || !options.active.value || stale.value || pending.value || navigating.value || options.disabled.value) return
     selected.value = index; navigating.value = true
+    const recordHistory = options.prepareHistoryRecord?.(match.conditions)
     try {
       if (match.current) {
         if (!options.editor.value?.revealRange({ revision: match.revision, from: match.from, to: match.to })) throw new Error('本文が変わりました。もう一度検索してください。')
@@ -125,6 +129,7 @@ export function useSidebarSearch(options: Options) {
         const document = options.editor.value?.getDocumentSnapshot()
         if (!document || !options.editor.value?.revealRange({ revision: document.revision, from: match.from, to: match.to })) throw new Error('本文へ移動できませんでした。')
       }
+      recordHistory?.()
     } catch (error) { errors.value = [String(error)]; stale.value = true }
     finally { navigating.value = false; requestId = null }
   }

@@ -316,7 +316,7 @@ mod tests {
             .unwrap();
     }
 
-    /// 原稿本文を含まない履歴テーブルも、ID・並び順・編集位置を保って保存先へ移す。
+    /// ファイル履歴・編集位置・検索条件も、IDと並び順を保って保存先へ移す。
     #[test]
     fn migrates_recent_files_with_stable_ids_and_order() {
         let directory = TestDirectory::new();
@@ -325,6 +325,7 @@ mod tests {
         crate::project_tree::prepare_new_database_file(&source.join(PROJECT_TREE_FILE)).unwrap();
         let connection = Connection::open(source.join(PROJECT_TREE_FILE)).unwrap();
         connection.execute_batch("INSERT INTO recent_files(id, path, path_key, last_used) VALUES (9, 'C:/原稿.txt', 'c:/原稿.txt', 2), (12, 'D:/原稿.txt', 'd:/原稿.txt', 1);").unwrap();
+        connection.execute("INSERT INTO search_history(id, search, replacement, case_sensitive, regexp, last_used) VALUES (5, '星', '', 1, 0, 3)", []).unwrap();
         connection
             .execute("INSERT INTO recent_file_positions VALUES (9, 120, 8)", [])
             .unwrap();
@@ -339,6 +340,9 @@ mod tests {
             !crate::project_tree::is_empty_database_file(&target.join(PROJECT_TREE_FILE)).unwrap()
         );
         let connection = Connection::open(target.join(PROJECT_TREE_FILE)).unwrap();
+        assert_eq!(connection.query_row("SELECT id, search, replacement, case_sensitive, regexp, last_used FROM search_history", [], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, bool>(3)?, row.get::<_, bool>(4)?, row.get::<_, i64>(5)?))
+        }).unwrap(), (5, "星".into(), "".into(), true, false, 3));
         assert_eq!(
             connection
                 .query_row(

@@ -237,10 +237,11 @@ function setSearch(conditions: SearchConditions, active: boolean): void {
   reportSearchStatus()
 }
 
-/** 別ウィンドウの要求を本文の選択とUndo履歴へ適用する。入力フォーカスは移動しない。 */
-function runSearch(action: SearchAction): void {
-  if (view) runEditorSearchAction(view, action)
+/** 別窓の要求を適用し、履歴へ記録できる受理済み操作か返す。フォーカスは移動しない。 */
+function runSearch(action: SearchAction): boolean {
+  const accepted = view ? runEditorSearchAction(view, action) : false
   reportSearchStatus()
+  return accepted
 }
 
 /** 検索窓へ渡す対象行と選択可否だけを返し、本文はEditorView内に保つ。 */

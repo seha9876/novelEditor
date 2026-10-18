@@ -1,4 +1,6 @@
 /** メインと検索ウィンドウで共有する条件。本文やファイルパスはイベントに含めない。 */
+import type { SearchHistoryAction, SearchHistoryState } from './searchHistory'
+
 export type SearchConditions = { search: string; replace: string; caseSensitive: boolean; regexp: boolean }
 export type SearchField = 'search' | 'replace'
 export type SearchAction = 'next' | 'previous' | 'replace' | 'replaceAll'
@@ -19,6 +21,7 @@ export const SEARCH_STATE_EVENT = 'editor-search-state'
 export type SearchCommand =
   | { type: 'ready'; sessionId: string }
   | { type: 'close'; sessionId: string; sequence: number; documentRevision: number; conditions?: SearchConditions }
+  | { type: 'history'; sessionId: string; sequence: number; documentRevision: number; conditions: SearchConditions; historyAction: SearchHistoryAction }
   | {
       type: 'scope'
       sessionId: string
@@ -47,9 +50,10 @@ export type SearchSnapshot = {
   revision: number
   focus: { field: SearchField; revision: number }
   error: string
+  history: SearchHistoryState
 }
 
-/** 検索条件の初期値を返す。条件はファイルへ保存せずアプリのセッション内だけで保持する。 */
+/** 入力欄の初期値を返す。保存された履歴は明示的に選ぶまで入力欄へ適用しない。 */
 export function createSearchConditions(): SearchConditions {
   return { search: '', replace: '', caseSensitive: false, regexp: false }
 }
@@ -86,12 +90,14 @@ export class SearchSession {
   }
 
   /** 最新条件を受け取り、同じ文書世代で操作可能な要求にだけ実行許可を返す。 */
-  receive(command: Exclude<SearchCommand, { type: 'ready' }>): { accepted: boolean; action?: SearchAction; scopeAction?: SearchScopeAction } {
+  receive(command: Exclude<SearchCommand, { type: 'ready' }>): { accepted: boolean; action?: SearchAction; scopeAction?: SearchScopeAction; historyAction?: SearchHistoryAction } {
     if (command.sessionId !== this.sessionId || command.sequence <= this.sequence) return { accepted: false }
     this.sequence = command.sequence
     if (command.conditions) this.conditions = { ...command.conditions }
     return {
       accepted: true,
+      historyAction: command.type === 'history' && !this.locked && command.documentRevision === this.documentRevision
+        ? command.historyAction : undefined,
       action: command.type === 'action' && !this.locked && command.documentRevision === this.documentRevision
         ? command.action : undefined,
       scopeAction: command.type === 'scope' && !this.locked && command.documentRevision === this.documentRevision
